@@ -1,0 +1,654 @@
+from __future__ import annotations
+
+import uuid
+from typing import cast
+
+from sqlalchemy import case, select, update
+from sqlalchemy.engine import CursorResult
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import joinedload
+
+from supportbot.api_idempotency import (
+    ApiIdempotencyCommand,
+    api_action_payload,
+    load_api_replay,
+)
+from supportbot.audit import record_event
+from supportbot.database import retry_sqlite_locks
+from supportbot.durable_work import enqueue_topic_reconciliation
+from supportbot.models import (
+    BlocklistEntry,
+    DeliveryOutbox,
+    Direction,
+    OperatorAction,
+    ReconciliationOutbox,
+    Ticket,
+    TicketMessage,
+    TicketStatus,
+    User,
+    WorkStatus,
+    utcnow,
+)
+from supportbot.service_types import (
+    DeliveryJob as DeliveryJob,
+)
+from supportbot.service_types import (
+    NotificationJob as NotificationJob,
+)
+from supportbot.service_types import (
+    TicketNotFoundError,
+    TicketView,
+)
+from supportbot.ticket_topic_service import TicketTopicService
+from supportbot.trace import get_trace_id
+
+
+class TicketLifecycleService(TicketTopicService):
+    @retry_sqlite_locks
+    async def close(
+        self,
+        *,
+        ticket_id: str,
+        operator_telegram_id: int,
+        idempotency_key: str | None = None,
+        notification_text: str | None = None,
+        notification_target_chat_id: int | None = None,
+        notification_idempotency_key: str | None = None,
+        notification_reply_markup: dict[str, object] | None = None,
+        api_idempotency: ApiIdempotencyCommand | None = None,
+    ) -> bool:
+        action_key = idempotency_key or f"close:{ticket_id}:{uuid.uuid4()}"
+        if api_idempotency is not None and action_key != api_idempotency.storage_key:
+            raise ValueError("API idempotency storage key mismatch")
+        notification_chat_id = notification_target_chat_id
+        if notification_text is not None and notification_chat_id is None:
+            raise ValueError("notification_target_chat_id is required for close notification")
+
+        async with self.database.session() as session:
+            replay = await load_api_replay(session, api_idempotency)
+            if replay is not None:
+                return replay
+            if await session.scalar(
+                select(OperatorAction.id).where(OperatorAction.idempotency_key == action_key)
+            ):
+                return False
+            ticket = await session.get(Ticket, ticket_id)
+            if ticket is None:
+                raise TicketNotFoundError(ticket_id)
+            transition_at = utcnow()
+            close_result = await session.execute(
+                update(Ticket)
+                .where(
+                    Ticket.id == ticket_id,
+                    Ticket.status != TicketStatus.CLOSED,
+                )
+                .values(
+                    status=TicketStatus.CLOSED,
+                    closed_at=transition_at,
+                    last_activity_at=transition_at,
+                    topic_provisioning_token=None,
+                    topic_provisioning_started_at=None,
+                )
+                .values(close_cycle=Ticket.close_cycle + 1)
+            )
+            if cast(CursorResult[object], close_result).rowcount != 1:
+                if api_idempotency is not None:
+                    session.add(
+                        OperatorAction(
+                            ticket_id=ticket.id,
+                            operator_telegram_id=operator_telegram_id,
+                            action="close_ticket",
+                            idempotency_key=action_key,
+                            payload=api_action_payload({}, command=api_idempotency, changed=False),
+                            result="completed",
+                            trace_id=get_trace_id(),
+                        )
+                    )
+                    try:
+                        await session.commit()
+                    except IntegrityError:
+                        await session.rollback()
+                        replay = await load_api_replay(session, api_idempotency)
+                        if replay is None:
+                            raise
+                        return replay
+                else:
+                    await session.rollback()
+                return False
+            session.add(
+                OperatorAction(
+                    ticket_id=ticket.id,
+                    operator_telegram_id=operator_telegram_id,
+                    action="close_ticket",
+                    idempotency_key=action_key,
+                    payload=api_action_payload({}, command=api_idempotency, changed=True),
+                    result="completed",
+                    trace_id=get_trace_id(),
+                )
+            )
+            if notification_text is not None:
+                assert notification_chat_id is not None
+                if not await self._is_blocked_in_session(session, notification_chat_id):
+                    delivery_key = notification_idempotency_key or f"{action_key}:notification"
+                    session.add(
+                        TicketMessage(
+                            ticket_id=ticket.id,
+                            direction=Direction.OPERATOR_TO_USER,
+                            channel="system",
+                            source_chat_id=None,
+                            source_message_id=None,
+                            content=notification_text,
+                        )
+                    )
+                    session.add(
+                        DeliveryOutbox(
+                            ticket_id=ticket.id,
+                            direction=Direction.OPERATOR_TO_USER,
+                            idempotency_key=delivery_key,
+                            payload={
+                                "kind": "send_text",
+                                "target_chat_id": notification_chat_id,
+                                "text": notification_text,
+                                **(
+                                    {"reply_markup": notification_reply_markup}
+                                    if notification_reply_markup is not None
+                                    else {}
+                                ),
+                            },
+                        )
+                    )
+            await enqueue_topic_reconciliation(
+                session, ticket_id=ticket.id, desired_status=TicketStatus.CLOSED.value
+            )
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                replay = await load_api_replay(session, api_idempotency)
+                if replay is not None:
+                    return replay
+                if await session.scalar(
+                    select(OperatorAction.id).where(OperatorAction.idempotency_key == action_key)
+                ):
+                    return False
+                raise
+        record_event(
+            "ticket_closed", ticket_id=ticket_id, operator_telegram_id=operator_telegram_id
+        )
+        return True
+
+    @retry_sqlite_locks
+    async def enqueue_rating(
+        self,
+        *,
+        ticket_id: str,
+        source_chat_id: int,
+        score: int,
+        close_cycle: int,
+        target_chat_id: int,
+        text: str,
+        idempotency_key: str,
+    ) -> bool:
+        if score not in range(1, 6):
+            raise ValueError("score must be between 1 and 5")
+
+        async with self.database.session() as session:
+            if await session.scalar(
+                select(DeliveryOutbox.id).where(DeliveryOutbox.idempotency_key == idempotency_key)
+            ):
+                return False
+            rating_guard = await session.execute(
+                update(Ticket)
+                .where(
+                    Ticket.id == ticket_id,
+                    Ticket.status == TicketStatus.CLOSED,
+                    Ticket.close_cycle == close_cycle,
+                )
+                .values(last_activity_at=utcnow())
+            )
+            if cast(CursorResult[object], rating_guard).rowcount != 1:
+                ticket_exists = await session.scalar(
+                    select(Ticket.id).where(Ticket.id == ticket_id)
+                )
+                await session.rollback()
+                if ticket_exists is None:
+                    raise TicketNotFoundError(ticket_id)
+                return False
+            session.add(
+                TicketMessage(
+                    ticket_id=ticket_id,
+                    direction=Direction.USER_TO_OPERATOR,
+                    channel="rating",
+                    content=f"{score}/5",
+                    media={"rating": score},
+                    rating_cycle=close_cycle,
+                    source_chat_id=source_chat_id,
+                    source_message_id=None,
+                )
+            )
+            session.add(
+                DeliveryOutbox(
+                    ticket_id=ticket_id,
+                    direction=Direction.USER_TO_OPERATOR,
+                    idempotency_key=idempotency_key,
+                    payload={
+                        "kind": "send_text",
+                        "target_chat_id": target_chat_id,
+                        "text": text,
+                    },
+                )
+            )
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                duplicate_delivery = await session.scalar(
+                    select(DeliveryOutbox.id).where(
+                        DeliveryOutbox.idempotency_key == idempotency_key
+                    )
+                )
+                duplicate_rating = await session.scalar(
+                    select(TicketMessage.id).where(
+                        TicketMessage.ticket_id == ticket_id,
+                        TicketMessage.rating_cycle == close_cycle,
+                    )
+                )
+                if duplicate_delivery is not None or duplicate_rating is not None:
+                    return False
+                raise
+            return True
+
+    @retry_sqlite_locks
+    async def close_all(
+        self, *, operator_telegram_id: int, idempotency_key: str
+    ) -> list[TicketView]:
+        async with self.database.session() as session:
+            if await session.scalar(
+                select(OperatorAction.id).where(OperatorAction.idempotency_key == idempotency_key)
+            ):
+                return []
+            session.add(
+                OperatorAction(
+                    operator_telegram_id=operator_telegram_id,
+                    action="close_all",
+                    idempotency_key=idempotency_key,
+                    result="completed",
+                    trace_id=get_trace_id(),
+                )
+            )
+            try:
+                await session.flush()
+            except IntegrityError:
+                await session.rollback()
+                if await session.scalar(
+                    select(OperatorAction.id).where(
+                        OperatorAction.idempotency_key == idempotency_key
+                    )
+                ):
+                    return []
+                raise
+
+            transition_at = utcnow()
+            close_result = await session.execute(
+                update(Ticket)
+                .where(Ticket.status != TicketStatus.CLOSED)
+                .values(
+                    status=TicketStatus.CLOSED,
+                    closed_at=transition_at,
+                    last_activity_at=transition_at,
+                    close_cycle=Ticket.close_cycle + 1,
+                    topic_provisioning_token=None,
+                    topic_provisioning_started_at=None,
+                )
+                .returning(Ticket.id)
+            )
+            ticket_ids = [row.id for row in close_result.all()]
+            views: list[TicketView] = []
+            if ticket_ids:
+                trace_id = get_trace_id()
+                session.add_all(
+                    [
+                        OperatorAction(
+                            ticket_id=ticket_id,
+                            operator_telegram_id=operator_telegram_id,
+                            action="close_ticket",
+                            idempotency_key=f"{idempotency_key}:{ticket_id}",
+                            result="completed",
+                            trace_id=trace_id,
+                        )
+                        for ticket_id in ticket_ids
+                    ]
+                )
+                await session.execute(
+                    update(ReconciliationOutbox)
+                    .where(
+                        ReconciliationOutbox.kind == "telegram_topic",
+                        ReconciliationOutbox.ticket_id.in_(ticket_ids),
+                    )
+                    .values(
+                        payload={"desired_status": TicketStatus.CLOSED.value},
+                        status=WorkStatus.PENDING,
+                        attempt_count=0,
+                        next_attempt_at=transition_at,
+                        claimed_at=None,
+                        claim_token=None,
+                        delivered_at=None,
+                        last_error=None,
+                    )
+                )
+                queued_ticket_ids = set(
+                    (
+                        await session.scalars(
+                            select(ReconciliationOutbox.ticket_id).where(
+                                ReconciliationOutbox.kind == "telegram_topic",
+                                ReconciliationOutbox.ticket_id.in_(ticket_ids),
+                            )
+                        )
+                    ).all()
+                )
+                session.add_all(
+                    [
+                        ReconciliationOutbox(
+                            idempotency_key=f"topic:{ticket_id}",
+                            kind="telegram_topic",
+                            ticket_id=ticket_id,
+                            payload={"desired_status": TicketStatus.CLOSED.value},
+                        )
+                        for ticket_id in ticket_ids
+                        if ticket_id not in queued_ticket_ids
+                    ]
+                )
+                tickets = list(
+                    (
+                        await session.scalars(
+                            select(Ticket)
+                            .options(joinedload(Ticket.user).selectinload(User.identities))
+                            .where(Ticket.id.in_(ticket_ids))
+                            .order_by(Ticket.id)
+                        )
+                    ).all()
+                )
+                views = [self._loaded_ticket_view(ticket) for ticket in tickets]
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                if await session.scalar(
+                    select(OperatorAction.id).where(
+                        OperatorAction.idempotency_key == idempotency_key
+                    )
+                ):
+                    return []
+                raise
+        for view in views:
+            record_event(
+                "ticket_closed",
+                ticket_id=view.id,
+                operator_telegram_id=operator_telegram_id,
+            )
+        return views
+
+    @retry_sqlite_locks
+    async def block(
+        self,
+        *,
+        telegram_user_id: int,
+        operator_telegram_id: int,
+        ticket_id: str | None = None,
+        reason: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> bool:
+        action_key = idempotency_key or f"block:{telegram_user_id}:{uuid.uuid4()}"
+        async with self.database.session() as session:
+            if await session.scalar(
+                select(OperatorAction.id).where(OperatorAction.idempotency_key == action_key)
+            ):
+                return False
+            entry = await session.get(BlocklistEntry, telegram_user_id)
+            if entry is None:
+                session.add(
+                    BlocklistEntry(
+                        telegram_user_id=telegram_user_id,
+                        blocked_by_telegram_id=operator_telegram_id,
+                        reason=reason,
+                    )
+                )
+            session.add(
+                OperatorAction(
+                    ticket_id=ticket_id,
+                    operator_telegram_id=operator_telegram_id,
+                    action="block_user",
+                    idempotency_key=action_key,
+                    result="completed",
+                    trace_id=get_trace_id(),
+                )
+            )
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                if await session.scalar(
+                    select(OperatorAction.id).where(OperatorAction.idempotency_key == action_key)
+                ):
+                    return False
+                raise
+        record_event(
+            "user_blocked",
+            ticket_id=ticket_id,
+            operator_telegram_id=operator_telegram_id,
+        )
+        return entry is None
+
+    @retry_sqlite_locks
+    async def unblock(
+        self,
+        *,
+        telegram_user_id: int,
+        operator_telegram_id: int | None = None,
+        ticket_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> bool:
+        action_key = idempotency_key or f"unblock:{telegram_user_id}:{uuid.uuid4()}"
+        async with self.database.session() as session:
+            if await session.scalar(
+                select(OperatorAction.id).where(OperatorAction.idempotency_key == action_key)
+            ):
+                return False
+            entry = await session.get(BlocklistEntry, telegram_user_id)
+            if entry is not None:
+                await session.delete(entry)
+            if operator_telegram_id is not None:
+                session.add(
+                    OperatorAction(
+                        ticket_id=ticket_id,
+                        operator_telegram_id=operator_telegram_id,
+                        action="unblock_user",
+                        idempotency_key=action_key,
+                        result="completed",
+                        trace_id=get_trace_id(),
+                    )
+                )
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                if operator_telegram_id is not None and await session.scalar(
+                    select(OperatorAction.id).where(OperatorAction.idempotency_key == action_key)
+                ):
+                    return False
+                raise
+        if operator_telegram_id is not None:
+            record_event(
+                "user_unblocked",
+                ticket_id=ticket_id,
+                operator_telegram_id=operator_telegram_id,
+            )
+        return entry is not None
+
+    async def list_tickets(
+        self, *, status: TicketStatus | None, limit: int, offset: int
+    ) -> list[TicketView]:
+        async with self.database.session() as session:
+            statement = (
+                select(Ticket)
+                .options(joinedload(Ticket.user).selectinload(User.identities))
+                .order_by(Ticket.last_activity_at.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+            if status is not None:
+                statement = statement.where(Ticket.status == status)
+            tickets = list((await session.scalars(statement)).all())
+            return [self._loaded_ticket_view(ticket) for ticket in tickets]
+
+    @retry_sqlite_locks
+    async def reopen(
+        self,
+        *,
+        ticket_id: str,
+        operator_telegram_id: int,
+        idempotency_key: str,
+        api_idempotency: ApiIdempotencyCommand | None = None,
+    ) -> bool:
+        if api_idempotency is not None and idempotency_key != api_idempotency.storage_key:
+            raise ValueError("API idempotency storage key mismatch")
+        async with self.database.session() as session:
+            replay = await load_api_replay(session, api_idempotency)
+            if replay is not None:
+                return replay
+            if await session.scalar(
+                select(OperatorAction.id).where(OperatorAction.idempotency_key == idempotency_key)
+            ):
+                return False
+            ticket = await session.get(Ticket, ticket_id)
+            if ticket is None:
+                raise TicketNotFoundError(ticket_id)
+            reopen_result = await session.execute(
+                update(Ticket)
+                .where(
+                    Ticket.id == ticket_id,
+                    Ticket.status == TicketStatus.CLOSED,
+                )
+                .values(
+                    status=case(
+                        (Ticket.topic_id.is_not(None), TicketStatus.OPEN),
+                        else_=TicketStatus.PROVISIONING,
+                    ),
+                    closed_at=None,
+                    last_activity_at=utcnow(),
+                )
+            )
+            if cast(CursorResult[object], reopen_result).rowcount != 1:
+                if api_idempotency is not None:
+                    session.add(
+                        OperatorAction(
+                            ticket_id=ticket.id,
+                            operator_telegram_id=operator_telegram_id,
+                            action="reopen_ticket",
+                            idempotency_key=idempotency_key,
+                            payload=api_action_payload({}, command=api_idempotency, changed=False),
+                            result="completed",
+                            trace_id=get_trace_id(),
+                        )
+                    )
+                    try:
+                        await session.commit()
+                    except IntegrityError:
+                        await session.rollback()
+                        replay = await load_api_replay(session, api_idempotency)
+                        if replay is None:
+                            raise
+                        return replay
+                else:
+                    await session.rollback()
+                return False
+            session.add(
+                OperatorAction(
+                    ticket_id=ticket.id,
+                    operator_telegram_id=operator_telegram_id,
+                    action="reopen_ticket",
+                    idempotency_key=idempotency_key,
+                    payload=api_action_payload({}, command=api_idempotency, changed=True),
+                    result="completed",
+                    trace_id=get_trace_id(),
+                )
+            )
+            await enqueue_topic_reconciliation(
+                session, ticket_id=ticket.id, desired_status=TicketStatus.OPEN.value
+            )
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                replay = await load_api_replay(session, api_idempotency)
+                if replay is not None:
+                    return replay
+                if await session.scalar(
+                    select(OperatorAction.id).where(
+                        OperatorAction.idempotency_key == idempotency_key
+                    )
+                ):
+                    return False
+                raise
+        record_event(
+            "ticket_reopened", ticket_id=ticket_id, operator_telegram_id=operator_telegram_id
+        )
+        return True
+
+    async def queue_all_topic_reconciliations(self) -> int:
+        async with self.database.session() as session:
+            ticket_ids = list((await session.scalars(select(Ticket.id))).all())
+            if not ticket_ids:
+                return 0
+            now = utcnow()
+            await session.execute(
+                update(ReconciliationOutbox)
+                .where(
+                    ReconciliationOutbox.kind == "telegram_topic",
+                    ReconciliationOutbox.ticket_id.in_(ticket_ids),
+                )
+                .values(
+                    payload={"reason": "bulk_sync"},
+                    status=WorkStatus.PENDING,
+                    attempt_count=0,
+                    next_attempt_at=now,
+                    claimed_at=None,
+                    claim_token=None,
+                    delivered_at=None,
+                    last_error=None,
+                )
+            )
+            queued_ticket_ids = set(
+                (
+                    await session.scalars(
+                        select(ReconciliationOutbox.ticket_id).where(
+                            ReconciliationOutbox.kind == "telegram_topic",
+                            ReconciliationOutbox.ticket_id.in_(ticket_ids),
+                        )
+                    )
+                ).all()
+            )
+            session.add_all(
+                [
+                    ReconciliationOutbox(
+                        idempotency_key=f"topic:{ticket_id}",
+                        kind="telegram_topic",
+                        ticket_id=ticket_id,
+                        payload={"reason": "bulk_sync"},
+                    )
+                    for ticket_id in ticket_ids
+                    if ticket_id not in queued_ticket_ids
+                ]
+            )
+            await session.commit()
+            return len(ticket_ids)
+
+    async def list_tickets_with_topics(self) -> list[TicketView]:
+        async with self.database.session() as session:
+            statement = (
+                select(Ticket)
+                .options(joinedload(Ticket.user).selectinload(User.identities))
+                .where(Ticket.topic_id.is_not(None))
+            )
+            tickets = list((await session.scalars(statement)).all())
+            return [self._loaded_ticket_view(ticket) for ticket in tickets]

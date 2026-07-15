@@ -1,0 +1,123 @@
+services:
+  postgres:
+    image: postgres:16.14-alpine3.22@sha256:786dab398303b8ce7cb76b407bb21ef2e4dfbbbd4c6abcf3d29b3130467ffdbc
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777,nosuid,nodev,noexec
+    stop_grace_period: 60s
+    ports:
+      - "${POSTGRES_PUBLISH_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-supportbot}
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD must be set}
+      POSTGRES_MIGRATION_USER: ${POSTGRES_MIGRATION_USER:-supportbot_migrator}
+      POSTGRES_MIGRATION_PASSWORD: ${POSTGRES_MIGRATION_PASSWORD:?POSTGRES_MIGRATION_PASSWORD must be set}
+      POSTGRES_RUNTIME_USER: ${POSTGRES_RUNTIME_USER:-supportbot_runtime}
+      POSTGRES_RUNTIME_PASSWORD: ${POSTGRES_RUNTIME_PASSWORD:?POSTGRES_RUNTIME_PASSWORD must be set}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  postgres-provision:
+    image: "${APP_IMAGE:?APP_IMAGE must be set to an immutable registry image}"
+    restart: "no"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=16m,mode=1777,nosuid,nodev,noexec
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["python", "-m", "supportbot.postgres_provision"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-supportbot}
+      POSTGRES_ADMIN_USER: ${POSTGRES_ADMIN_USER:-postgres}
+      POSTGRES_ADMIN_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD must be set}
+      POSTGRES_MIGRATION_USER: ${POSTGRES_MIGRATION_USER:-supportbot_migrator}
+      POSTGRES_MIGRATION_PASSWORD: ${POSTGRES_MIGRATION_PASSWORD:?POSTGRES_MIGRATION_PASSWORD must be set}
+      POSTGRES_RUNTIME_USER: ${POSTGRES_RUNTIME_USER:-supportbot_runtime}
+      POSTGRES_RUNTIME_PASSWORD: ${POSTGRES_RUNTIME_PASSWORD:?POSTGRES_RUNTIME_PASSWORD must be set}
+
+  postgres-migrate:
+    image: "${APP_IMAGE:?APP_IMAGE must be set to an immutable registry image}"
+    restart: "no"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=16m,mode=1777,nosuid,nodev,noexec
+    depends_on:
+      postgres-provision:
+        condition: service_completed_successfully
+    command: ["python", "-m", "supportbot.migrations"]
+    environment:
+      MIGRATION_DATABASE_URL: postgresql+asyncpg://${POSTGRES_MIGRATION_USER:-supportbot_migrator}:${POSTGRES_MIGRATION_PASSWORD:?POSTGRES_MIGRATION_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-supportbot}
+      POSTGRES_ADMIN_PASSWORD: ""
+      POSTGRES_MIGRATION_PASSWORD: ""
+      POSTGRES_RUNTIME_PASSWORD: ""
+
+  supportbot:
+    image: "${APP_IMAGE:?APP_IMAGE must be set to an immutable registry image}"
+    env_file: "${SUPPORTBOT_ENV_FILE:-/opt/supportbot/.env}"
+    ports:
+      - "${API_PUBLISH_HOST:-127.0.0.1}:${API_PORT:-8080}:${API_PORT:-8080}"
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    tmpfs:
+      - /tmp:size=64m,mode=1777,nosuid,nodev,noexec
+    stop_grace_period: 90s
+    volumes:
+      - support_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-provision:
+        condition: service_completed_successfully
+      postgres-migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_RUNTIME_USER:-supportbot_runtime}:${POSTGRES_RUNTIME_PASSWORD:?POSTGRES_RUNTIME_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-supportbot}
+      MIGRATION_DATABASE_URL: ""
+      MIGRATIONS_AT_STARTUP: "false"
+      POSTGRES_ADMIN_PASSWORD: ""
+      POSTGRES_MIGRATION_PASSWORD: ""
+      POSTGRES_RUNTIME_PASSWORD: ""
+
+    healthcheck:
+      test: ["CMD", "python", "-m", "supportbot.healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  postgres_data:
+    name: "${POSTGRES_VOLUME_NAME:-suppsystem_postgres_data}"
+
+  support_data:
+    name: suppsystem_support_data

@@ -1,14 +1,12 @@
 # Техническое устройство
 
-Документ описывает архитектуру, модель данных и гарантии Telegram Support Platform. Установка,
-настройка и обслуживание описаны в [руководстве по эксплуатации](OPERATIONS.md).
+Архитектура, модель данных и гарантии системы. Установка и обслуживание описаны в
+[руководстве по эксплуатации](OPERATIONS.md).
 
 ## Назначение и границы
 
-Система связывает личный чат клиента с отдельной темой закрытой Telegram Forum-группы. Telegram
-служит клиентским интерфейсом и рабочим местом операторов. REST API — опциональное расширение;
-Remnawave и notification webhook — поддерживаемые опциональные интеграции, выключенные по
-умолчанию.
+Система связывает личный чат клиента с темой закрытой Telegram Forum-группы. Operator API,
+Remnawave и notification webhook — поддерживаемые опциональные компоненты.
 
 Архитектура рассчитана на один процесс приложения. PostgreSQL можно использовать вместо SQLite,
 но несколько одновременно работающих экземпляров пока не поддерживаются.
@@ -31,42 +29,21 @@ Operator REST API ────────────────────�
                                    Telegram       product webhook
 ```
 
-Основные модули в `src/supportbot`:
+Основные части `src/supportbot`:
 
-| Модуль | Ответственность |
+| Часть | Ответственность |
 | --- | --- |
-| `__main__.py` | запуск, связывание компонентов и корректное завершение |
-| `telegram_adapter.py` | facade и регистрация aiogram handlers |
-| `telegram_user_handlers.py` | личные сообщения клиента и оценки |
-| `telegram_operator_handlers.py` | ответы, команды операторов и администраторов |
-| `telegram_topic_manager.py` | создание, восстановление и синхронизация Forum-тем |
-| `telegram_constants.py` | тексты и наборы Telegram-команд |
-| `telegram_message_utils.py` | разбор команд, metadata медиа и rating UI |
-| `telegram_lifecycle.py` | запуск polling и упорядоченное завершение Telegram runtime |
-| `telegram_locks.py` | ограниченные по времени per-ticket locks |
-| `services.py` | ticket lifecycle, команды и стабильный публичный facade |
-| `ticket_service_base.py` | общие identity/view/blocklist persistence primitives |
-| `ticket_topic_service.py` | открытие тикета, topic binding, recovery и ticket queries |
-| `ticket_lifecycle_service.py` | close/reopen, rating и blocklist use cases |
-| `ticket_message_service.py` | атомарное сохранение сообщений и постановка в outbox |
-| `outbox_repository.py` | claim-fenced state machines очередей |
-| `delivery.py` | доставка сообщений из durable outbox |
-| `panel.py` | стабильный публичный facade Remnawave use cases |
-| `panel_types.py` | контракты панели и чистое преобразование ответов |
-| `panel_action_service.py` | публичные lookup/mutation use cases |
-| `panel_reconciliation_service.py` | unknown outcome и startup recovery |
-| `panel_persistence_service.py` | reservation, audit и notification intent persistence |
-| `remnawave.py` | HTTP-клиент панели |
-| `api.py` | сборка API, authentication, middleware и error handling |
-| `api_routes.py` | health, документация и operator endpoints |
-| `api_schemas.py` | HTTP DTO и валидация входных данных |
+| `telegram_*` | handlers, Forum-темы и lifecycle Telegram runtime |
+| `ticket_*`, `services.py` | тикеты, сообщения, роли и blocklist |
+| `outbox_repository.py`, `delivery.py` | durable очереди и доставка |
+| `panel*`, `remnawave.py` | Remnawave use cases, recovery и HTTP-клиент |
+| `api*` | Operator API, DTO, middleware и endpoints |
 | `notification_webhook.py` | доставка событий во внешний backend |
-| `models.py` | ORM-модель данных |
-| `database.py` | соединения и настройки базы |
-| `runtime_health.py` | readiness runtime-компонентов |
+| `models.py`, `database.py` | ORM-модели и соединения с БД |
+| `__main__.py`, `runtime_health.py` | сборка приложения, shutdown и readiness |
 
-Transport-слой преобразует вход и выход, но не владеет правилами тикетов. Прикладные сервисы не
-должны зависеть от aiogram или FastAPI. Эти границы контролируются architecture-тестами.
+Transport-слой не владеет правилами тикетов, а прикладные сервисы не зависят от aiogram или
+FastAPI. Границы контролируются architecture-тестами.
 
 ## Жизненный цикл тикета
 
@@ -76,9 +53,8 @@ Transport-слой преобразует вход и выход, но не вл
 - `open` — обращение открыто;
 - `closed` — обращение закрыто, история и тема сохранены.
 
-Для пользователя существует не более одного тикета, а `topic_id` уникален. Новое сообщение
-клиента или ответ оператора в закрытом тикете повторно открывает его. Каждый цикл закрытия имеет
-свой номер, поэтому оценку нельзя записать дважды в одном цикле.
+У пользователя не более одного тикета, а `topic_id` уникален. Сообщение в закрытом тикете
+открывает его снова. Номер цикла закрытия не позволяет поставить оценку дважды.
 
 Создание темы защищено provisioning token. Если результат Telegram-вызова неизвестен, claim
 сохраняется для ручной проверки: автоматический повтор мог бы создать вторую тему.
@@ -105,9 +81,8 @@ waiting_topic ──> pending ──> processing ──> delivered
 - проверку blocklist до создания тикета и перед исходящей доставкой;
 - дедупликацию Telegram updates и API-мутаций по уникальным ключам.
 
-Доставка имеет семантику **at-least-once**. Telegram не поддерживает клиентский idempotency key.
-Если процесс завершится после успешного `send`, но до commit результата, возможен дубль. Это
-сознательный выбор в пользу отсутствия намеренной потери сообщения.
+Доставка — **at-least-once**. Telegram не поддерживает idempotency key, поэтому сбой между `send`
+и commit может дать дубль; это исключает намеренную потерю сообщения.
 
 ## Модель данных
 
@@ -124,30 +99,24 @@ waiting_topic ──> pending ──> processing ──> delivered
 | `operator_actions` | аудит и состояние операторских действий |
 | `blocklist` | заблокированные Telegram-пользователи |
 
-Схема развивается миграциями Alembic. Для SQLite и обратной совместимости приложение по умолчанию
-выполняет `upgrade head` при старте. Production PostgreSQL перед запуском приложения выполняет
-миграции в отдельном one-shot `postgres-migrate`, а `MIGRATIONS_AT_STARTUP=false` не оставляет
-migration credential в долгоживущем runtime-контейнере. Проверка миграций сравнивает конечную схему
-с ORM metadata. `MIGRATION_DATABASE_URL` по умолчанию совпадает с `DATABASE_URL` вне production
-Compose.
+Схема развивается миграциями Alembic. SQLite по умолчанию выполняет `upgrade head` при старте.
+Production PostgreSQL использует отдельный one-shot `postgres-migrate`, поэтому migration
+credential не попадает в runtime-контейнер. Вне production Compose `MIGRATION_DATABASE_URL` по
+умолчанию совпадает с `DATABASE_URL`.
 
-Production PostgreSQL использует три разные роли:
+Production PostgreSQL разделяет роли:
 
 - bootstrap-admin существует только для инициализации кластера и one-shot provisioning service;
-- migration role владеет схемой `public` и объектами Alembic, но не имеет cluster-superuser,
-  `CREATEDB`, `CREATEROLE`, replication или bypass RLS; `CREATE` ограничен одной application DB и
-  нужен для schema restore;
+- migration role владеет схемой и Alembic без cluster-level привилегий;
 - runtime role имеет только `CONNECT`, `USAGE`, DML таблиц и необходимые права sequences без
   владения схемой и DDL.
 
-Provisioning идемпотентно переносит существующие объекты legacy-инсталляции под migration-owner,
-обновляет пароли/ограничения ролей и default privileges. Затем `postgres-migrate` применяет Alembic.
-`supportbot` не запускается, пока обе one-shot операции не завершились успешно.
+Provisioning идемпотентно настраивает роли, ownership и default privileges; затем
+`postgres-migrate` применяет Alembic. Приложение ждёт успешного завершения обеих операций.
 
-`last_activity_at` изменяется вместе с сообщениями, заметками, оценками и переходами
-close/reopen. Списки тикетов сортируются по этому полю. Пользователь и его identities загружаются
-через joined/select-in eager loading, поэтому число SQL-запросов listing не растёт вместе с числом
-тикетов.
+`last_activity_at` обновляется сообщениями, заметками, оценками и переходами close/reopen и
+используется для сортировки тикетов. Eager loading не даёт числу SQL-запросов расти вместе со
+списком.
 
 SQLite использует foreign keys, WAL и `busy_timeout=5000` на каждом соединении. Временная
 конкуренция записи обрабатывается ограниченными повторными попытками.
@@ -162,9 +131,8 @@ SQLite использует foreign keys, WAL и `busy_timeout=5000` на каж
 | `operator` | полный доступ ко всем операторским командам в текущей версии |
 | `operator_ro` | только `/info` и `/subinfo` |
 
-Сейчас full admin и operator имеют одинаковые права. Разделение ролей сохранено для будущего
-ограничения операторских полномочий. Команды `/stopall`, `/synctopics`, `/block` и `/unblock`
-требуют full access, которым сейчас обладают обе эти роли.
+Сейчас `full_admin` и `operator` имеют одинаковый full access; разделение ролей сохранено для
+будущего ограничения полномочий.
 
 ## Operator API
 
@@ -180,16 +148,12 @@ API включается отдельно, принимает администр
 | `POST /api/v1/tickets/{ticket_id}/close` | закрытие тикета |
 | `POST /api/v1/tickets/{ticket_id}/reopen` | повторное открытие |
 
-`/docs` и `/openapi.json` доступны при включённом API и защищены тем же токеном. Реализованы
-process-local rate limit, защита авторизации, безопасный error envelope, trace ID и аудит мутаций.
-Idempotency является durable: `(operation, resource, key)` связан с fingerprint смыслового payload
-и сохранённым ответом. Точный retry воспроизводит ответ, несовпадающий payload получает `409`.
-Forwarded client IP учитывается только от настроенных trusted proxies; цепочка разбирается справа
-налево до ближайшего недоверенного hop, а edge Nginx отбрасывает присланную клиентом цепочку.
+`/docs` и `/openapi.json` защищены тем же токеном. API имеет process-local rate limit, trace ID,
+аудит и durable idempotency: точный retry воспроизводит сохранённый ответ, а другой payload с тем
+же ключом получает `409`. Forwarded client IP принимается только от trusted proxies.
 
-Uvicorn task находится под общей supervision с Telegram polling. Неожиданное завершение API не
-теряется в фоне, а переводит API health в degraded и завершает общий процесс. Graceful shutdown
-сначала закрывает ingress и дожидается workers, затем закрывает Telegram/HTTP sessions и БД.
+Uvicorn и Telegram polling работают под общей supervision. При graceful shutdown сначала
+закрывается ingress и дренируются workers, затем — sessions и БД.
 
 ## Remnawave
 
@@ -213,33 +177,28 @@ worker после задержки только читает текущее со
   сохраняются;
 - `/resetdevices` проверяет, что список HWID-устройств пуст.
 
-После ограниченной серии сверок результат получает одну из трёх классификаций: точное ожидаемое
-состояние даёт `completed`, доказанно неизменившееся состояние — `not_applied`, а конфликтующее или
-недостаточное состояние — `inconclusive`. В последнем случае действие остаётся `unknown`, и новые
-мутации тикета блокируются. Full admin может классифицировать его командой
+Сверка даёт `completed`, `not_applied` или `inconclusive`. В последнем случае действие остаётся
+`unknown`, а новые мутации тикета блокируются. Full admin может классифицировать его командой
 `/resolvepanel <operator_action_uuid> applied|not_applied` только после независимой проверки.
 Команда не повторяет мутацию, выполняет fenced first-writer-wins переход и сохраняет решение,
 actor, время и command key в аудите. Только для подтверждённого `/revokelink applied` выполняется
 read-only lookup: текущая ссылка нужна, чтобы завершить заранее созданный notification intent.
 
-Если процесс завершился до фиксации задания сверки, startup recovery знает, что внешний вызов ещё
-не начинался. Недоступность и некорректные read-ответы Remnawave повторяются с backoff; после 20
-неудач действие становится `inconclusive` и оператор получает уведомление. Повреждённый локальный
-payload сразу переводится в `inconclusive`. Ни один из этих случаев не трактуется как `not_applied`.
+Недоступные и некорректные read-ответы повторяются с backoff; после 20 неудач действие становится
+`inconclusive`. Повреждённый локальный payload получает тот же статус. Эти случаи никогда не
+трактуются как `not_applied`.
 
 `/revokelink` заранее создаёт durable notification intent. Успех не финализируется, пока
 уведомление не готово к доставке, поэтому рестарт не приводит к повторному revoke.
 
 ## Notification webhook
 
-Worker доставляет события из `notification_outbox` во внешний backend. Запрос подписывается
-HMAC-SHA256: подпись вычисляется для `<timestamp>.<raw-body>` и передаётся в
-`X-Support-Signature` вместе с `X-Support-Timestamp` и `X-Support-Event-Id`. Повторы различают
-временные и постоянные ошибки, учитывают `Retry-After` и сохраняют одинаковые body и `event_id`.
+Worker доставляет `notification_outbox` во внешний backend. HMAC-SHA256 от
+`<timestamp>.<raw-body>` передаётся с timestamp и event ID. Повторы учитывают тип ошибки и
+`Retry-After`, сохраняя body и `event_id`.
 
-Доставка имеет семантику **at-least-once**: если backend принял событие, а приложение не успело
-зафиксировать ответ, событие будет отправлено повторно. Получатель обязан атомарно
-дедуплицировать побочный эффект по `event_id` и только после этого отвечать кодом 2xx.
+Доставка — **at-least-once**: получатель обязан атомарно дедуплицировать эффект по `event_id` до
+ответа 2xx.
 
 ## Наблюдаемость
 

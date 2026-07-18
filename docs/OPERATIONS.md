@@ -1,7 +1,7 @@
 # Эксплуатация
 
-Руководство по установке, настройке, работе, обновлению и восстановлению Telegram Support
-Platform. Внутренняя реализация описана в [техническом документе](TECHNICAL.md).
+Установка, настройка, обновление и восстановление. Архитектура описана в
+[техническом документе](TECHNICAL.md).
 
 ## Требования
 
@@ -45,8 +45,8 @@ DATA_DIR=./data
 Скрипт скачивает release image, разрешает tag в immutable digest, проверяет Compose и запускает
 сервисы через `up --detach --wait`. Другой registry image можно передать вторым аргументом.
 
-SQLite-база и heartbeat-файлы хранятся в `DATA_DIR`. В Docker этот каталог подключён к
-volume `support_data`: удаление контейнера не удаляет данные, удаление volume — удаляет.
+SQLite и heartbeat хранятся в volume `support_data` по пути `DATA_DIR`. Удаление контейнера
+сохраняет данные, удаление volume — нет.
 
 ## Запуск с PostgreSQL
 
@@ -64,17 +64,12 @@ POSTGRES_RUNTIME_PASSWORD=третий-url-safe-случайный-пароль
 ./scripts/start.sh postgres
 ```
 
-Используйте три разных значения длиной не менее 16 символов, например результаты
-`openssl rand -hex 24`. Compose формирует runtime `DATABASE_URL` и отдельный
-`MIGRATION_DATABASE_URL`. One-shot service `postgres-provision` выдаёт минимальные полномочия,
-после него `postgres-migrate` применяет Alembic. Оба должны успешно завершиться до запуска
-приложения; migration credential в `supportbot` не передаётся. PostgreSQL пока рассчитан на один
-экземпляр.
+Используйте три разных значения длиной не менее 16 символов, например из `openssl rand -hex 24`.
+`postgres-provision` выдаёт минимальные полномочия, затем `postgres-migrate` применяет Alembic;
+только после этого запускается приложение без migration credential. Поддерживается один экземпляр.
 
-При обновлении старого volume, созданного с `POSTGRES_USER=supportbot`, укажите
-`POSTGRES_ADMIN_USER=supportbot` и старый пароль как `POSTGRES_ADMIN_PASSWORD`: именно эта legacy
-роль является bootstrap-superuser существующего кластера. После успешного перехода приложение её
-не использует.
+Для старого volume с `POSTGRES_USER=supportbot` задайте `POSTGRES_ADMIN_USER=supportbot` и прежний
+пароль в `POSTGRES_ADMIN_PASSWORD`. После перехода приложение эту legacy-роль не использует.
 
 ## Конфигурация
 
@@ -104,7 +99,7 @@ POSTGRES_RUNTIME_PASSWORD=третий-url-safe-случайный-пароль
 | `DELIVERY_MAX_ATTEMPTS` | `8` | предел попыток доставки |
 | `TELEGRAM_MIN_REQUEST_INTERVAL_SECONDS` | `0.05` | интервал Telegram-запросов |
 
-Уменьшать интервалы без измерений не следует: это повышает риск rate limit и конкуренции SQLite.
+Не уменьшайте интервалы без измерений: это повышает риск rate limit и конкуренции SQLite.
 
 ### Operator API
 
@@ -135,29 +130,21 @@ API_ADMIN_TOKEN=случайный-секрет-длиной-не-менее-32-
 Не публикуйте порт напрямую. Оставьте loopback и используйте HTTPS reverse proxy. Клиент передаёт
 `X-API-Token: <token>`; Swagger UI доступен на `/docs`.
 
-Rate limit и защита от перебора токена хранятся в памяти одного процесса: состояние сбрасывается
-при рестарте и не координируется между экземплярами. В `v1.0.0` статический токен даёт полный
-административный доступ, не имеет scopes, срока действия и отдельного механизма revocation. Для
-rotation замените `API_ADMIN_TOKEN` в secret environment и перезапустите приложение.
+Rate limit и защита токена хранятся в памяти и сбрасываются при рестарте. Статический токен даёт
+полный административный доступ без scopes и срока действия; для rotation замените
+`API_ADMIN_TOKEN` и перезапустите приложение.
 
-Каждая мутация требует `X-Idempotency-Key`. Ключ scoped по операции и тикету, а в БД сохраняются
-fingerprint смыслового payload и исходный ответ. Точный повтор, в том числе после рестарта,
-возвращает прежний `changed`; повтор того же scoped key с другим payload получает `409 Conflict` и
-не создаёт эффект. Используйте новый случайный ключ для каждой новой логической команды и тот же
-ключ только для её безопасного retry.
+Каждая мутация требует `X-Idempotency-Key`. Точный повтор возвращает сохранённый ответ; другой
+payload с тем же ключом получает `409 Conflict`. Используйте новый случайный ключ для новой
+команды и прежний — только для её retry.
 
-Пример Nginx-конфига для TLS proxy находится в
-[`deploy/nginx/supportbot-api.conf.example`](../deploy/nginx/supportbot-api.conf.example). В нём
-нужно заменить `support.example.invalid` и пути сертификатов. Приложение при этом должно оставаться
-опубликованным только на loopback через `API_PUBLISH_HOST=127.0.0.1`.
-Nginx template намеренно заменяет, а не дополняет входящий `X-Forwarded-For`. Приложение принимает
-forwarded headers только от `API_TRUSTED_PROXY_IPS`, проверяет всю цепочку справа налево и выбирает
-ближайший недоверенный hop. Невалидная или чрезмерно длинная цепочка игнорируется.
+Пример TLS proxy: [`deploy/nginx/supportbot-api.conf.example`](../deploy/nginx/supportbot-api.conf.example).
+Замените домен и пути сертификатов, сохранив приложение на loopback. Forwarded headers принимаются
+только от `API_TRUSTED_PROXY_IPS`; некорректная цепочка игнорируется.
 
-Uvicorn и Telegram polling входят в один failure domain: неожиданная остановка API помечает
-readiness как degraded, останавливает polling и завершает процесс для перезапуска внешним
-supervisor. При штатном завершении новые HTTP/Telegram запросы прекращаются, workers дренируются,
-и только затем закрываются используемые ими Telegram и HTTP sessions.
+Uvicorn и Telegram polling входят в один failure domain: сбой API завершает процесс для внешнего
+перезапуска. При штатной остановке ingress закрывается, workers дренируются, затем закрываются
+sessions.
 
 ### Remnawave
 
@@ -189,9 +176,8 @@ supervisor. При штатном завершении новые HTTP/Telegram 
 | `NOTIFICATION_WEBHOOK_MAX_ATTEMPTS` | `8` | предел повторов |
 | `NOTIFICATION_WEBHOOK_POLL_INTERVAL_SECONDS` | `1` | интервал чтения очереди |
 
-Внешние URL требуют HTTPS. HTTP разрешён только для localhost/loopback. Credentials внутри URL и
-fragments запрещены. Получатель должен проверить HMAC-SHA256 подпись raw body и атомарно
-дедуплицировать события по `event_id` до выполнения побочного эффекта.
+Внешние URL требуют HTTPS; HTTP разрешён только для loopback. URL с credentials или fragments
+запрещены. Получатель проверяет HMAC-SHA256 и дедуплицирует эффект по `event_id`.
 
 ## Команды операторов
 
@@ -214,8 +200,8 @@ fragments запрещены. Получатель должен проверит
 | `/stopall` | full access | закрыть все открытые тикеты |
 | `/synctopics` | full access | синхронизировать Forum-темы |
 
-Обычный ответ в теме уходит клиенту. Неизвестная команда блокируется и не пересылается. Ответ в
-закрытом тикете повторно открывает его.
+Ответ в теме уходит клиенту и при необходимости открывает тикет снова. Неизвестные команды не
+пересылаются.
 
 ## Production layout
 
@@ -230,17 +216,13 @@ Docker volume                       # suppsystem_postgres_data with PostgreSQL d
 Docker volume                       # suppsystem_support_data with heartbeat files
 ```
 
-Контейнер запускается непривилегированным пользователем, с read-only root filesystem и writable
-volume только для runtime data. Production PostgreSQL хранится в `suppsystem_postgres_data`, а
-`support_data` содержит heartbeat-файлы. Bootstrap password принудительно очищается из environment
-контейнера приложения и доступен только `postgres`/`postgres-provision`. Operator API не должен
-слушать публичный интерфейс напрямую; оставьте
-`API_PUBLISH_HOST=127.0.0.1` и публикуйте его через HTTPS reverse proxy.
+Контейнер непривилегированный, с read-only root filesystem и volume только для runtime data.
+PostgreSQL хранится в `suppsystem_postgres_data`, heartbeat — в `support_data`. Bootstrap password
+не передаётся приложению. Operator API оставляйте на `API_PUBLISH_HOST=127.0.0.1` и публикуйте
+через HTTPS reverse proxy.
 
-Production deploy использует самостоятельный `compose.production.postgres.yaml`, рендерит
-итоговую конфигурацию и проверяет PostgreSQL backend, разные роли, persistent volumes, dependencies
-и immutable image. Текущий и предыдущий успешно запущенные image сохраняются в
-`deployment.env` и `rollback.env`.
+Deploy проверяет итоговый PostgreSQL Compose и immutable image. Текущий и предыдущий успешные
+image сохраняются в `deployment.env` и `rollback.env`.
 
 Первый и последующие deploy:
 
@@ -268,25 +250,18 @@ DEPLOY_DIR=/opt/supportbot sh scripts/production-compose.sh logs -f --tail=200 s
 DEPLOY_DIR=/opt/supportbot sh scripts/production-compose.sh restart supportbot
 ```
 
-Production wrapper использует самостоятельный manifest
-`compose.production.postgres.yaml`.
-
 ## GitHub Actions и release artifacts
 
-Публичный workflow выполняет полный verify и PostgreSQL matrix на pull request и push. После
-успешных проверок push в `main` или release tag собирает image через Buildx, публикует его в GHCR,
-выполняет migration/container smoke, Trivy HIGH/CRITICAL gate и создаёт CycloneDX SBOM. Все
-внешние actions закреплены полными commit SHA.
+Workflow выполняет verify и PostgreSQL matrix. Push в `main` или release tag также собирает image,
+публикует его в GHCR, запускает smoke/Trivy gate и создаёт CycloneDX SBOM. Actions закреплены SHA.
 
 Workflow не использует self-hosted runners, production secrets, Docker socket mount или deploy
 команды. Production deployment остаётся явной операторской операцией через `scripts/deploy.sh` и
 принимает только проверенный GHCR reference с immutable digest.
 
-Commit-SHA tag служит читаемым идентификатором, но `image.env` и `release-evidence.txt` фиксируют
-фактический `IMAGE_REFERENCE` по digest. При release tag тот же digest дополнительно получает
-version tag. Trivy JSON, CycloneDX SBOM, checksums и evidence сохраняются как GitHub Actions
-artifact одного job; после перевода repository в public workflow также публикует artifact
-attestation в GHCR.
+`image.env` и `release-evidence.txt` фиксируют image по digest; release tag добавляет version tag.
+Trivy JSON, SBOM, checksums и evidence сохраняются одним artifact, а для публичного репозитория
+публикуется attestation.
 
 Перед deploy скачайте artifact одного workflow run и проверьте:
 
@@ -295,8 +270,7 @@ sha256sum --check artifact-checksums.txt
 grep '^image_reference=.*@sha256:' release-evidence.txt
 ```
 
-GitHub Actions отвечает только за verification и публикацию GHCR artifact; доступ к production
-host в workflow отсутствует.
+Workflow только проверяет и публикует artifact; доступа к production host у него нет.
 
 ## Health, readiness и метрики
 
@@ -323,9 +297,8 @@ curl -H "X-API-Token: $API_ADMIN_TOKEN" http://127.0.0.1:8080/metrics
 
 ## Обновление
 
-Перед обновлением создайте backup. Production Compose сначала запускает migration service с
-отдельным credential, затем запускает приложение только с runtime connections и урезанными
-полномочиями.
+Перед обновлением создайте backup. Compose применит миграции отдельной ролью и запустит приложение
+с runtime-полномочиями.
 
 ```bash
 PRODUCTION_DEPLOYMENT=yes DEPLOY_DIR=/opt/supportbot \
@@ -365,20 +338,15 @@ CONFIRM_RESTORE=yes PRODUCTION_DEPLOYMENT=yes DEPLOY_DIR=/opt/supportbot \
   sh scripts/restore.sh postgres /srv/backups/support-backup.dump
 ```
 
-Archive проверяется через `pg_restore --list` до остановки. Restore выполняется migration role с
-`--clean --if-exists --exit-on-error`; runtime role используется для `pg_dump`. Успешный restore
-удаляет прежний successful `postgres-migrate`, повторно применяет миграции, запускает приложение
-через полный production service set и ждёт container health. Неуспешный
-restore никогда не запускает приложение автоматически: проверьте БД вручную и затем выполните
+Archive проверяется до остановки. Restore выполняется migration role, повторно применяет миграции
+и ждёт healthcheck. После ошибки приложение не запускается автоматически: проверьте БД и выполните
 `scripts/production-compose.sh up --detach --wait supportbot`.
 
 ### Production data path drill
 
-Drill выполняется только на отдельном стенде с реальными PostgreSQL, Telegram-конфигурацией и
-immutable baseline/candidate images. Каталог должен содержать файл
-`.supportbot-drill-environment` со строкой `isolated`. Сценарий делает clean deploy, upgrade,
-rollback, backup, намеренно падающий restore после остановки, успешный restore и сравнение
-контрольного fingerprint.
+Drill запускается только на отдельном стенде. Каталог должен содержать
+`.supportbot-drill-environment` со строкой `isolated`; сценарий проверяет deploy, upgrade,
+rollback, backup и оба исхода restore.
 
 ```bash
 CONFIRM_PRODUCTION_DATA_PATH_DRILL=isolated \
@@ -390,25 +358,18 @@ DEPLOY_DIR=/opt/suppsystem-drill \
   /srv/drill-reports/data-path-$(date +%F-%H%M).log
 ```
 
-Сохраните report и `.postgres.dump` как закрытые release evidence: они относятся к production
-операциям и могут раскрывать объёмы данных. Drill является разрушительным и не запускается на
-боевой инсталляции.
+Храните report и `.postgres.dump` закрыто: они могут раскрывать объёмы данных. Drill разрушителен
+и запрещён на боевой инсталляции.
 
 ## Разработка
 
 ```bash
-make install          # locked dependencies
-make run              # запуск
-make migrate          # миграции
-make test             # тесты
-make lint             # Ruff
-make format-check     # форматирование
-make typecheck        # strict mypy
-make migration-check  # соответствие ORM и Alembic
-make license-check    # лицензии зависимостей
-make verify           # все проверки
-make test-postgres    # PostgreSQL migration/concurrency matrix в одноразовой test-only БД
-make production-preflight # проверка уже записанного production deployment state
+make install       # locked dependencies
+make run           # запуск
+make migrate       # миграции
+make test          # тесты
+make verify        # все проверки качества
+make test-postgres # PostgreSQL migration/concurrency matrix
 ```
 
 Изменение ORM требует новой Alembic-миграции и проверки fresh install и upgrade. Применённые
@@ -418,14 +379,12 @@ make production-preflight # проверка уже записанного produ
 
 ### Приложение не запускается
 
-Проверьте `sh scripts/production-compose.sh logs --tail=200 supportbot`, обязательные переменные, пересечения ролей,
-длину секретов, доступность Telegram и базы.
+Проверьте логи через `scripts/production-compose.sh`, обязательные переменные, роли, секреты,
+Telegram и базу.
 
-Если лог начинается с `Configuration error`, исправьте `.env` и перезапустите сервис. Например,
-ошибка `Telegram operator roles must not overlap` означает, что один Telegram ID указан сразу в
-нескольких переменных ролей (`FULL_ADMIN_TELEGRAM_IDS`, `OPERATOR_TELEGRAM_IDS`,
-`READONLY_OPERATOR_TELEGRAM_IDS` или устаревшей `ADMIN_TELEGRAM_IDS`). Оставьте ID только в одной
-роли. В production файл обычно находится в `/opt/supportbot/.env`.
+При `Configuration error` исправьте `/opt/supportbot/.env` и перезапустите сервис. Ошибка
+`Telegram operator roles must not overlap` означает, что Telegram ID указан в нескольких ролях;
+оставьте его только в одной.
 
 ### Не проходит Telegram preflight
 
@@ -440,10 +399,8 @@ make production-preflight # проверка уже записанного produ
 
 ### Remnawave вернул unknown outcome
 
-Не повторяйте мутацию вслепую: пока идёт автоматическая read-only сверка, следующая команда для
-этого тикета заблокирована. Найдите `operator_action_id` и дождитесь `completed`, `not_applied` или
-`inconclusive`. Недоступные и некорректные read-ответы повторяются с backoff; после 20 неудачных
-попыток действие безопасно переходит в `inconclusive`.
+Не повторяйте мутацию. Найдите `operator_action_id` и дождитесь `completed`, `not_applied` или
+`inconclusive`; до этого новые мутации тикета заблокированы.
 
 При `inconclusive` уведомление содержит UUID действия. Full admin должен независимо установить
 судьбу именно исходного вызова и выполнить в той же теме одну из команд:
@@ -453,12 +410,10 @@ make production-preflight # проверка уже записанного produ
 /resolvepanel <operator_action_uuid> not_applied
 ```
 
-`applied` допустим только при доказательстве, что исходная мутация выполнилась, `not_applied` —
-только при доказательстве обратного. Одного текущего состояния Remnawave недостаточно: оно могло
-измениться конкурентно. Если доказательства нет, оставьте действие заблокированным. Команда не
-повторяет мутацию и сохраняет actor, время, решение и idempotency key в аудите. Исключение —
-`/revokelink ... applied`: выполняется read-only lookup новой ссылки для durable-уведомления
-клиента. Если ссылка недоступна или не изменилась, решение не фиксируется.
+Выбирайте результат только при независимом доказательстве судьбы исходного вызова; текущего
+состояния Remnawave недостаточно. Без доказательства оставьте действие заблокированным. Команда
+не повторяет мутацию и сохраняется в аудите; `/revokelink ... applied` дополнительно читает новую
+ссылку для уведомления.
 
 ### `/ready` возвращает 503
 

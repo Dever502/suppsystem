@@ -1,23 +1,18 @@
 # Observability and incident runbook
 
-This guide describes the minimal dashboard, alerts and first-response steps for a single-instance Telegram Support Platform deployment.
+Minimal dashboard, alerts and first-response steps for a single-instance deployment.
 
 ## Signals
 
 The application exposes Prometheus-compatible metrics on `/metrics` when the Operator API is enabled. Keep the API bound to loopback and scrape it through the same trusted host or monitoring network.
 
-Useful log fields:
-
-- `event` for the domain or infrastructure event;
-- `trace_id` for one Telegram update or API request;
-- `ticket_id`, `delivery_id`, `operator_action_id` for entity-level debugging;
-- `error_kind` and redacted `error_message` for failure class.
-
-JSON logs redact common secret shapes such as URI credentials, bearer tokens and query-string secret values.
+Useful JSON log fields are `event`, `trace_id`, `ticket_id`, `delivery_id`,
+`operator_action_id`, `error_kind` and redacted `error_message`. Common URI credentials, bearer
+tokens and query-string secrets are redacted.
 
 ## Dashboard starter panels
 
-Create a small dashboard with these panels before adding custom business views:
+Start with these panels:
 
 | Panel | PromQL |
 | --- | --- |
@@ -31,41 +26,34 @@ Create a small dashboard with these panels before adding custom business views:
 | External failures by component | `increase(support_events_total{outcome=~"failed|retry|unknown|unexpected_response"}[15m])` |
 | External request latency average | `rate(support_external_request_duration_seconds_sum[5m]) / rate(support_external_request_duration_seconds_count[5m])` |
 
-Keep queue depth and oldest age on the same dashboard. A small queue with high age usually means a stuck job; a large queue with low age usually means traffic spike or slow downstream.
+High age with low depth usually means a stuck job; high depth with low age means a traffic spike or
+slow downstream.
 
 ## Alert rules
 
-A starter Prometheus rule file is available at:
+A starter Prometheus rule file is available at `deploy/prometheus/supportbot-alerts.yml`.
 
-```text
-deploy/prometheus/supportbot-alerts.yml
-```
-
-Tune thresholds for your traffic before using them as paging alerts. For quiet installations, failed jobs and unknown Remnawave outcomes are usually actionable immediately.
+Tune thresholds to traffic. Failed jobs and unknown Remnawave outcomes are usually immediately actionable.
 
 ## Runbook
 
 ### `/ready` is degraded
 
-1. Check the response body and identify the degraded component.
-2. Check recent logs with `event`, `trace_id` and component-specific IDs.
-3. Confirm the database is reachable with `sh scripts/production-compose.sh ps` and container health.
-4. If a worker heartbeat is stale, inspect whether the process is alive but blocked on Telegram, webhook or database operations.
+1. Identify the degraded component in the response body and logs.
+2. Check Compose/container health and database availability.
+3. For a stale heartbeat, inspect whether the worker is blocked on Telegram, webhook or database I/O.
 
 ### Delivery queue is old or failed
 
-1. Check `support_failed_jobs{queue="delivery"}` and `support_queue_oldest_age_seconds{queue="delivery"}`.
-2. Search logs by `delivery_id` and `ticket_id`.
-3. Look for Telegram errors such as missing topics, rate limits or permanent bad requests.
-4. If topic recovery failed, use ticket/topic logs to confirm whether the Forum topic still exists.
-5. Do not edit the database directly unless a documented recovery procedure exists.
+1. Check failed jobs, oldest age and logs by `delivery_id`/`ticket_id`.
+2. Look for missing topics, Telegram rate limits or permanent bad requests.
+3. If topic recovery failed, confirm that the Forum topic exists. Do not edit the database directly.
 
 ### Notification queue is old or failed
 
-1. Check receiver availability and HTTP status codes in logs.
-2. Verify webhook URL and secret configuration.
-3. If the receiver returned `Retry-After`, wait for the scheduled retry unless the receiver state changed.
-4. Confirm the receiver deduplicates events by notification ID before replaying anything manually.
+1. Check receiver availability, HTTP status, webhook URL and secret.
+2. Respect `Retry-After` unless receiver state changed.
+3. Before manual replay, confirm receiver-side deduplication by notification ID.
 
 ### Remnawave unknown outcome
 
@@ -81,18 +69,10 @@ Tune thresholds for your traffic before using them as paging alerts. For quiet i
 
 ### Suspected secret exposure
 
-1. Preserve logs for audit but restrict access immediately.
-2. Rotate the affected token or secret even if it appears redacted elsewhere.
-3. Check whether the value was present in an exception, URL, request header or deployment variable.
-4. Add a regression test for the leak shape before closing the incident.
+1. Preserve restricted audit logs and rotate the affected secret immediately.
+2. Check exceptions, URLs, headers and deployment variables for the value.
+3. Add a regression test for the leak shape.
 
 ## Incident notes
 
-For each incident, record:
-
-- start and end time;
-- affected components and users;
-- relevant `trace_id`, `ticket_id`, `delivery_id` or `operator_action_id`;
-- remediation steps;
-- whether retry, restore or manual reconciliation was used;
-- follow-up test or alert changes.
+Record timing, impact, relevant IDs, remediation, recovery method and follow-up tests or alerts.

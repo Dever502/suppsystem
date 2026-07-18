@@ -39,12 +39,11 @@ DATA_DIR=./data
 ```
 
 ```bash
-docker build --tag suppsystem:local .
-export APP_IMAGE=suppsystem:local
-export SUPPORTBOT_ENV_FILE="$PWD/.env"
-docker compose --env-file .env -f compose.production.sqlite.yaml up -d
-docker compose -f compose.production.sqlite.yaml ps
+./scripts/start.sh sqlite
 ```
+
+Скрипт скачивает release image, разрешает tag в immutable digest, проверяет Compose и запускает
+сервисы через `up --detach --wait`. Другой registry image можно передать вторым аргументом.
 
 SQLite-база и heartbeat-файлы хранятся в `DATA_DIR`. В Docker этот каталог подключён к
 volume `support_data`: удаление контейнера не удаляет данные, удаление volume — удаляет.
@@ -62,7 +61,7 @@ POSTGRES_RUNTIME_PASSWORD=третий-url-safe-случайный-пароль
 ```
 
 ```bash
-docker compose --env-file .env -f compose.production.postgres.yaml up -d
+./scripts/start.sh postgres
 ```
 
 Используйте три разных значения длиной не менее 16 символов, например результаты
@@ -137,7 +136,7 @@ API_ADMIN_TOKEN=случайный-секрет-длиной-не-менее-32-
 `X-API-Token: <token>`; Swagger UI доступен на `/docs`.
 
 Rate limit и защита от перебора токена хранятся в памяти одного процесса: состояние сбрасывается
-при рестарте и не координируется между экземплярами. В `v0.1.0` статический токен даёт полный
+при рестарте и не координируется между экземплярами. В `v1.0.0` статический токен даёт полный
 административный доступ, не имеет scopes, срока действия и отдельного механизма revocation. Для
 rotation замените `API_ADMIN_TOKEN` в secret environment и перезапустите приложение.
 

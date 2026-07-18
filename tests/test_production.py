@@ -80,7 +80,7 @@ def test_immutable_image_references_are_accepted(image: str) -> None:
 
 @pytest.mark.parametrize(
     "image",
-    ["supportbot:latest", "supportbot:0.1.0", "supportbot@sha256:not-a-digest"],
+    ["supportbot:latest", "supportbot:1.0.0", "supportbot@sha256:not-a-digest"],
 )
 def test_mutable_image_references_are_rejected(image: str) -> None:
     assert not is_immutable_image_reference(image)

@@ -73,12 +73,27 @@ def test_runtime_and_postgres_images_are_digest_pinned() -> None:
     assert "python:3.12.13-alpine3.24@sha256:" in dockerfile
     assert "python:3.12.13-slim-" not in dockerfile
     assert "COPY pyproject.toml uv.lock README.md LICENSE ./" in dockerfile
-    assert 'org.opencontainers.image.version="0.1.0"' in dockerfile
+    assert 'org.opencontainers.image.version="1.0.0"' in dockerfile
     assert "org.opencontainers.image.revision" in dockerfile
     for relative_path in compose_files:
         assert "postgres:16.14-alpine3.22@sha256:" in (ROOT / relative_path).read_text(
             encoding="utf-8"
         )
+
+
+def test_public_start_script_is_transparent_and_pins_the_pulled_image() -> None:
+    path = ROOT / "scripts" / "start.sh"
+    text = path.read_text(encoding="utf-8")
+
+    assert path.stat().st_mode & 0o100
+    assert "ghcr.io/dever502/suppsystem:v1.0.0" in text
+    assert "docker pull" in text
+    assert "RepoDigests" in text
+    assert "config --format json" in text
+    assert "python -m supportbot.production" in text
+    assert "up --detach --wait" in text
+    for unsafe in ("sudo ", "curl ", "source ", "eval "):
+        assert unsafe not in text
 
 
 def test_public_documentation_is_curated() -> None:
@@ -96,9 +111,13 @@ def test_public_documentation_is_curated() -> None:
         assert not (ROOT / relative_path).exists()
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "single-instance release candidate" in readme
+    assert "> Версия: `v1.0.0`." in readme
+    assert "./scripts/start.sh sqlite" in readme
+    assert "## Ограничения" not in readme
+    assert "## Разработка" not in readme
     assert "Официальный способ поставки — container image" in readme
-    assert "Remnawave и notification webhook поддерживаются" in readme
+    assert "полноценная интеграция с Remnawave 2.8.0" in readme
+    assert "notification webhook с durable at-least-once доставкой" in readme
     assert "Remnawave 2.8.0" in readme
     assert "@sha256:<digest>" in readme
 

@@ -147,7 +147,7 @@ jobs:
             "$IMAGE_REFERENCE" \
             -c 'set -eu
               cd /app
-              test "$(python -c "import supportbot; print(supportbot.__version__)")" = "0.1.0"
+              test "$(python -c "import supportbot; print(supportbot.__version__)")" = "1.0.0"
               test -f /app/alembic.ini
               test -f /app/migrations/env.py
               python -c "from hashlib import sha256; from pathlib import Path; assert sha256(Path(\"/app/LICENSE\").read_bytes()).hexdigest() == \"c7797128762ac2d810fc51bf05f2457bc666658377cbe3902650e093919074b3\""

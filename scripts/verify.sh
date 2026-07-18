@@ -10,5 +10,6 @@ uv run --frozen python scripts/check_licenses.py
 uv run --frozen python scripts/check_publication.py
 uv run --frozen python -m compileall -q src tests migrations scripts
 sh -n scripts/backup.sh scripts/deploy.sh scripts/drill_production_data_path.sh \
-    scripts/production-compose.sh scripts/restore.sh scripts/test_postgres.sh scripts/verify.sh
+    scripts/production-compose.sh scripts/restore.sh scripts/start.sh scripts/test_postgres.sh \
+    scripts/verify.sh
 git diff --check

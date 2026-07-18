@@ -4,7 +4,7 @@ Suppsystem — Telegram-first система технической поддер
 обрабатывают обращения в отдельных темах закрытой Forum-группы. Сообщения, состояние тикетов и
 история действий сохраняются в базе данных и переживают перезапуск приложения.
 
-> Текущая версия — single-instance release candidate `v0.1.0`.
+> Версия: `v1.0.0`.
 
 ## Возможности
 
@@ -16,7 +16,9 @@ Suppsystem — Telegram-first система технической поддер
 - SQLite для простого запуска и PostgreSQL для production-инсталляции;
 - опциональный Operator API;
 - healthcheck, readiness, Prometheus-метрики, JSON-логи и backup/restore;
-- интеграция с Remnawave 2.8.0 и подписанный notification webhook.
+- полноценная интеграция с Remnawave 2.8.0: подписка, продление, перевыпуск ссылки и ключей,
+  сброс устройств и безопасное восстановление неизвестного результата;
+- подписанный notification webhook с durable at-least-once доставкой.
 
 ## Как это работает
 
@@ -33,15 +35,18 @@ Telegram-чат  <──>  Telegram-бот + база данных  <──>  Fo
 
 ## Быстрый запуск
 
-Понадобятся Docker с Compose, Telegram-бот и приватная supergroup с включёнными Topics.
+Понадобятся Docker Compose v2, Telegram-бот и приватная supergroup с включёнными Topics.
 
-1. Создайте бота через [@BotFather](https://t.me/BotFather).
-2. Добавьте его администратором Forum-группы с правом управления темами.
-3. Подготовьте конфигурацию:
+1. Клонируйте репозиторий и подготовьте конфигурацию:
 
    ```bash
+   git clone https://github.com/Dever502/suppsystem.git
+   cd suppsystem
    cp .env.example .env
    ```
+
+2. Создайте бота через [@BotFather](https://t.me/BotFather), добавьте его администратором
+   Forum-группы с правом управления темами и заполните `.env`:
 
    ```dotenv
    SUPPORT_BOT_TOKEN=replace-with-bot-token
@@ -50,34 +55,37 @@ Telegram-чат  <──>  Telegram-бот + база данных  <──>  Fo
    DATA_DIR=./data
    ```
 
-4. Соберите image и запустите SQLite-вариант:
+3. Запустите SQLite-вариант:
 
    ```bash
-   docker build --tag suppsystem:local .
-   export APP_IMAGE=suppsystem:local
-   export SUPPORTBOT_ENV_FILE="$PWD/.env"
-   docker compose --env-file .env -f compose.production.sqlite.yaml up --detach
+   ./scripts/start.sh sqlite
    ```
 
-Для PostgreSQL добавьте пароли из руководства и используйте второй manifest:
+Скрипт скачивает image `v1.0.0`, закрепляет фактически полученный digest, проверяет Compose и ждёт
+успешного healthcheck. Для PostgreSQL задайте в `.env` три разных пароля и запустите:
 
 ```bash
-docker compose --env-file .env -f compose.production.postgres.yaml up --detach
+./scripts/start.sh postgres
 ```
 
 Полная конфигурация PostgreSQL и разделение migration/runtime ролей описаны в
 [руководстве по эксплуатации](docs/OPERATIONS.md).
 
-## Container image
-
-Официальный способ поставки — container image в GHCR. Для установки и rollback используйте
-immutable digest:
+Скрипт — только прозрачная обёртка. Прямой запуск Compose остаётся доступен:
 
 ```bash
 export APP_IMAGE='ghcr.io/dever502/suppsystem@sha256:<digest>'
 export SUPPORTBOT_ENV_FILE="$PWD/.env"
-docker compose --env-file .env -f compose.production.postgres.yaml pull
-docker compose --env-file .env -f compose.production.postgres.yaml up --detach --no-build
+docker compose --env-file .env -f compose.production.sqlite.yaml up --detach --wait
+```
+
+## Container image
+
+Официальный способ поставки — container image в GHCR. `scripts/start.sh` автоматически разрешает
+version tag в immutable digest. Для явной установки и rollback также можно передать digest:
+
+```bash
+./scripts/start.sh postgres 'ghcr.io/dever502/suppsystem@sha256:<digest>'
 ```
 
 PyPI-пакет и wheel для релиза не публикуются.
@@ -87,26 +95,6 @@ PyPI-пакет и wheel для релиза не публикуются.
 - [Эксплуатация](docs/OPERATIONS.md) — настройка, PostgreSQL, deploy, backup/restore и диагностика.
 - [Техническое устройство](docs/TECHNICAL.md) — архитектура, данные, очереди, API и интеграции.
 - [Наблюдаемость](docs/OBSERVABILITY.md) — метрики, alerts и incident runbook.
-
-## Ограничения
-
-- Поддерживается один экземпляр приложения; горизонтальное масштабирование отсутствует.
-- Telegram delivery использует at-least-once семантику, поэтому после аварии возможен редкий
-  дубль сообщения.
-- Operator API использует один статический административный токен и должен публиковаться только
-  через HTTPS reverse proxy.
-- Remnawave и notification webhook поддерживаются, но как опциональные интеграции выключены по
-  умолчанию; проверен контракт Remnawave 2.8.0.
-
-## Разработка
-
-Нужны Python 3.12+, [uv](https://docs.astral.sh/uv/) и Docker Compose для PostgreSQL-тестов.
-
-```bash
-uv sync --frozen --all-groups
-make verify
-make test-postgres
-```
 
 ## Лицензия
 

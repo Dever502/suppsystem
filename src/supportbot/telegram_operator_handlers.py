@@ -6,12 +6,8 @@ from html import escape
 from aiogram.types import Message
 
 from supportbot.authorization import AuthorizationService
-from supportbot.panel import (
-    PanelActionResult,
-)
 from supportbot.service_types import (
     TicketNotFoundError,
-    TicketView,
     TopicAlreadyBoundError,
     TopicProvisioningConflictError,
 )
@@ -21,17 +17,21 @@ from supportbot.telegram_constants import (
     TICKET_CLOSED_TEXT,
     TOPIC_COMMANDS,
 )
-from supportbot.telegram_formatting import (
-    panel_action_reply,
+from supportbot.telegram_formatting import operator_ticket_info
+from supportbot.telegram_message_utils import (
+    command_argument,
+    media_metadata,
+    message_command,
+    message_text,
+    rating_keyboard,
 )
-from supportbot.telegram_panel_handler import (
-    GIFT_DAYS_ERROR_TEXT as PANEL_GIFT_DAYS_ERROR_TEXT,
+from supportbot.telegram_message_utils import (
+    command_key as build_command_key,
 )
 from supportbot.telegram_panel_handler import TelegramPanelCommandHandler
 from supportbot.telegram_user_handlers import TelegramUserHandlers
 
 logger = logging.getLogger(__name__)
-GIFT_DAYS_ERROR_TEXT = PANEL_GIFT_DAYS_ERROR_TEXT
 
 
 class TelegramOperatorHandlers(TelegramUserHandlers):
@@ -66,7 +66,7 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
             )
             return
 
-        command = self._message_command(message)
+        command = message_command(message)
         if not self.authorization.can_execute_topic_action(message.from_user.id, command):
             logger.info(
                 "Blocked read-only operator action",
@@ -124,18 +124,50 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
             )
             return
 
-        command_key = self._command_key(message, command)
+        command_key = build_command_key(message, command)
         if command == "/info":
-            await message.reply(self._operator_ticket_info(ticket))
+            await message.reply(operator_ticket_info(ticket))
             return
         if command == "/subinfo":
             await message.reply(await self._subscription_block(ticket))
             return
+        if command == "/resolvepanel":
+            if not self.authorization.is_full_admin(message.from_user.id):
+                await message.reply("⛔ Только full admin может разрешить неизвестный результат.")
+                return
+            if self.panel_service is None:
+                await message.reply("⚠️ Интеграция с Remnawave не подключена.")
+                return
+            arguments = command_argument(message).split()
+            if len(arguments) != 2 or arguments[1] not in {"applied", "not_applied"}:
+                await message.reply(
+                    "⚠️ Формат: <code>/resolvepanel &lt;action_uuid&gt; applied|not_applied</code>"
+                )
+                return
+            changed = await self.panel_service.resolve_inconclusive_action(
+                ticket_id=ticket.id,
+                operator_action_id=arguments[0],
+                operator_telegram_id=message.from_user.id,
+                resolution=arguments[1],
+                idempotency_key=command_key,
+            )
+            await message.reply(
+                "✅ Результат Remnawave зафиксирован; новые команды разблокированы."
+                if changed
+                else "ℹ️ Действие не найдено, уже разрешено или ещё сверяется автоматически."
+            )
+            return
         if command in PANEL_MUTATION_COMMANDS:
-            await self._handle_panel_mutation_command(message, ticket, command, command_key)
+            await self.panel_commands.handle(
+                message,
+                ticket,
+                command,
+                command_key,
+                command_argument(message),
+            )
             return
         if command == "/note":
-            note = self._command_argument(message)
+            note = command_argument(message)
             if not note:
                 await message.reply(
                     "⚠️ <b>Не указан текст заметки</b>\n\nПример: <code>/note Текст заметки</code>"
@@ -167,7 +199,7 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
                 notification_target_chat_id=ticket.telegram_user_id if notify_user else None,
                 notification_idempotency_key=f"{command_key}:user-notification",
                 notification_reply_markup=(
-                    self._rating_keyboard(ticket.id, ticket.close_cycle + 1).model_dump(
+                    rating_keyboard(ticket.id, ticket.close_cycle + 1).model_dump(
                         mode="json", exclude_none=True
                     )
                     if notify_user
@@ -229,8 +261,8 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
             operator_telegram_id=message.from_user.id,
             source_chat_id=message.chat.id,
             source_message_id=message.message_id,
-            content=self._message_text(message),
-            media=self._media_metadata(message),
+            content=message_text(message),
+            media=media_metadata(message),
         )
         if result.blocked:
             await message.reply("⛔ Пользователь заблокирован. Сообщение не отправлено.")
@@ -250,21 +282,6 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
                 "topic_id": message.message_thread_id,
             },
         )
-
-    async def _handle_panel_mutation_command(
-        self, message: Message, ticket: TicketView, command: str, command_key: str
-    ) -> None:
-        await self.panel_commands.handle(
-            message,
-            ticket,
-            command,
-            command_key,
-            self._command_argument(message),
-        )
-
-    @staticmethod
-    def _panel_action_reply(result: PanelActionResult) -> str:
-        return panel_action_reply(result)
 
     async def _handle_root_command(self, message: Message) -> None:
         if message.from_user is None or not self.authorization.has_full_access(

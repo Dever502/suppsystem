@@ -38,6 +38,9 @@ class AuthorizationService:
     def has_full_access(self, telegram_user_id: int) -> bool:
         return self.can_reply(telegram_user_id)
 
+    def is_full_admin(self, telegram_user_id: int) -> bool:
+        return self.role_for(telegram_user_id) is OperatorRole.FULL_ADMIN
+
     def can_execute_topic_action(self, telegram_user_id: int, command: str) -> bool:
         role = self.role_for(telegram_user_id)
         if role in {OperatorRole.FULL_ADMIN, OperatorRole.OPERATOR}:

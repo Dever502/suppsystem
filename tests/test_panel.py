@@ -7,9 +7,13 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.dml import Update
 
 from supportbot.database import Database
+from supportbot.durable_work import MAX_RECONCILIATION_ATTEMPTS, DurableWorkRepository
 from supportbot.models import (
+    DeliveryOutbox,
     NotificationOutbox,
     NotificationStatus,
     OperatorAction,
@@ -17,8 +21,11 @@ from supportbot.models import (
     Ticket,
     TicketStatus,
     User,
+    WorkStatus,
+    utcnow,
 )
 from supportbot.panel import PanelService
+from supportbot.reconciliation import ReconciliationWorker
 from supportbot.remnawave import (
     RemnawaveAmbiguousIdentityError,
     RemnawaveBulkActionResult,
@@ -30,7 +37,11 @@ from supportbot.remnawave import (
     RemnawaveUser,
 )
 from supportbot.services import TicketView
-from supportbot.telegram_adapter import TelegramSupportAdapter
+from supportbot.telegram_formatting import (
+    expiration_text,
+    format_subscription_lookup,
+    panel_status_text,
+)
 
 
 class FakeRemnawave:
@@ -40,6 +51,7 @@ class FakeRemnawave:
         self.extend_calls: list[tuple[str, int]] = []
         self.revoke_calls: list[tuple[str, bool]] = []
         self.reset_device_calls: list[str] = []
+        self.get_device_calls: list[str] = []
 
     async def get_user_by_telegram_id(self, telegram_id: int) -> RemnawaveUser:
         self.telegram_ids.append(telegram_id)
@@ -63,6 +75,10 @@ class FakeRemnawave:
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
+
+    async def get_user_hwid_devices(self, *, user_uuid: str) -> RemnawaveHwidDeviceResetResult:
+        self.get_device_calls.append(user_uuid)
+        return RemnawaveHwidDeviceResetResult(total=2, devices=[])
 
     async def reset_user_hwid_devices(self, *, user_uuid: str) -> RemnawaveHwidDeviceResetResult:
         self.reset_device_calls.append(user_uuid)
@@ -117,15 +133,29 @@ class StatefulExtendRemnawave(FakeRemnawave):
         return RemnawaveBulkActionResult(affected_rows=1)
 
 
-class RetryOnceResetKeyRemnawave(FakeRemnawave):
+class BlockingExtendRemnawave(FakeRemnawave):
+    def __init__(self, result: RemnawaveUser) -> None:
+        super().__init__(result)
+        self.mutation_started = asyncio.Event()
+        self.release_mutation = asyncio.Event()
+
+    async def extend_user_expiration(
+        self, *, user_uuid: str, extend_days: int
+    ) -> RemnawaveBulkActionResult:
+        self.extend_calls.append((user_uuid, extend_days))
+        self.mutation_started.set()
+        await self.release_mutation.wait()
+        return RemnawaveBulkActionResult(affected_rows=1)
+
+
+class AppliedUnknownResetKeyRemnawave(FakeRemnawave):
     async def revoke_user_subscription(
         self, *, user_uuid: str, revoke_only_passwords: bool
     ) -> RemnawaveUser:
         self.revoke_calls.append((user_uuid, revoke_only_passwords))
-        if len(self.revoke_calls) == 1:
-            raise RemnawaveUnknownOutcomeError("first reset response was lost")
         assert isinstance(self.result, RemnawaveUser)
-        return self.result
+        self.result = replace(self.result, credential_fingerprint="b" * 64)
+        raise RemnawaveUnknownOutcomeError("reset-key response was lost")
 
 
 class AppliedUnknownRevokeLinkRemnawave(FakeRemnawave):
@@ -139,12 +169,25 @@ class AppliedUnknownRevokeLinkRemnawave(FakeRemnawave):
         raise RemnawaveUnknownOutcomeError("revoke response was lost")
 
 
-class RetryOnceResetDevicesRemnawave(FakeRemnawave):
+class AppliedUnknownResetDevicesRemnawave(FakeRemnawave):
+    def __init__(self, result: RemnawaveUser) -> None:
+        super().__init__(result)
+        self.device_total = 2
+
+    async def get_user_hwid_devices(self, *, user_uuid: str) -> RemnawaveHwidDeviceResetResult:
+        self.get_device_calls.append(user_uuid)
+        return RemnawaveHwidDeviceResetResult(total=self.device_total, devices=[])
+
     async def reset_user_hwid_devices(self, *, user_uuid: str) -> RemnawaveHwidDeviceResetResult:
         self.reset_device_calls.append(user_uuid)
-        if len(self.reset_device_calls) == 1:
-            raise RemnawaveUnknownOutcomeError("first reset response was lost")
-        return RemnawaveHwidDeviceResetResult(total=0, devices=[])
+        self.device_total = 0
+        raise RemnawaveUnknownOutcomeError("reset-devices response was lost")
+
+
+class UnknownResetDevicesRemnawave(FakeRemnawave):
+    async def reset_user_hwid_devices(self, *, user_uuid: str) -> RemnawaveHwidDeviceResetResult:
+        self.reset_device_calls.append(user_uuid)
+        raise RemnawaveUnknownOutcomeError("reset-devices outcome is unknown")
 
 
 def ticket_view() -> TicketView:
@@ -174,6 +217,7 @@ def remnawave_user() -> RemnawaveUser:
         expire_at=datetime(2026, 7, 25, 12, 0, tzinfo=UTC),
         subscription_url="https://sub.example/abc123",
         telegram_id=123456789,
+        credential_fingerprint="a" * 64,
         email="user@example.com",
         hwid_device_limit=5,
         traffic=RemnawaveTraffic(
@@ -182,6 +226,42 @@ def remnawave_user() -> RemnawaveUser:
             online_at=None,
         ),
     )
+
+
+async def load_action_and_job(
+    database: Database, idempotency_key: str
+) -> tuple[OperatorAction, ReconciliationOutbox]:
+    async with database.session() as session:
+        action = await session.scalar(
+            select(OperatorAction).where(OperatorAction.idempotency_key == idempotency_key)
+        )
+        assert action is not None
+        job = await session.scalar(
+            select(ReconciliationOutbox).where(ReconciliationOutbox.operator_action_id == action.id)
+        )
+        assert job is not None
+        return action, job
+
+
+async def add_panel_action(
+    database: Database,
+    *,
+    action: str = "remnawave_extend_subscription",
+    key: str,
+    payload: dict[str, object] | None = None,
+) -> OperatorAction:
+    async with database.session() as session:
+        operator_action = OperatorAction(
+            ticket_id="ticket-1",
+            operator_telegram_id=42,
+            action=action,
+            idempotency_key=key,
+            payload=payload or {},
+            result="unknown",
+        )
+        session.add(operator_action)
+        await session.commit()
+        return operator_action
 
 
 @pytest.mark.asyncio
@@ -201,57 +281,44 @@ async def test_panel_service_resolves_telegram_ticket_subscription() -> None:
     assert lookup.subscription.used_traffic_bytes == 1024
 
 
+@pytest.mark.parametrize(
+    ("error", "expected_status"),
+    [
+        (RemnawaveNotFoundError(), "not_found"),
+        (RemnawaveAmbiguousIdentityError(), "ambiguous_identity"),
+        (RemnawaveUnavailableError(), "unavailable"),
+    ],
+    ids=("not-found", "ambiguous-identity", "unavailable"),
+)
 @pytest.mark.asyncio
-async def test_panel_service_maps_not_found() -> None:
-    service = PanelService(FakeRemnawave(RemnawaveNotFoundError()))
+async def test_panel_service_maps_lookup_error(error: Exception, expected_status: str) -> None:
+    service = PanelService(FakeRemnawave(error))
 
     lookup = await service.get_subscription_for_ticket(ticket_view())
 
-    assert lookup.status == "not_found"
-    assert lookup.subscription is None
-
-
-@pytest.mark.asyncio
-async def test_panel_service_maps_ambiguous_identity() -> None:
-    service = PanelService(FakeRemnawave(RemnawaveAmbiguousIdentityError()))
-
-    lookup = await service.get_subscription_for_ticket(ticket_view())
-
-    assert lookup.status == "ambiguous_identity"
+    assert lookup.status == expected_status
     assert lookup.subscription is None
 
 
 def test_telegram_adapter_explains_ambiguous_identity() -> None:
-    from supportbot.telegram_adapter import TelegramSupportAdapter
-
-    assert TelegramSupportAdapter._panel_status_text("ambiguous_identity") == (
+    assert panel_status_text("ambiguous_identity") == (
         "найдено несколько пользователей с этим Telegram ID; операция заблокирована"
     )
 
 
-@pytest.mark.asyncio
-async def test_panel_service_maps_unavailable() -> None:
-    service = PanelService(FakeRemnawave(RemnawaveUnavailableError()))
-
-    lookup = await service.get_subscription_for_ticket(ticket_view())
-
-    assert lookup.status == "unavailable"
-    assert lookup.subscription is None
-
-
 def test_telegram_adapter_formats_subscription_lookup() -> None:
-    from supportbot.panel import PanelSubscriptionLookup, _subscription_info
+    from supportbot.panel import PanelSubscriptionLookup, subscription_info
     from supportbot.telegram_adapter import TOPIC_COMMANDS
 
     lookup = PanelSubscriptionLookup(
         status="found",
         identity_provider="telegram",
         identity_value="123456789",
-        subscription=_subscription_info(remnawave_user()),
+        subscription=subscription_info(remnawave_user()),
     )
 
-    text = TelegramSupportAdapter._format_subscription_lookup(lookup)
-    expiration = TelegramSupportAdapter._expiration_text(remnawave_user().expire_at)
+    text = format_subscription_lookup(lookup)
+    expiration = expiration_text(remnawave_user().expire_at)
 
     assert "/subinfo" in TOPIC_COMMANDS
     assert text == (
@@ -283,7 +350,7 @@ def test_telegram_adapter_formats_subscription_lookup() -> None:
 def test_expiration_text_is_compact(expire_at: datetime, expected: str) -> None:
     now = datetime(2026, 7, 2, 12, tzinfo=UTC)
 
-    assert TelegramSupportAdapter._expiration_text(expire_at, now=now) == expected
+    assert expiration_text(expire_at, now=now) == expected
 
 
 @pytest.fixture
@@ -442,6 +509,30 @@ async def test_panel_extend_validates_days_before_audit(database: Database) -> N
 
 
 @pytest.mark.asyncio
+async def test_reconciliation_is_not_claimed_while_mutation_is_in_flight(
+    database: Database,
+) -> None:
+    remnawave = BlockingExtendRemnawave(remnawave_user())
+    service = PanelService(remnawave, database=database, reconcile_delay_seconds=0)
+    mutation_task = asyncio.create_task(
+        service.extend_subscription_for_ticket(
+            ticket=ticket_view(),
+            operator_telegram_id=42,
+            extend_days=30,
+            idempotency_key="telegram:-100:60:/gift",
+        )
+    )
+
+    await asyncio.wait_for(remnawave.mutation_started.wait(), timeout=1)
+    claimed = await DurableWorkRepository(database).claim_reconciliation()
+    remnawave.release_mutation.set()
+    result = await asyncio.wait_for(mutation_task, timeout=1)
+
+    assert claimed is None
+    assert result.completed is True
+
+
+@pytest.mark.asyncio
 async def test_panel_queues_and_confirms_applied_gift_after_lost_response(
     database: Database,
 ) -> None:
@@ -454,15 +545,8 @@ async def test_panel_queues_and_confirms_applied_gift_after_lost_response(
         extend_days=30,
         idempotency_key="telegram:-100:6:/gift",
     )
-    async with database.session() as session:
-        action = await session.scalar(
-            select(OperatorAction).where(OperatorAction.idempotency_key == "telegram:-100:6:/gift")
-        )
-        job = await session.scalar(
-            select(ReconciliationOutbox).where(ReconciliationOutbox.operator_action_id == action.id)
-        )
+    action, job = await load_action_and_job(database, "telegram:-100:6:/gift")
     assert result.status == "unknown"
-    assert action is not None and job is not None
     assert await service.reconcile_durable_action(action.id, job.payload) is True
     async with database.session() as session:
         action = await session.get(OperatorAction, action.id)
@@ -491,10 +575,7 @@ async def test_panel_unlocks_gift_when_delayed_check_shows_no_change(
         idempotency_key="telegram:-100:7:/gift",
     )
 
-    async with database.session() as session:
-        action = await session.scalar(
-            select(OperatorAction).where(OperatorAction.idempotency_key == "telegram:-100:6:/gift")
-        )
+    action, job = await load_action_and_job(database, "telegram:-100:6:/gift")
 
     assert first.status == "unknown"
     assert first.changed is False
@@ -502,9 +583,31 @@ async def test_panel_unlocks_gift_when_delayed_check_shows_no_change(
     assert remnawave.extend_calls == [
         ("11111111-1111-1111-1111-111111111111", 30),
     ]
-    assert action is not None
     assert action.result == "unknown"
     assert action.payload["automatic_reconcile"] == "queued"
+    assert (
+        await service.reconcile_durable_action(
+            action.id,
+            job.payload,
+            attempt_count=3,
+        )
+        is True
+    )
+    assert (
+        await service._reserve_action(
+            ticket=ticket_view(),
+            operator_telegram_id=42,
+            action="extend_subscription",
+            idempotency_key="telegram:-100:8:/gift",
+            payload={"extend_days": 30},
+        )
+        == "reserved"
+    )
+    async with database.session() as session:
+        action = await session.get(OperatorAction, action.id)
+    assert action is not None
+    assert action.result == "not_applied"
+    assert action.payload["automatic_reconcile"] == "not_applied"
 
 
 @pytest.mark.asyncio
@@ -520,15 +623,8 @@ async def test_gift_reconcile_worker_handles_eventual_consistency(database: Data
         extend_days=30,
         idempotency_key="telegram:-100:70:/gift",
     )
-    async with database.session() as session:
-        action = await session.scalar(
-            select(OperatorAction).where(OperatorAction.idempotency_key == "telegram:-100:70:/gift")
-        )
-        job = await session.scalar(
-            select(ReconciliationOutbox).where(ReconciliationOutbox.operator_action_id == action.id)
-        )
+    action, job = await load_action_and_job(database, "telegram:-100:70:/gift")
     assert result.status == "unknown"
-    assert action is not None and job is not None
     assert await service.reconcile_durable_action(action.id, job.payload) is False
     assert await service.reconcile_durable_action(action.id, job.payload) is True
 
@@ -544,7 +640,12 @@ async def test_gift_reconcile_does_not_claim_concurrent_change(database: Databas
         initial,
         [changed_by_more_than_requested] * 3,
     )
-    service = PanelService(remnawave, database=database, reconcile_delay_seconds=0)
+    service = PanelService(
+        remnawave,
+        database=database,
+        reconcile_delay_seconds=0,
+        support_group_id=-100123,
+    )
 
     result = await service.extend_subscription_for_ticket(
         ticket=ticket_view(),
@@ -553,8 +654,475 @@ async def test_gift_reconcile_does_not_claim_concurrent_change(database: Databas
         idempotency_key="telegram:-100:71:/gift",
     )
 
+    action, job = await load_action_and_job(database, "telegram:-100:71:/gift")
+    assert await service.reconcile_durable_action(action.id, job.payload, attempt_count=1) is False
+    assert await service.reconcile_durable_action(action.id, job.payload, attempt_count=2) is False
+    assert await service.reconcile_durable_action(action.id, job.payload, attempt_count=3) is True
+    async with database.session() as session:
+        action = await session.get(OperatorAction, action.id)
+        notification = await session.scalar(
+            select(DeliveryOutbox).where(
+                DeliveryOutbox.idempotency_key
+                == f"panel-reconcile:{action.id}:operator-notification"
+            )
+        )
+
     assert result.status == "unknown"
     assert result.changed is False
+    assert action is not None
+    assert action.result == "unknown"
+    assert action.payload["automatic_reconcile"] == "inconclusive"
+    assert notification is not None
+    assert action.id in str(notification.payload["text"])
+    assert "/resolvepanel" in str(notification.payload["text"])
+    assert (
+        await service._reserve_action(
+            ticket=ticket_view(),
+            operator_telegram_id=42,
+            action="extend_subscription",
+            idempotency_key="telegram:-100:72:/gift",
+            payload={"extend_days": 30},
+        )
+        == "needs_reconcile"
+    )
+
+
+@pytest.mark.parametrize(
+    ("resolution", "expected_result"),
+    [("applied", "completed"), ("not_applied", "not_applied")],
+)
+@pytest.mark.parametrize(
+    "action_name",
+    [
+        "remnawave_extend_subscription",
+        "remnawave_reset_key",
+        "remnawave_reset_devices",
+    ],
+)
+@pytest.mark.asyncio
+async def test_manual_resolution_is_audited_first_writer_wins_and_unblocks(
+    database: Database,
+    resolution: str,
+    expected_result: str,
+    action_name: str,
+) -> None:
+    action_suffix = action_name.removeprefix("remnawave_")
+    action = await add_panel_action(
+        database,
+        action=action_name,
+        key=f"inconclusive-{action_suffix}-{resolution}",
+        payload={
+            "automatic_reconcile": "inconclusive",
+            "requires_reconcile": True,
+        },
+    )
+
+    remnawave = FakeRemnawave(remnawave_user())
+    service = PanelService(remnawave, database=database)
+    command_key = f"manual-resolution-{action_suffix}-{resolution}"
+    assert await service.resolve_inconclusive_action(
+        ticket_id="ticket-1",
+        operator_action_id=action.id,
+        operator_telegram_id=7,
+        resolution=resolution,
+        idempotency_key=command_key,
+    )
+    assert not await service.resolve_inconclusive_action(
+        ticket_id="ticket-1",
+        operator_action_id=action.id,
+        operator_telegram_id=8,
+        resolution="not_applied" if resolution == "applied" else "applied",
+        idempotency_key=f"{command_key}-late",
+    )
+    assert await service.reconcile_durable_action(action.id, {"invalid": True}) is True
+
+    async with database.session() as session:
+        resolved = await session.get(OperatorAction, action.id)
+        audit = await session.scalar(
+            select(OperatorAction).where(OperatorAction.idempotency_key == command_key)
+        )
+    assert resolved is not None
+    assert resolved.result == expected_result
+    assert resolved.completed_at is not None
+    assert resolved.payload["automatic_reconcile"] == "inconclusive"
+    assert resolved.payload["manual_reconcile"] == resolution
+    assert resolved.payload["manual_reconciled_by_telegram_id"] == 7
+    assert resolved.payload["manual_reconcile_command_key"] == command_key
+    assert audit is not None
+    assert audit.action == "resolve_remnawave_action"
+    assert audit.payload == {"operator_action_id": action.id, "resolution": resolution}
+    assert remnawave.telegram_ids == []
+    assert (
+        await service._reserve_action(
+            ticket=ticket_view(),
+            operator_telegram_id=7,
+            action="extend_subscription",
+            idempotency_key=f"after-manual-{action_suffix}-{resolution}",
+            payload={"extend_days": 30},
+        )
+        == "reserved"
+    )
+
+
+@pytest.mark.asyncio
+async def test_manual_resolution_rejects_non_inconclusive_or_unsupported_action(
+    database: Database,
+) -> None:
+    async with database.session() as session:
+        action = OperatorAction(
+            ticket_id="ticket-1",
+            operator_telegram_id=42,
+            action="remnawave_future_action",
+            idempotency_key="unsupported-inconclusive",
+            payload={"automatic_reconcile": "inconclusive"},
+            result="unknown",
+        )
+        session.add(action)
+        await session.commit()
+
+    service = PanelService(FakeRemnawave(remnawave_user()), database=database)
+    assert not await service.resolve_inconclusive_action(
+        ticket_id="ticket-1",
+        operator_action_id=action.id,
+        operator_telegram_id=7,
+        resolution="applied",
+        idempotency_key="reject-unsupported",
+    )
+    async with database.session() as session:
+        action = await session.get(OperatorAction, action.id)
+        assert action is not None
+        action.action = "remnawave_extend_subscription"
+        action.payload = {"automatic_reconcile": "queued"}
+        await session.commit()
+    assert not await service.resolve_inconclusive_action(
+        ticket_id="ticket-1",
+        operator_action_id=action.id,
+        operator_telegram_id=7,
+        resolution="not_applied",
+        idempotency_key="reject-pending",
+    )
+    with pytest.raises(ValueError, match="resolution"):
+        await service.resolve_inconclusive_action(
+            ticket_id="ticket-1",
+            operator_action_id=action.id,
+            operator_telegram_id=7,
+            resolution="maybe",
+            idempotency_key="reject-invalid-resolution",
+        )
+
+
+@pytest.mark.asyncio
+async def test_exhausted_remnawave_read_becomes_notified_inconclusive(
+    database: Database,
+) -> None:
+    action = await add_panel_action(
+        database,
+        key="exhausted-read",
+        payload={"automatic_reconcile": "queued", "reconciliation_pending": True},
+    )
+    reconciliation_payload: dict[str, object] = {
+        "identity_value": "123456789",
+        "action": "extend_subscription",
+        "before_expire_at": remnawave_user().expire_at.isoformat(),
+        "request_payload": {"extend_days": 30},
+    }
+    async with database.session() as session:
+        session.add(
+            ReconciliationOutbox(
+                idempotency_key="exhausted-read:reconciliation",
+                kind="remnawave",
+                ticket_id="ticket-1",
+                operator_action_id=action.id,
+                payload=reconciliation_payload,
+                status=WorkStatus.PENDING,
+                attempt_count=MAX_RECONCILIATION_ATTEMPTS - 1,
+                next_attempt_at=utcnow(),
+            )
+        )
+        await session.commit()
+
+    remnawave = FakeRemnawave(RemnawaveUnavailableError("temporarily unavailable"))
+    service = PanelService(remnawave, database=database, support_group_id=-100123)
+    repository = DurableWorkRepository(database)
+    job = await repository.claim_reconciliation()
+    assert job is not None
+    assert job.attempt_count == MAX_RECONCILIATION_ATTEMPTS
+
+    async def unexpected_topic_reconciliation(ticket_id: str) -> bool:
+        raise AssertionError(f"unexpected topic reconciliation for {ticket_id}")
+
+    worker = ReconciliationWorker(
+        repository=repository,
+        reconcile_topic=unexpected_topic_reconciliation,
+        panel_service=service,
+    )
+    await worker._process(job)
+
+    async with database.session() as session:
+        resolved = await session.get(OperatorAction, action.id)
+        stored_job = await session.get(ReconciliationOutbox, job.id)
+        notifications = list(
+            (
+                await session.scalars(
+                    select(DeliveryOutbox).where(
+                        DeliveryOutbox.idempotency_key
+                        == f"panel-reconcile:{action.id}:operator-notification"
+                    )
+                )
+            ).all()
+        )
+    assert resolved is not None
+    assert resolved.result == "unknown"
+    assert resolved.payload["automatic_reconcile"] == "inconclusive"
+    assert resolved.payload["reconciliation_failure"] == "attempts_exhausted"
+    assert resolved.payload["reconciliation_error_type"] == "RemnawaveUnavailableError"
+    assert stored_job is not None
+    assert stored_job.status == WorkStatus.DELIVERED
+    assert len(notifications) == 1
+    assert action.id in str(notifications[0].payload["text"])
+    assert remnawave.telegram_ids == [123456789]
+
+    assert await service.reconcile_durable_action(
+        action.id,
+        reconciliation_payload,
+        attempt_count=MAX_RECONCILIATION_ATTEMPTS,
+    )
+    assert remnawave.telegram_ids == [123456789]
+
+
+@pytest.mark.asyncio
+async def test_invalid_durable_payload_becomes_inconclusive_without_retry(
+    database: Database,
+) -> None:
+    action = await add_panel_action(
+        database,
+        key="invalid-durable-payload",
+        payload={"automatic_reconcile": "queued", "reconciliation_pending": True},
+    )
+    remnawave = FakeRemnawave(remnawave_user())
+    service = PanelService(remnawave, database=database, support_group_id=-100123)
+
+    assert await service.reconcile_durable_action(action.id, {"action": "reset_key"})
+
+    async with database.session() as session:
+        resolved = await session.get(OperatorAction, action.id)
+    assert resolved is not None
+    assert resolved.result == "unknown"
+    assert resolved.payload["automatic_reconcile"] == "inconclusive"
+    assert resolved.payload["reconciliation_failure"] == "invalid_payload"
+    assert remnawave.telegram_ids == []
+
+
+@pytest.mark.parametrize(
+    ("resolution", "expected_action_result", "expected_intent_status"),
+    [
+        ("applied", "completed", NotificationStatus.PENDING),
+        ("not_applied", "not_applied", NotificationStatus.CANCELLED),
+    ],
+)
+@pytest.mark.asyncio
+async def test_manual_revoke_resolution_preserves_notification_guarantee(
+    database: Database,
+    resolution: str,
+    expected_action_result: str,
+    expected_intent_status: NotificationStatus,
+) -> None:
+    action = await add_panel_action(
+        database,
+        action="remnawave_revoke_subscription_link",
+        key=f"manual-revoke-{resolution}",
+        payload={
+            "automatic_reconcile": "inconclusive",
+            "requires_reconcile": True,
+            "identity_value": "123456789",
+        },
+    )
+    async with database.session() as session:
+        session.add(
+            NotificationOutbox(
+                ticket_id="ticket-1",
+                operator_action_id=action.id,
+                idempotency_key=f"manual-revoke-{resolution}:notification",
+                event_type="subscription_link_reissued",
+                destination="subscription_owner",
+                recipient_identity_provider="telegram",
+                recipient_identity_value="123456789",
+                payload={"before_subscription_url": "https://sub.example/old"},
+                status=NotificationStatus.AWAITING_PAYLOAD,
+            )
+        )
+        await session.commit()
+
+    remnawave = FakeRemnawave(remnawave_user())
+    service = PanelService(remnawave, database=database)
+    assert await service.resolve_inconclusive_action(
+        ticket_id="ticket-1",
+        operator_action_id=action.id,
+        operator_telegram_id=7,
+        resolution=resolution,
+        idempotency_key=f"resolve-revoke-{resolution}",
+    )
+
+    async with database.session() as session:
+        resolved = await session.get(OperatorAction, action.id)
+        intent = await session.scalar(
+            select(NotificationOutbox).where(NotificationOutbox.operator_action_id == action.id)
+        )
+    assert resolved is not None
+    assert resolved.result == expected_action_result
+    assert intent is not None
+    assert intent.status == expected_intent_status
+    assert remnawave.revoke_calls == []
+    if resolution == "applied":
+        assert intent.payload["subscription_url"] == remnawave_user().subscription_url
+        assert remnawave.telegram_ids == [123456789]
+    else:
+        assert remnawave.telegram_ids == []
+
+
+@pytest.mark.asyncio
+async def test_concurrent_manual_resolutions_have_one_consistent_winner(
+    database: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    action = await add_panel_action(
+        database,
+        key="concurrent-manual-resolution",
+        payload={"automatic_reconcile": "inconclusive", "requires_reconcile": True},
+    )
+    service = PanelService(FakeRemnawave(remnawave_user()), database=database)
+    original_scalar = AsyncSession.scalar
+    both_selected = asyncio.Event()
+    release = asyncio.Event()
+    participants: set[asyncio.Task[bool]] = set()
+    selected_count = 0
+
+    async def barrier_scalar(
+        self: AsyncSession, statement: object, *args: object, **kwargs: object
+    ):
+        nonlocal selected_count
+        result = await original_scalar(self, statement, *args, **kwargs)
+        current = asyncio.current_task()
+        if (
+            current in participants
+            and isinstance(result, OperatorAction)
+            and result.id == action.id
+        ):
+            selected_count += 1
+            if selected_count == 2:
+                both_selected.set()
+            await release.wait()
+        return result
+
+    monkeypatch.setattr(AsyncSession, "scalar", barrier_scalar)
+    applied = asyncio.create_task(
+        service.resolve_inconclusive_action(
+            ticket_id="ticket-1",
+            operator_action_id=action.id,
+            operator_telegram_id=7,
+            resolution="applied",
+            idempotency_key="concurrent-applied",
+        )
+    )
+    not_applied = asyncio.create_task(
+        service.resolve_inconclusive_action(
+            ticket_id="ticket-1",
+            operator_action_id=action.id,
+            operator_telegram_id=8,
+            resolution="not_applied",
+            idempotency_key="concurrent-not-applied",
+        )
+    )
+    participants.update((applied, not_applied))
+    await asyncio.wait_for(both_selected.wait(), timeout=2)
+    release.set()
+    results = await asyncio.wait_for(asyncio.gather(applied, not_applied), timeout=10)
+
+    async with database.session() as session:
+        resolved = await session.get(OperatorAction, action.id)
+        audits = list(
+            (
+                await session.scalars(
+                    select(OperatorAction).where(
+                        OperatorAction.action == "resolve_remnawave_action"
+                    )
+                )
+            ).all()
+        )
+    assert sorted(results) == [False, True]
+    assert resolved is not None
+    assert len(audits) == 1
+    assert resolved.payload["manual_reconcile"] == audits[0].payload["resolution"]
+    assert resolved.payload["manual_reconcile_command_key"] == audits[0].idempotency_key
+    assert resolved.payload["manual_reconciled_by_telegram_id"] == audits[0].operator_telegram_id
+
+
+@pytest.mark.asyncio
+async def test_late_automatic_reconciliation_cannot_overwrite_manual_resolution(
+    database: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    action = await add_panel_action(
+        database,
+        key="late-automatic-reconciliation",
+        payload={"automatic_reconcile": "queued", "reconciliation_pending": True},
+    )
+    initial = remnawave_user()
+    applied_user = replace(initial, expire_at=initial.expire_at + timedelta(days=30))
+    service = PanelService(FakeRemnawave(applied_user), database=database)
+    reconciliation_payload: dict[str, object] = {
+        "identity_value": "123456789",
+        "action": "extend_subscription",
+        "before_expire_at": initial.expire_at.isoformat(),
+        "request_payload": {"extend_days": 30},
+    }
+    original_execute = AsyncSession.execute
+    automatic_ready = asyncio.Event()
+    release_automatic = asyncio.Event()
+    automatic_task: asyncio.Task[bool] | None = None
+
+    async def pause_automatic_update(
+        self: AsyncSession, statement: object, *args: object, **kwargs: object
+    ):
+        if (
+            asyncio.current_task() is automatic_task
+            and isinstance(statement, Update)
+            and statement.table.name == "operator_actions"
+        ):
+            automatic_ready.set()
+            await release_automatic.wait()
+        return await original_execute(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "execute", pause_automatic_update)
+    automatic_task = asyncio.create_task(
+        service.reconcile_durable_action(action.id, reconciliation_payload)
+    )
+    await asyncio.wait_for(automatic_ready.wait(), timeout=2)
+    async with database.session() as session:
+        current = await session.get(OperatorAction, action.id)
+        assert current is not None
+        current.payload = {
+            **current.payload,
+            "automatic_reconcile": "inconclusive",
+            "requires_reconcile": True,
+        }
+        await session.commit()
+    assert await service.resolve_inconclusive_action(
+        ticket_id="ticket-1",
+        operator_action_id=action.id,
+        operator_telegram_id=7,
+        resolution="not_applied",
+        idempotency_key="late-automatic-manual-winner",
+    )
+    release_automatic.set()
+    assert await asyncio.wait_for(automatic_task, timeout=2)
+
+    async with database.session() as session:
+        resolved = await session.get(OperatorAction, action.id)
+    assert resolved is not None
+    assert resolved.result == "not_applied"
+    assert resolved.payload["manual_reconcile"] == "not_applied"
+    assert resolved.payload["automatic_reconcile"] == "inconclusive"
 
 
 @pytest.mark.asyncio
@@ -641,10 +1209,10 @@ async def test_operator_action_tracks_update_and_completion_times(database: Data
 
 
 @pytest.mark.asyncio
-async def test_reset_key_unknown_outcome_requires_manual_reconciliation(
+async def test_reset_key_unknown_outcome_is_confirmed_automatically(
     database: Database,
 ) -> None:
-    remnawave = RetryOnceResetKeyRemnawave(remnawave_user())
+    remnawave = AppliedUnknownResetKeyRemnawave(remnawave_user())
     service = PanelService(remnawave, database=database, reconcile_delay_seconds=0)
 
     result = await service.reset_key_for_ticket(
@@ -653,18 +1221,17 @@ async def test_reset_key_unknown_outcome_requires_manual_reconciliation(
         idempotency_key="telegram:-100:8:/resetkey",
     )
 
-    async with database.session() as session:
-        action = await session.scalar(
-            select(OperatorAction).where(
-                OperatorAction.idempotency_key == "telegram:-100:8:/resetkey"
-            )
-        )
+    action, job = await load_action_and_job(database, "telegram:-100:8:/resetkey")
 
     assert result.status == "unknown"
     assert remnawave.revoke_calls == [("11111111-1111-1111-1111-111111111111", True)]
+    assert job.payload["before_credential_fingerprint"] == "a" * 64
+    assert await service.reconcile_durable_action(action.id, job.payload) is True
+    async with database.session() as session:
+        action = await session.get(OperatorAction, action.id)
     assert action is not None
-    assert action.payload["automatic_reconcile"] == "manual_review_required"
-    assert action.payload["requires_reconcile"] is True
+    assert action.result == "completed"
+    assert action.payload["automatic_reconcile"] == "applied"
 
 
 @pytest.mark.asyncio
@@ -677,17 +1244,8 @@ async def test_revoke_link_is_confirmed_by_durable_reconciliation(database: Data
         operator_telegram_id=42,
         idempotency_key="telegram:-100:9:/revokelink",
     )
-    async with database.session() as session:
-        action = await session.scalar(
-            select(OperatorAction).where(
-                OperatorAction.idempotency_key == "telegram:-100:9:/revokelink"
-            )
-        )
-        job = await session.scalar(
-            select(ReconciliationOutbox).where(ReconciliationOutbox.operator_action_id == action.id)
-        )
+    action, job = await load_action_and_job(database, "telegram:-100:9:/revokelink")
     assert result.status == "unknown"
-    assert action is not None and job is not None
     assert await service.reconcile_durable_action(action.id, job.payload) is True
     async with database.session() as session:
         notification = await session.scalar(
@@ -764,6 +1322,16 @@ async def test_restart_recovers_prepared_revoke_intent_without_repeating_mutatio
     lookup = await service.get_subscription_for_ticket(ticket_view())
     assert lookup.subscription is not None
     assert await service._prepare_revoke_intent(action_key, lookup.subscription) is True
+    payload = service._reconciliation_payload(
+        action="revoke_subscription_link",
+        request_payload={"revoke_only_passwords": False},
+        before=lookup.subscription,
+    )
+    await service._queue_durable_reconciliation(
+        ticket=ticket_view(),
+        idempotency_key=action_key,
+        payload=payload,
+    )
     remnawave.result = replace(initial, subscription_url="https://sub.example/recovered")
     remnawave.telegram_ids.clear()
 
@@ -786,6 +1354,12 @@ async def test_restart_recovers_prepared_revoke_intent_without_repeating_mutatio
     assert intent is not None
     assert intent.status == NotificationStatus.AWAITING_PAYLOAD
     assert remnawave.telegram_ids == []
+    async with database.session() as session:
+        job = await session.scalar(
+            select(ReconciliationOutbox).where(ReconciliationOutbox.operator_action_id == action.id)
+        )
+    assert job is not None
+    assert await service.reconcile_durable_action(action.id, job.payload) is True
 
 
 @pytest.mark.asyncio
@@ -828,7 +1402,7 @@ async def test_restart_cancels_revoke_intent_interrupted_before_mutation(
 
 
 @pytest.mark.asyncio
-async def test_restart_does_not_reprocess_ready_revoke_notification(
+async def test_restart_recovery_is_idempotent_before_revoke_mutation(
     database: Database,
 ) -> None:
     remnawave = FakeRemnawave(remnawave_user())
@@ -862,16 +1436,16 @@ async def test_restart_does_not_reprocess_ready_revoke_notification(
             )
         )
     assert action is not None
-    assert action.result == "unknown"
+    assert action.result == "not_applied"
     assert intent is not None
-    assert intent.status == NotificationStatus.AWAITING_PAYLOAD
+    assert intent.status == NotificationStatus.CANCELLED
 
 
 @pytest.mark.asyncio
-async def test_reset_devices_unknown_outcome_requires_manual_reconciliation(
+async def test_reset_devices_unknown_outcome_is_confirmed_automatically(
     database: Database,
 ) -> None:
-    remnawave = RetryOnceResetDevicesRemnawave(remnawave_user())
+    remnawave = AppliedUnknownResetDevicesRemnawave(remnawave_user())
     service = PanelService(remnawave, database=database, reconcile_delay_seconds=0)
 
     result = await service.reset_devices_for_ticket(
@@ -880,22 +1454,49 @@ async def test_reset_devices_unknown_outcome_requires_manual_reconciliation(
         idempotency_key="telegram:-100:10:/resetdevices",
     )
 
-    async with database.session() as session:
-        action = await session.scalar(
-            select(OperatorAction).where(
-                OperatorAction.idempotency_key == "telegram:-100:10:/resetdevices"
-            )
-        )
+    action, job = await load_action_and_job(database, "telegram:-100:10:/resetdevices")
 
     assert result.status == "unknown"
     assert remnawave.reset_device_calls == ["11111111-1111-1111-1111-111111111111"]
+    assert remnawave.get_device_calls == []
+    assert await service.reconcile_durable_action(action.id, job.payload) is True
+    async with database.session() as session:
+        action = await session.get(OperatorAction, action.id)
     assert action is not None
-    assert action.payload["automatic_reconcile"] == "manual_review_required"
-    assert action.payload["requires_reconcile"] is True
+    assert action.result == "completed"
+    assert action.payload["automatic_reconcile"] == "applied"
+    assert remnawave.get_device_calls == [
+        "11111111-1111-1111-1111-111111111111",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_interrupted_panel_actions_are_recovered_as_unknown(database: Database) -> None:
+async def test_reset_devices_stays_blocked_when_result_is_inconclusive(
+    database: Database,
+) -> None:
+    remnawave = UnknownResetDevicesRemnawave(remnawave_user())
+    service = PanelService(remnawave, database=database, reconcile_delay_seconds=0)
+
+    result = await service.reset_devices_for_ticket(
+        ticket=ticket_view(),
+        operator_telegram_id=42,
+        idempotency_key="telegram:-100:11:/resetdevices",
+    )
+    action, job = await load_action_and_job(database, "telegram:-100:11:/resetdevices")
+    assert await service.reconcile_durable_action(action.id, job.payload, attempt_count=3) is True
+    async with database.session() as session:
+        action = await session.get(OperatorAction, action.id)
+
+    assert result.status == "unknown"
+    assert action is not None
+    assert action.result == "unknown"
+    assert action.payload["automatic_reconcile"] == "inconclusive"
+
+
+@pytest.mark.asyncio
+async def test_action_interrupted_before_mutation_is_recovered_as_not_applied(
+    database: Database,
+) -> None:
     async with database.session() as session:
         session.add_all(
             [
@@ -936,8 +1537,8 @@ async def test_interrupted_panel_actions_are_recovered_as_unknown(database: Data
 
     assert recovered == 1
     assert panel_action is not None
-    assert panel_action.result == "unknown"
-    assert panel_action.payload["requires_reconcile"] is True
-    assert panel_action.payload["recovery_reason"] == "process_interrupted"
+    assert panel_action.result == "not_applied"
+    assert panel_action.payload["requires_reconcile"] is False
+    assert panel_action.payload["recovery_reason"] == "interrupted_before_mutation"
     assert unrelated_action is not None
     assert unrelated_action.result == "started"

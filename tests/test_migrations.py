@@ -236,7 +236,7 @@ async def test_claim_ownership_migration_requeues_processing_deliveries(
             target_chat_id=ticket.telegram_user_id,
             idempotency_key="migration-processing-delivery",
         )
-        claimed = await ticket_service.claim_due_deliveries()
+        claimed = await ticket_service.outbox.claim_due_deliveries()
         assert len(claimed) == 1
         delivery_id = claimed[0].id
     finally:

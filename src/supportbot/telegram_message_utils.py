@@ -5,6 +5,7 @@ from html import escape
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from supportbot.service_types import TicketView
+from supportbot.telegram_formatting import customer_identity
 
 RATING_CALLBACK_PREFIX = "support_rating"
 
@@ -79,17 +80,11 @@ def rating_keyboard(ticket_id: str, close_cycle: int) -> InlineKeyboardMarkup:
 
 
 def rating_report(ticket: TicketView, score: int) -> str:
-    identity_parts = []
-    if ticket.display_name:
-        identity_parts.append(escape(ticket.display_name))
-    if ticket.username:
-        identity_parts.append(f"@{escape(ticket.username)}")
-    identity = " · ".join(identity_parts) or "Без имени"
     return (
         "⭐ <b>Оценка поддержки</b>\n\n"
         f"Оценка: {'⭐' * score} <b>{score}/5</b>\n\n"
         "👤 <b>Клиент</b>\n\n"
-        f"<b>{identity}</b>\n"
+        f"<b>{customer_identity(ticket)}</b>\n"
         f"Telegram ID: <code>{ticket.telegram_user_id}</code>\n"
         f"Тикет: <code>{escape(ticket.id)}</code>"
     )

@@ -75,9 +75,7 @@ class TicketIngressService(TicketServiceBase):
     ) -> CustomerMessageResult:
         key = f"copy:{Direction.USER_TO_OPERATOR.value}:{source_chat_id}:{source_message_id}"
         async with self.database.session() as session:
-            if await session.scalar(
-                select(DeliveryOutbox.id).where(DeliveryOutbox.idempotency_key == key)
-            ):
+            if await self._delivery_exists(session, key):
                 ticket = await self._ticket_for_telegram_id(session, telegram_user_id)
                 if ticket is None:
                     raise RuntimeError("durable customer message has no ticket")
@@ -165,9 +163,7 @@ class TicketIngressService(TicketServiceBase):
                 await session.commit()
             except IntegrityError:
                 await session.rollback()
-                if not await session.scalar(
-                    select(DeliveryOutbox.id).where(DeliveryOutbox.idempotency_key == key)
-                ):
+                if not await self._delivery_exists(session, key):
                     raise
                 ticket = await self._ticket_for_telegram_id(session, telegram_user_id)
                 if ticket is None:
@@ -199,9 +195,7 @@ class TicketIngressService(TicketServiceBase):
             view = await self._ticket_view(session, ticket)
             if await self._is_blocked_in_session(session, view.telegram_user_id):
                 return TelegramOperatorReplyResult(False, True, ticket=view)
-            if await session.scalar(
-                select(DeliveryOutbox.id).where(DeliveryOutbox.idempotency_key == key)
-            ):
+            if await self._delivery_exists(session, key):
                 return TelegramOperatorReplyResult(False, False, ticket=view)
 
             reopened = TicketStatus(ticket.status) is TicketStatus.CLOSED
@@ -266,9 +260,7 @@ class TicketIngressService(TicketServiceBase):
                 await session.commit()
             except IntegrityError:
                 await session.rollback()
-                if await session.scalar(
-                    select(DeliveryOutbox.id).where(DeliveryOutbox.idempotency_key == key)
-                ):
+                if await self._delivery_exists(session, key):
                     return TelegramOperatorReplyResult(False, False)
                 raise
         if reopened:

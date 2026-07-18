@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -13,10 +14,6 @@ from supportbot.metrics import MetricsRegistry
 
 
 class RemnawaveError(Exception):
-    pass
-
-
-class RemnawaveDisabledError(RemnawaveError):
     pass
 
 
@@ -72,6 +69,7 @@ class RemnawaveUser:
     email: str | None
     hwid_device_limit: int | None
     traffic: RemnawaveTraffic | None
+    credential_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -177,22 +175,15 @@ class RemnawaveClient:
             mutation=True,
         )
         try:
-            response = payload.get("response")
-            if not isinstance(response, dict):
-                raise RemnawaveUnexpectedResponseError("Remnawave HWID response is malformed")
-            devices_payload = response.get("devices")
-            if not isinstance(devices_payload, list):
-                raise RemnawaveUnexpectedResponseError(
-                    "Remnawave HWID devices response is malformed"
-                )
-            return RemnawaveHwidDeviceResetResult(
-                total=_required_int(response, "total"),
-                devices=[self._parse_hwid_device(item) for item in devices_payload],
-            )
+            return self._parse_hwid_devices(payload)
         except RemnawaveUnexpectedResponseError as error:
             raise RemnawaveUnknownOutcomeError(
                 "Remnawave HWID reset outcome cannot be confirmed"
             ) from error
+
+    async def get_user_hwid_devices(self, *, user_uuid: str) -> RemnawaveHwidDeviceResetResult:
+        payload = await self._request_json("/api/hwid/devices/" + quote(user_uuid, safe=""))
+        return self._parse_hwid_devices(payload)
 
     async def _request_user_array(self, path: str) -> list[RemnawaveUser]:
         payload = await self._request_json(path)
@@ -306,6 +297,7 @@ class RemnawaveClient:
                 email=_optional_str(payload.get("email")),
                 hwid_device_limit=_optional_int(payload.get("hwidDeviceLimit")),
                 traffic=traffic,
+                credential_fingerprint=_credential_fingerprint(payload),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise RemnawaveUnexpectedResponseError("Remnawave user payload is malformed") from error
@@ -327,6 +319,19 @@ class RemnawaveClient:
             raise RemnawaveUnexpectedResponseError(
                 "Remnawave HWID device payload is malformed"
             ) from error
+
+    @classmethod
+    def _parse_hwid_devices(cls, payload: dict[str, Any]) -> RemnawaveHwidDeviceResetResult:
+        response = payload.get("response")
+        if not isinstance(response, dict):
+            raise RemnawaveUnexpectedResponseError("Remnawave HWID response is malformed")
+        devices_payload = response.get("devices")
+        if not isinstance(devices_payload, list):
+            raise RemnawaveUnexpectedResponseError("Remnawave HWID devices response is malformed")
+        return RemnawaveHwidDeviceResetResult(
+            total=_required_int(response, "total"),
+            devices=[cls._parse_hwid_device(item) for item in devices_payload],
+        )
 
 
 def _parse_datetime(value: object) -> datetime:
@@ -369,3 +374,11 @@ def _required_int(payload: dict[str, Any], key: str) -> int:
         raise RemnawaveUnexpectedResponseError(
             f"Remnawave response field {key} is malformed"
         ) from error
+
+
+def _credential_fingerprint(payload: dict[str, Any]) -> str | None:
+    values = [payload.get(key) for key in ("trojanPassword", "vlessUuid", "ssPassword")]
+    if any(not isinstance(value, str) for value in values):
+        return None
+    credentials = (value for value in values if isinstance(value, str))
+    return hashlib.sha256("\0".join(credentials).encode()).hexdigest()

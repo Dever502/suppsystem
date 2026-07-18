@@ -31,6 +31,9 @@ def user_payload(**overrides: object) -> dict[str, object]:
         "telegramId": 123456789,
         "email": "user@example.com",
         "hwidDeviceLimit": 5,
+        "trojanPassword": "trojan-secret",
+        "vlessUuid": "22222222-2222-2222-2222-222222222222",
+        "ssPassword": "shadowsocks-secret",
         "userTraffic": {
             "usedTrafficBytes": 100,
             "lifetimeUsedTrafficBytes": 200,
@@ -73,6 +76,7 @@ async def test_get_user_by_telegram_id_sends_bearer_and_parses_user() -> None:
     assert user.telegram_id == 123456789
     assert user.email == "user@example.com"
     assert user.hwid_device_limit == 5
+    assert user.credential_fingerprint is not None
     assert user.traffic is not None
     assert user.traffic.used_traffic_bytes == 100
 
@@ -308,3 +312,23 @@ async def test_malformed_revoke_success_is_an_unknown_outcome() -> None:
             user_uuid="11111111-1111-1111-1111-111111111111",
             revoke_only_passwords=True,
         )
+
+
+@pytest.mark.asyncio
+async def test_get_user_hwid_devices_uses_remnawave_2_8_contract() -> None:
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["url"] = str(request.url)
+        return httpx.Response(200, json={"response": {"total": 0, "devices": []}})
+
+    result = await remnawave_client(handler).get_user_hwid_devices(
+        user_uuid="11111111-1111-1111-1111-111111111111"
+    )
+
+    assert result.total == 0
+    assert seen == {
+        "method": "GET",
+        "url": "https://remna.example/api/hwid/devices/11111111-1111-1111-1111-111111111111",
+    }

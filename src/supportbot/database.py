@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any, Concatenate, Protocol
 
@@ -63,10 +63,6 @@ class Database:
 
     def session(self) -> AsyncSession:
         return self.sessions()
-
-    async def session_scope(self) -> AsyncIterator[AsyncSession]:
-        async with self.sessions() as session:
-            yield session
 
     async def retry_sqlite_locks[R](
         self,

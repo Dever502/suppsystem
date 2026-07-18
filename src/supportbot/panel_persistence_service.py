@@ -10,31 +10,17 @@ from supportbot.audit import record_event
 from supportbot.database import Database
 from supportbot.models import NotificationOutbox, NotificationStatus, OperatorAction, utcnow
 from supportbot.panel_types import (
-    PanelActionResult as PanelActionResult,
-)
-from supportbot.panel_types import (
-    PanelActionStatus as PanelActionStatus,
-)
-from supportbot.panel_types import (
-    PanelLookupStatus as PanelLookupStatus,
-)
-from supportbot.panel_types import (
-    PanelSubscriptionInfo as PanelSubscriptionInfo,
-)
-from supportbot.panel_types import (
-    PanelSubscriptionLookup as PanelSubscriptionLookup,
-)
-from supportbot.panel_types import (
+    PanelActionStatus,
+    PanelSubscriptionInfo,
+    PanelSubscriptionLookup,
     RemnawaveOperator,
     RemnawaveReader,
+    lookup_status_from_error,
+    subscription_info,
 )
-from supportbot.panel_types import lookup_status_from_error as _lookup_status_from_error
-from supportbot.panel_types import subscription_info as _subscription_info
 from supportbot.remnawave import RemnawaveError, RemnawaveUser
 from supportbot.service_types import TicketView
 from supportbot.trace import get_trace_id
-
-GIFT_RECONCILE_ATTEMPTS = 3
 
 
 class PanelPersistenceService:
@@ -66,7 +52,7 @@ class PanelPersistenceService:
             user = await self.remnawave.get_user_by_telegram_id(ticket.telegram_user_id)
         except RemnawaveError as error:
             return PanelSubscriptionLookup(
-                status=_lookup_status_from_error(error),
+                status=lookup_status_from_error(error),
                 identity_provider=identity_provider,
                 identity_value=identity_value,
             )
@@ -74,7 +60,7 @@ class PanelPersistenceService:
             status="found",
             identity_provider=identity_provider,
             identity_value=identity_value,
-            subscription=_subscription_info(user),
+            subscription=subscription_info(user),
         )
 
     async def _reserve_action(
@@ -88,19 +74,18 @@ class PanelPersistenceService:
     ) -> Literal["reserved", "duplicate", "needs_reconcile"]:
         database = self._require_database()
         action_name = f"remnawave_{action}"
+        duplicate_query = select(OperatorAction.id).where(
+            OperatorAction.idempotency_key == idempotency_key
+        )
+        unresolved_query = select(OperatorAction.id).where(
+            OperatorAction.ticket_id == ticket.id,
+            OperatorAction.action.startswith("remnawave_"),
+            OperatorAction.result.in_(("started", "unknown")),
+        )
         async with database.session() as session:
-            if await session.scalar(
-                select(OperatorAction.id).where(OperatorAction.idempotency_key == idempotency_key)
-            ):
+            if await session.scalar(duplicate_query):
                 return "duplicate"
-            unresolved_action = await session.scalar(
-                select(OperatorAction.id).where(
-                    OperatorAction.ticket_id == ticket.id,
-                    OperatorAction.action.startswith("remnawave_"),
-                    OperatorAction.result.in_(("started", "unknown")),
-                )
-            )
-            if unresolved_action is not None:
+            if await session.scalar(unresolved_query) is not None:
                 return "needs_reconcile"
             operator_action = OperatorAction(
                 id=str(uuid.uuid4()),
@@ -132,19 +117,9 @@ class PanelPersistenceService:
                 await session.commit()
             except IntegrityError:
                 await session.rollback()
-                if await session.scalar(
-                    select(OperatorAction.id).where(
-                        OperatorAction.idempotency_key == idempotency_key
-                    )
-                ):
+                if await session.scalar(duplicate_query):
                     return "duplicate"
-                if await session.scalar(
-                    select(OperatorAction.id).where(
-                        OperatorAction.ticket_id == ticket.id,
-                        OperatorAction.action.startswith("remnawave_"),
-                        OperatorAction.result.in_(("started", "unknown")),
-                    )
-                ):
+                if await session.scalar(unresolved_query):
                     return "needs_reconcile"
                 raise
             return "reserved"
@@ -206,7 +181,7 @@ class PanelPersistenceService:
                 await session.commit()
                 return "unknown"
 
-            self._fill_revoke_notification(intent, subscription=subscription)
+            self._fill_revoke_notification(intent, subscription)
             action.result = "completed"
             action.payload = {**action.payload, **audit_payload}
             await session.commit()
@@ -215,28 +190,15 @@ class PanelPersistenceService:
     @staticmethod
     def _fill_revoke_notification(
         intent: NotificationOutbox,
+        subscription: PanelSubscriptionInfo | RemnawaveUser,
         *,
-        subscription: PanelSubscriptionInfo | None = None,
-        user: RemnawaveUser | None = None,
         recovered: bool = False,
-        outcome_confirmed: bool = True,
     ) -> None:
-        if subscription is not None:
-            subscription_url = subscription.subscription_url
-            username = subscription.username
-            user_uuid = subscription.uuid
-        elif user is not None:
-            subscription_url = user.subscription_url
-            username = user.username
-            user_uuid = user.uuid
-        else:
-            raise ValueError("subscription or user is required to fill notification intent")
         intent.payload = {
-            "subscription_url": subscription_url,
-            "remnawave_username": username,
-            "remnawave_uuid": user_uuid,
+            "subscription_url": subscription.subscription_url,
+            "remnawave_username": subscription.username,
+            "remnawave_uuid": subscription.uuid,
             **({"recovered_after_restart": True} if recovered else {}),
-            **({"revoke_outcome_confirmed": False} if not outcome_confirmed else {}),
         }
         intent.status = NotificationStatus.PENDING
         intent.next_attempt_at = utcnow()

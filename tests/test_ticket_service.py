@@ -21,6 +21,7 @@ from supportbot.models import (
     WorkStatus,
     utcnow,
 )
+from supportbot.outbox_repository import OutboxRepository
 from supportbot.service_types import TicketNotFoundError, TicketView, TopicProvisioningConflictError
 from supportbot.services import TicketService
 
@@ -33,12 +34,34 @@ async def ticket_service(tmp_path: Path) -> TicketService:
     await database.dispose()
 
 
+async def test_ticket_service_retains_legacy_outbox_api(
+    ticket_service: TicketService,
+) -> None:
+    assert isinstance(ticket_service, OutboxRepository)
+    assert await ticket_service.claim_due_deliveries() == []
+    assert await ticket_service.claim_due_notifications() == []
+
+
 async def attach_claimed_topic(
     ticket_service: TicketService, ticket_id: str, topic_id: int
 ) -> TicketView:
     token = await ticket_service.claim_topic_provisioning(ticket_id)
     assert token is not None
     return await ticket_service.attach_topic(ticket_id, topic_id, token=token)
+
+
+async def enqueue_subscription_notification(
+    ticket_service: TicketService, ticket: TicketView, idempotency_key: str
+) -> bool:
+    return await ticket_service.enqueue_notification(
+        ticket_id=ticket.id,
+        event_type="subscription_link_reissued",
+        destination="subscription_owner",
+        recipient_identity_provider="telegram",
+        recipient_identity_value=str(ticket.telegram_user_id),
+        payload={"subscription_url": "https://sub.example/new"},
+        idempotency_key=idempotency_key,
+    )
 
 
 async def test_one_user_reuses_one_ticket_and_topic(ticket_service: TicketService) -> None:
@@ -151,7 +174,7 @@ async def test_internal_note_is_saved_without_delivery(
         source_message_id=77,
         idempotency_key="telegram:-100:77:/note",
     )
-    jobs = await ticket_service.claim_due_deliveries()
+    jobs = await ticket_service.outbox.claim_due_deliveries()
 
     assert first is True
     assert duplicate is False
@@ -180,7 +203,7 @@ async def test_delivery_enqueue_is_idempotent(ticket_service: TicketService) -> 
         target_chat_id=-100123,
         target_thread_id=778,
     )
-    jobs = await ticket_service.claim_due_deliveries()
+    jobs = await ticket_service.outbox.claim_due_deliveries()
 
     assert first is True
     assert duplicate is False
@@ -200,9 +223,9 @@ async def test_delivery_receipt_is_persisted(ticket_service: TicketService) -> N
         target_chat_id=-100123,
         target_thread_id=90023,
     )
-    jobs = await ticket_service.claim_due_deliveries()
+    jobs = await ticket_service.outbox.claim_due_deliveries()
 
-    await ticket_service.mark_delivery_delivered(
+    await ticket_service.outbox.mark_delivery_delivered(
         jobs[0].id,
         claim_token=jobs[0].claim_token,
         delivered_message_id=456,
@@ -233,10 +256,10 @@ async def test_user_message_waits_for_topic_and_is_released_on_attach(
     )
 
     assert queued is True
-    assert await ticket_service.claim_due_deliveries() == []
+    assert await ticket_service.outbox.claim_due_deliveries() == []
 
     await attach_claimed_topic(ticket_service, ticket.id, 90020)
-    jobs = await ticket_service.claim_due_deliveries()
+    jobs = await ticket_service.outbox.claim_due_deliveries()
 
     assert len(jobs) == 1
     assert jobs[0].payload["target_thread_id"] == 90020
@@ -258,7 +281,7 @@ async def test_enqueue_uses_current_topic_when_caller_has_stale_ticket_view(
         target_chat_id=-100123,
         target_thread_id=None,
     )
-    jobs = await ticket_service.claim_due_deliveries()
+    jobs = await ticket_service.outbox.claim_due_deliveries()
 
     assert queued is True
     assert len(jobs) == 1
@@ -282,18 +305,18 @@ async def test_delayed_retry_blocks_later_delivery_in_same_ticket(
             target_thread_id=90021,
         )
 
-    first_batch = await ticket_service.claim_due_deliveries()
+    first_batch = await ticket_service.outbox.claim_due_deliveries()
     assert len(first_batch) == 1
     assert first_batch[0].payload["source_message_id"] == 1
 
-    await ticket_service.mark_delivery_retry(
+    await ticket_service.outbox.mark_delivery_retry(
         first_batch[0].id,
         claim_token=first_batch[0].claim_token,
         error="temporary failure",
         retry_after_seconds=60,
         max_attempts=8,
     )
-    assert await ticket_service.claim_due_deliveries() == []
+    assert await ticket_service.outbox.claim_due_deliveries() == []
 
     async with ticket_service.database.session() as session:
         retriable = await session.get(DeliveryOutbox, first_batch[0].id)
@@ -301,15 +324,15 @@ async def test_delayed_retry_blocks_later_delivery_in_same_ticket(
         retriable.next_attempt_at = utcnow()
         await session.commit()
 
-    retry_batch = await ticket_service.claim_due_deliveries()
+    retry_batch = await ticket_service.outbox.claim_due_deliveries()
     assert len(retry_batch) == 1
     assert retry_batch[0].id == first_batch[0].id
     assert retry_batch[0].claim_token != first_batch[0].claim_token
-    assert await ticket_service.mark_delivery_delivered(
+    assert await ticket_service.outbox.mark_delivery_delivered(
         retry_batch[0].id,
         claim_token=retry_batch[0].claim_token,
     )
-    second_batch = await ticket_service.claim_due_deliveries()
+    second_batch = await ticket_service.outbox.claim_due_deliveries()
     assert len(second_batch) == 1
     assert second_batch[0].payload["source_message_id"] == 2
 
@@ -589,7 +612,7 @@ async def test_operator_close_can_enqueue_user_notification(
         notification_target_chat_id=1010,
         notification_idempotency_key="telegram:-100:11:/stop:user-notification",
     )
-    jobs = await ticket_service.claim_due_deliveries()
+    jobs = await ticket_service.outbox.claim_due_deliveries()
 
     assert changed is True
     assert duplicate is False
@@ -618,24 +641,24 @@ async def test_retarget_topic_deliveries_requeues_all_unfinished_user_messages(
             target_thread_id=900,
         )
 
-    claimed = await ticket_service.claim_due_deliveries()
+    claimed = await ticket_service.outbox.claim_due_deliveries()
     assert len(claimed) == 1
 
     retargeted = await ticket_service.retarget_topic_deliveries(
         ticket_id=ticket.id, old_topic_id=900, new_topic_id=901
     )
-    first_requeued = await ticket_service.claim_due_deliveries()
+    first_requeued = await ticket_service.outbox.claim_due_deliveries()
 
     assert retargeted == 2
     assert len(first_requeued) == 1
     assert first_requeued[0].payload["target_thread_id"] == 901
     assert first_requeued[0].attempt_count == 1
 
-    await ticket_service.mark_delivery_delivered(
+    await ticket_service.outbox.mark_delivery_delivered(
         first_requeued[0].id,
         claim_token=first_requeued[0].claim_token,
     )
-    second_requeued = await ticket_service.claim_due_deliveries()
+    second_requeued = await ticket_service.outbox.claim_due_deliveries()
     assert len(second_requeued) == 1
     assert second_requeued[0].payload["target_thread_id"] == 901
     assert second_requeued[0].attempt_count == 1
@@ -660,7 +683,7 @@ async def test_operator_close_notification_can_include_rating_keyboard(
             "inline_keyboard": [[{"text": "⭐ 1", "callback_data": "support_rating:ticket:1"}]]
         },
     )
-    jobs = await ticket_service.claim_due_deliveries()
+    jobs = await ticket_service.outbox.claim_due_deliveries()
 
     assert jobs[0].payload["reply_markup"] == {
         "inline_keyboard": [[{"text": "⭐ 1", "callback_data": "support_rating:ticket:1"}]]
@@ -699,7 +722,7 @@ async def test_rating_enqueue_targets_general_support_group(
         text="Оценка: ⭐ 5/5",
         idempotency_key=f"rating:{ticket.id}:1012",
     )
-    jobs = await ticket_service.claim_due_deliveries()
+    jobs = await ticket_service.outbox.claim_due_deliveries()
 
     assert first is True
     assert duplicate is False
@@ -865,7 +888,7 @@ async def test_api_text_reply_uses_durable_outbox(ticket_service: TicketService)
         target_chat_id=1006,
         idempotency_key="api:message:1006:one",
     )
-    jobs = await ticket_service.claim_due_deliveries()
+    jobs = await ticket_service.outbox.claim_due_deliveries()
 
     assert queued is True
     assert duplicate is False
@@ -933,7 +956,7 @@ async def test_blocklist_blocks_operator_to_user_deliveries(
         notification_target_chat_id=1014,
         notification_idempotency_key="telegram:-100:91:/stop:user-notification",
     )
-    jobs = await ticket_service.claim_due_deliveries()
+    jobs = await ticket_service.outbox.claim_due_deliveries()
 
     assert copied is False
     assert text is False
@@ -949,24 +972,8 @@ async def test_notification_outbox_enqueue_is_idempotent(
     )
     await attach_claimed_topic(ticket_service, ticket.id, 787)
 
-    first = await ticket_service.enqueue_notification(
-        ticket_id=ticket.id,
-        event_type="subscription_link_reissued",
-        destination="subscription_owner",
-        recipient_identity_provider="telegram",
-        recipient_identity_value=str(ticket.telegram_user_id),
-        payload={"subscription_url": "https://sub.example/new"},
-        idempotency_key="notification:one",
-    )
-    duplicate = await ticket_service.enqueue_notification(
-        ticket_id=ticket.id,
-        event_type="subscription_link_reissued",
-        destination="subscription_owner",
-        recipient_identity_provider="telegram",
-        recipient_identity_value=str(ticket.telegram_user_id),
-        payload={"subscription_url": "https://sub.example/new"},
-        idempotency_key="notification:one",
-    )
+    first = await enqueue_subscription_notification(ticket_service, ticket, "notification:one")
+    duplicate = await enqueue_subscription_notification(ticket_service, ticket, "notification:one")
 
     async with ticket_service.database.session() as session:
         notifications = list((await session.scalars(select(NotificationOutbox))).all())
@@ -985,18 +992,12 @@ async def test_notification_outbox_claim_and_mark_delivered(
         telegram_user_id=1016, display_name="Nia", username=None
     )
     await attach_claimed_topic(ticket_service, ticket.id, 788)
-    await ticket_service.enqueue_notification(
-        ticket_id=ticket.id,
-        event_type="subscription_link_reissued",
-        destination="subscription_owner",
-        recipient_identity_provider="telegram",
-        recipient_identity_value=str(ticket.telegram_user_id),
-        payload={"subscription_url": "https://sub.example/new"},
-        idempotency_key="notification:claim-one",
-    )
+    await enqueue_subscription_notification(ticket_service, ticket, "notification:claim-one")
 
-    jobs = await ticket_service.claim_due_notifications()
-    await ticket_service.mark_notification_delivered(jobs[0].id, claim_token=jobs[0].claim_token)
+    jobs = await ticket_service.outbox.claim_due_notifications()
+    await ticket_service.outbox.mark_notification_delivered(
+        jobs[0].id, claim_token=jobs[0].claim_token
+    )
 
     async with ticket_service.database.session() as session:
         notification = await session.get(NotificationOutbox, jobs[0].id)
@@ -1016,18 +1017,10 @@ async def test_notification_outbox_retry_marks_failed_after_max_attempts(
         telegram_user_id=1017, display_name="Ola", username=None
     )
     await attach_claimed_topic(ticket_service, ticket.id, 789)
-    await ticket_service.enqueue_notification(
-        ticket_id=ticket.id,
-        event_type="subscription_link_reissued",
-        destination="subscription_owner",
-        recipient_identity_provider="telegram",
-        recipient_identity_value=str(ticket.telegram_user_id),
-        payload={"subscription_url": "https://sub.example/new"},
-        idempotency_key="notification:fail-one",
-    )
+    await enqueue_subscription_notification(ticket_service, ticket, "notification:fail-one")
 
-    jobs = await ticket_service.claim_due_notifications()
-    await ticket_service.mark_notification_retry(
+    jobs = await ticket_service.outbox.claim_due_notifications()
+    await ticket_service.outbox.mark_notification_retry(
         jobs[0].id,
         claim_token=jobs[0].claim_token,
         error="bad request",
@@ -1080,18 +1073,18 @@ async def test_notification_claim_fencing_rejects_late_worker(
         payload={},
         idempotency_key="notification:fencing",
     )
-    old_claim = (await ticket_service.claim_due_notifications(limit=1))[0]
-    assert await ticket_service.release_stale_notifications(stale_after_seconds=0) == 1
-    new_claim = (await ticket_service.claim_due_notifications(limit=1))[0]
+    old_claim = (await ticket_service.outbox.claim_due_notifications(limit=1))[0]
+    assert await ticket_service.outbox.release_stale_notifications(stale_after_seconds=0) == 1
+    new_claim = (await ticket_service.outbox.claim_due_notifications(limit=1))[0]
 
     assert (
-        await ticket_service.mark_notification_delivered(
+        await ticket_service.outbox.mark_notification_delivered(
             old_claim.id, claim_token=old_claim.claim_token
         )
         is False
     )
     assert (
-        await ticket_service.mark_notification_delivered(
+        await ticket_service.outbox.mark_notification_delivered(
             new_claim.id, claim_token=new_claim.claim_token
         )
         is True

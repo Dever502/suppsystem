@@ -14,27 +14,13 @@ from fastapi.responses import JSONResponse
 from supportbot.api_idempotency import ApiIdempotencyConflictError
 from supportbot.api_routes import API_TICKET_CLOSED_TEXT as API_TICKET_CLOSED_TEXT
 from supportbot.api_routes import register_routes
-from supportbot.api_schemas import (
-    IDEMPOTENCY_KEY_PATTERN as IDEMPOTENCY_KEY_PATTERN,
-)
-from supportbot.api_schemas import (
-    TICKET_ID_PATTERN as TICKET_ID_PATTERN,
-)
-from supportbot.api_schemas import CloseTicketRequest as CloseTicketRequest
-from supportbot.api_schemas import IdempotencyKey as IdempotencyKey
-from supportbot.api_schemas import MessageResponse as MessageResponse
-from supportbot.api_schemas import MutationResponse as MutationResponse
-from supportbot.api_schemas import SendMessageRequest as SendMessageRequest
-from supportbot.api_schemas import StrictRequest as StrictRequest
-from supportbot.api_schemas import TicketId as TicketId
-from supportbot.api_schemas import TicketResponse as TicketResponse
 from supportbot.api_security import InMemoryRateLimiter
 from supportbot.audit import record_event
 from supportbot.config import Settings
 from supportbot.database import Database
 from supportbot.metrics import MetricsRegistry
 from supportbot.runtime_health import RuntimeHealth
-from supportbot.service_types import TicketView
+from supportbot.service_types import TicketNotFoundError
 from supportbot.services import TicketService
 from supportbot.trace import trace_id_var
 from supportbot.version import PROJECT_VERSION
@@ -93,7 +79,6 @@ def create_app(
     database: Database,
     ticket_service: TicketService,
     settings: Settings,
-    sync_ticket_topic: Callable[[TicketView], Awaitable[bool]] | None = None,
     runtime_health: RuntimeHealth | None = None,
     metrics: MetricsRegistry | None = None,
 ) -> FastAPI:
@@ -272,6 +257,15 @@ def create_app(
             message="Idempotency key conflicts with a previous request",
         )
 
+    @app.exception_handler(TicketNotFoundError)
+    async def handle_ticket_not_found(request: Request, error: TicketNotFoundError) -> JSONResponse:
+        del request, error
+        return error_response(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="not_found",
+            message="Resource not found",
+        )
+
     register_routes(
         app,
         database=database,
@@ -279,7 +273,6 @@ def create_app(
         settings=settings,
         runtime_health=runtime_health,
         metrics=metrics,
-        sync_ticket_topic=sync_ticket_topic,
     )
 
     return app

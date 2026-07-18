@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 from supportbot.durable_work import DurableWorkRepository, ReconciliationJob
 from supportbot.panel import PanelService
 from supportbot.runtime_health import RuntimeHealth
+from supportbot.runtime_supervision import wait_for_event
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,9 @@ class ReconciliationWorker:
                 if self.panel_service is None or job.operator_action_id is None:
                     raise RuntimeError("Remnawave reconciliation is not configured")
                 completed = await self.panel_service.reconcile_durable_action(
-                    job.operator_action_id, job.payload
+                    job.operator_action_id,
+                    job.payload,
+                    attempt_count=job.attempt_count,
                 )
             else:
                 raise RuntimeError(f"unknown reconciliation kind: {job.kind}")
@@ -99,10 +102,7 @@ class ReconciliationWorker:
             self.runtime_health.progress("reconciliation")
 
     async def _wait(self, *, delay_seconds: float | None = None) -> None:
-        try:
-            await asyncio.wait_for(
-                self._stopped.wait(),
-                timeout=self.poll_interval_seconds if delay_seconds is None else delay_seconds,
-            )
-        except TimeoutError:
-            pass
+        await wait_for_event(
+            self._stopped,
+            self.poll_interval_seconds if delay_seconds is None else delay_seconds,
+        )

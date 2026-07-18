@@ -25,10 +25,10 @@ from supportbot.telegram_constants import WELCOME_TEXT as WELCOME_TEXT
 from supportbot.telegram_limits import TelegramRateLimiter
 from supportbot.telegram_locks import TicketLockPool as TicketLockPool
 from supportbot.telegram_message_utils import RATING_CALLBACK_PREFIX
-from supportbot.telegram_operator_handlers import (
+from supportbot.telegram_operator_handlers import TelegramOperatorHandlers
+from supportbot.telegram_panel_handler import (
     GIFT_DAYS_ERROR_TEXT as GIFT_DAYS_ERROR_TEXT,
 )
-from supportbot.telegram_operator_handlers import TelegramOperatorHandlers
 from supportbot.telegram_panel_handler import TelegramPanelCommandHandler
 
 

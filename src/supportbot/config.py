@@ -312,14 +312,6 @@ class Settings(BaseSettings):
     def effective_full_admin_ids(self) -> frozenset[int]:
         return self.full_admin_telegram_ids | self.admin_telegram_ids
 
-    @property
-    def all_operator_ids(self) -> frozenset[int]:
-        return (
-            self.effective_full_admin_ids
-            | self.operator_telegram_ids
-            | self.readonly_operator_telegram_ids
-        )
-
 
 @lru_cache
 def get_settings() -> Settings:

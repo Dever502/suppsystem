@@ -4,6 +4,8 @@ import asyncio
 from collections.abc import Callable
 from pathlib import Path
 
+from supportbot.runtime_supervision import wait_for_event
+
 
 class Heartbeat:
     def __init__(
@@ -22,10 +24,7 @@ class Heartbeat:
         while not self._stopped.is_set():
             if self.progress_probe is None or self.progress_probe():
                 self.path.touch()
-            try:
-                await asyncio.wait_for(self._stopped.wait(), timeout=self.interval_seconds)
-            except TimeoutError:
-                pass
+            await wait_for_event(self._stopped, self.interval_seconds)
 
     def stop(self) -> None:
         self._stopped.set()

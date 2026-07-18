@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import timedelta
 from typing import cast
 
 from sqlalchemy import case, exists, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
+from sqlalchemy.sql.elements import ColumnElement
 
 from supportbot.audit import record_event
 from supportbot.database import retry_sqlite_locks
@@ -19,12 +19,6 @@ from supportbot.models import (
     TicketStatus,
     User,
     utcnow,
-)
-from supportbot.service_types import (
-    DeliveryJob as DeliveryJob,
-)
-from supportbot.service_types import (
-    NotificationJob as NotificationJob,
 )
 from supportbot.service_types import (
     TicketNotFoundError,
@@ -80,19 +74,10 @@ class TicketTopicService(TicketServiceBase):
 
             if created or reopened:
                 record_event("ticket_opened", ticket_id=ticket.id)
-            return TicketView(
-                id=ticket.id,
-                user_id=user.id,
-                telegram_user_id=telegram_user_id,
-                display_name=user.display_name,
-                username=user.username,
-                topic_id=ticket.topic_id,
-                status=TicketStatus(ticket.status),
-                created_at=ticket.created_at,
-                updated_at=ticket.updated_at,
-                last_activity_at=ticket.last_activity_at,
-                closed_at=ticket.closed_at,
-                close_cycle=ticket.close_cycle,
+            return self._ticket_view_from_user(
+                ticket,
+                user,
+                telegram_user_id,
                 reopened=reopened,
             )
 
@@ -170,7 +155,7 @@ class TicketTopicService(TicketServiceBase):
             record_event("topic_attached", ticket_id=ticket_id)
             return await self._ticket_view(session, ticket)
 
-    async def claim_topic_provisioning(self, ticket_id: str) -> str | None:
+    async def _claim_topic(self, ticket_id: str, *conditions: ColumnElement[bool]) -> str | None:
         token = str(uuid.uuid4())
         async with self.database.session() as session:
             result = await session.execute(
@@ -179,7 +164,7 @@ class TicketTopicService(TicketServiceBase):
                     Ticket.id == ticket_id,
                     Ticket.topic_id.is_(None),
                     Ticket.topic_provisioning_token.is_(None),
-                    Ticket.status != TicketStatus.CLOSED,
+                    *conditions,
                 )
                 .values(
                     topic_provisioning_token=token,
@@ -188,31 +173,18 @@ class TicketTopicService(TicketServiceBase):
             )
             await session.commit()
             return token if cast(CursorResult[object], result).rowcount == 1 else None
+
+    async def claim_topic_provisioning(self, ticket_id: str) -> str | None:
+        return await self._claim_topic(ticket_id, Ticket.status != TicketStatus.CLOSED)
 
     async def claim_topic_reconciliation(self, ticket_id: str) -> str | None:
         """Claim replacement topic creation for any durable desired-state job."""
 
-        token = str(uuid.uuid4())
-        async with self.database.session() as session:
-            result = await session.execute(
-                update(Ticket)
-                .where(
-                    Ticket.id == ticket_id,
-                    Ticket.topic_id.is_(None),
-                    Ticket.topic_provisioning_token.is_(None),
-                )
-                .values(
-                    topic_provisioning_token=token,
-                    topic_provisioning_started_at=utcnow(),
-                )
-            )
-            await session.commit()
-            return token if cast(CursorResult[object], result).rowcount == 1 else None
+        return await self._claim_topic(ticket_id)
 
     async def claim_closed_topic_recovery(self, ticket_id: str) -> str | None:
         """Claim replacement-topic creation for a closed ticket with queued user traffic."""
 
-        token = str(uuid.uuid4())
         has_unfinished_user_delivery = exists(
             select(DeliveryOutbox.id)
             .where(
@@ -228,23 +200,11 @@ class TicketTopicService(TicketServiceBase):
             )
             .correlate(Ticket)
         )
-        async with self.database.session() as session:
-            result = await session.execute(
-                update(Ticket)
-                .where(
-                    Ticket.id == ticket_id,
-                    Ticket.status == TicketStatus.CLOSED,
-                    Ticket.topic_id.is_(None),
-                    Ticket.topic_provisioning_token.is_(None),
-                    has_unfinished_user_delivery,
-                )
-                .values(
-                    topic_provisioning_token=token,
-                    topic_provisioning_started_at=utcnow(),
-                )
-            )
-            await session.commit()
-            return token if cast(CursorResult[object], result).rowcount == 1 else None
+        return await self._claim_topic(
+            ticket_id,
+            Ticket.status == TicketStatus.CLOSED,
+            has_unfinished_user_delivery,
+        )
 
     async def abort_topic_provisioning(self, *, ticket_id: str, token: str) -> None:
         async with self.database.session() as session:
@@ -318,21 +278,6 @@ class TicketTopicService(TicketServiceBase):
                 retargeted += 1
             await session.commit()
             return retargeted
-
-    async def release_stale_topic_provisioning(self, stale_after_seconds: int = 300) -> int:
-        threshold = utcnow() - timedelta(seconds=stale_after_seconds)
-        async with self.database.session() as session:
-            result = await session.execute(
-                update(Ticket)
-                .where(
-                    Ticket.topic_id.is_(None),
-                    Ticket.topic_provisioning_token.is_not(None),
-                    Ticket.topic_provisioning_started_at < threshold,
-                )
-                .values(topic_provisioning_token=None, topic_provisioning_started_at=None)
-            )
-            await session.commit()
-            return cast(CursorResult[object], result).rowcount
 
     async def list_topic_provisioning_ticket_ids(self) -> list[str]:
         """Return unresolved topic claims for explicit operator recovery."""

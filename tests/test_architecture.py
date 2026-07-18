@@ -39,7 +39,6 @@ def test_application_services_do_not_import_transport_layers() -> None:
         "ticket_topic_service",
         "ticket_lifecycle_service",
         "ticket_message_service",
-        "ticket_outbox_service",
         "outbox_repository",
         "panel",
         "panel_types",

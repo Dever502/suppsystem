@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Literal, Protocol
 
 from supportbot.remnawave import (
@@ -30,20 +30,16 @@ PanelLookupStatus = Literal[
     "unavailable",
     "unexpected_response",
 ]
-PanelActionStatus = Literal[
-    "completed",
-    "duplicate",
-    "not_found",
-    "ambiguous_identity",
-    "auth_error",
-    "rate_limited",
-    "validation_error",
-    "unavailable",
-    "not_applied",
-    "unknown",
-    "needs_reconcile",
-    "unexpected_response",
-]
+PanelActionStatus = (
+    PanelLookupStatus
+    | Literal[
+        "completed",
+        "duplicate",
+        "not_applied",
+        "unknown",
+        "needs_reconcile",
+    ]
+)
 
 
 class RemnawaveReader(Protocol):
@@ -61,6 +57,7 @@ class RemnawaveOperator(RemnawaveReader, Protocol):
     async def reset_user_hwid_devices(
         self, *, user_uuid: str
     ) -> RemnawaveHwidDeviceResetResult: ...
+    async def get_user_hwid_devices(self, *, user_uuid: str) -> RemnawaveHwidDeviceResetResult: ...
 
 
 @dataclass(frozen=True)
@@ -76,6 +73,7 @@ class PanelSubscriptionInfo:
     used_traffic_bytes: int | None
     lifetime_used_traffic_bytes: int | None
     online_at: datetime | None
+    credential_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -106,7 +104,7 @@ class PanelActionResult:
         return self.status == "completed" and self.changed
 
 
-Mutation = Callable[[RemnawaveUser], Awaitable[tuple[PanelActionStatus, dict[str, Any]]]]
+Mutation = Callable[[str], Awaitable[tuple[PanelActionStatus, dict[str, Any]]]]
 
 
 def lookup_status_from_error(error: RemnawaveError) -> PanelLookupStatus:
@@ -137,56 +135,15 @@ def action_status_from_error(error: RemnawaveError) -> PanelActionStatus:
     return action_status_from_lookup(lookup_status_from_error(error))
 
 
-def mutation_user(subscription: PanelSubscriptionInfo) -> RemnawaveUser:
-    return RemnawaveUser(
-        uuid=subscription.uuid,
-        id=0,
-        short_uuid="",
-        username=subscription.username,
-        status=subscription.status,
-        expire_at=subscription.expire_at,
-        subscription_url=subscription.subscription_url,
-        telegram_id=subscription.telegram_id,
-        email=subscription.email,
-        hwid_device_limit=subscription.hwid_device_limit,
-        traffic=None,
-    )
-
-
-def mutation_visible(
-    *,
-    action: str,
-    request_payload: dict[str, Any],
-    before: PanelSubscriptionInfo,
-    after: PanelSubscriptionInfo,
-) -> bool:
-    if action == "extend_subscription":
-        extend_days = request_payload.get("extend_days")
-        return isinstance(extend_days, int) and after.expire_at >= (
-            before.expire_at + timedelta(days=extend_days)
-        )
-    if action == "revoke_subscription_link":
-        return after.subscription_url != before.subscription_url
-    return False
-
-
-def safe_subscription_context(subscription: PanelSubscriptionInfo) -> dict[str, Any]:
+def safe_remnawave_context(
+    subscription: PanelSubscriptionInfo | RemnawaveUser,
+) -> dict[str, Any]:
     return {
         "remnawave_uuid": subscription.uuid,
         "remnawave_username": subscription.username,
         "remnawave_status": subscription.status,
         "remnawave_telegram_id": subscription.telegram_id,
         "remnawave_email": subscription.email,
-    }
-
-
-def safe_user_context(user: RemnawaveUser) -> dict[str, Any]:
-    return {
-        "remnawave_uuid": user.uuid,
-        "remnawave_username": user.username,
-        "remnawave_status": user.status,
-        "remnawave_telegram_id": user.telegram_id,
-        "remnawave_email": user.email,
     }
 
 
@@ -209,4 +166,5 @@ def subscription_info(user: RemnawaveUser) -> PanelSubscriptionInfo:
             user.traffic.lifetime_used_traffic_bytes if user.traffic else None
         ),
         online_at=user.traffic.online_at if user.traffic else None,
+        credential_fingerprint=user.credential_fingerprint,
     )

@@ -82,13 +82,16 @@ def date_text(value: object | None) -> str:
     return value.strftime("%d.%m.%Y, %H:%M %Z").rstrip()
 
 
-def operator_ticket_info(ticket: TicketView) -> str:
-    identity_parts = []
+def customer_identity(ticket: TicketView) -> str:
+    parts = []
     if ticket.display_name:
-        identity_parts.append(escape(ticket.display_name))
+        parts.append(escape(ticket.display_name))
     if ticket.username:
-        identity_parts.append(f"@{escape(ticket.username)}")
-    identity = " · ".join(identity_parts) or "Без имени"
+        parts.append(f"@{escape(ticket.username)}")
+    return " · ".join(parts) or "Без имени"
+
+
+def operator_ticket_info(ticket: TicketView) -> str:
     topic_id = ticket.topic_id if ticket.topic_id is not None else "—"
     return (
         "🎫 <b>Тикет</b>\n\n"
@@ -96,7 +99,7 @@ def operator_ticket_info(ticket: TicketView) -> str:
         f"ID: <code>{escape(ticket.id)}</code>\n"
         f"Тема: <code>{topic_id}</code>\n\n"
         "👤 <b>Клиент</b>\n\n"
-        f"<b>{identity}</b>\n"
+        f"<b>{customer_identity(ticket)}</b>\n"
         f"Telegram ID: <code>{ticket.telegram_user_id}</code>\n\n"
         "🕒 <b>История</b>\n\n"
         f"Создан: <code>{date_text(ticket.created_at)}</code>\n"

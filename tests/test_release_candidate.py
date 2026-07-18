@@ -98,7 +98,8 @@ def test_public_documentation_is_curated() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "single-instance release candidate" in readme
     assert "Официальный способ поставки — container image" in readme
-    assert "не входят в поддерживаемые гарантии" in readme
+    assert "Remnawave и notification webhook поддерживаются" in readme
+    assert "Remnawave 2.8.0" in readme
     assert "@sha256:<digest>" in readme
 
     public_markdown = "\n".join(

@@ -6,7 +6,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from supportbot.database import Database
-from supportbot.models import BlocklistEntry, Ticket, TicketStatus, User, UserIdentity
+from supportbot.models import (
+    BlocklistEntry,
+    DeliveryOutbox,
+    OperatorAction,
+    Ticket,
+    TicketStatus,
+    User,
+    UserIdentity,
+)
 from supportbot.outbox_repository import OutboxRepository
 from supportbot.service_types import TicketNotFoundError, TicketView
 
@@ -25,6 +33,24 @@ class TicketServiceBase:
     @staticmethod
     async def _is_blocked_in_session(session: AsyncSession, telegram_user_id: int) -> bool:
         return await session.get(BlocklistEntry, telegram_user_id) is not None
+
+    @staticmethod
+    async def _operator_action_exists(session: AsyncSession, idempotency_key: str) -> bool:
+        return (
+            await session.scalar(
+                select(OperatorAction.id).where(OperatorAction.idempotency_key == idempotency_key)
+            )
+            is not None
+        )
+
+    @staticmethod
+    async def _delivery_exists(session: AsyncSession, idempotency_key: str) -> bool:
+        return (
+            await session.scalar(
+                select(DeliveryOutbox.id).where(DeliveryOutbox.idempotency_key == idempotency_key)
+            )
+            is not None
+        )
 
     async def _get_or_create_telegram_user(
         self, telegram_user_id: int, display_name: str | None, username: str | None
@@ -72,10 +98,20 @@ class TicketServiceBase:
         )
         if identity is None:
             raise TicketNotFoundError(ticket.id)
+        return self._ticket_view_from_user(ticket, user, int(identity.external_id))
+
+    @staticmethod
+    def _ticket_view_from_user(
+        ticket: Ticket,
+        user: User,
+        telegram_user_id: int,
+        *,
+        reopened: bool = False,
+    ) -> TicketView:
         return TicketView(
             id=ticket.id,
             user_id=user.id,
-            telegram_user_id=int(identity.external_id),
+            telegram_user_id=telegram_user_id,
             display_name=user.display_name,
             username=user.username,
             topic_id=ticket.topic_id,
@@ -85,6 +121,7 @@ class TicketServiceBase:
             last_activity_at=ticket.last_activity_at,
             closed_at=ticket.closed_at,
             close_cycle=ticket.close_cycle,
+            reopened=reopened,
         )
 
     @staticmethod
@@ -96,17 +133,8 @@ class TicketServiceBase:
         )
         if identity is None:
             raise TicketNotFoundError(ticket.id)
-        return TicketView(
-            id=ticket.id,
-            user_id=user.id,
-            telegram_user_id=int(identity.external_id),
-            display_name=user.display_name,
-            username=user.username,
-            topic_id=ticket.topic_id,
-            status=TicketStatus(ticket.status),
-            created_at=ticket.created_at,
-            updated_at=ticket.updated_at,
-            last_activity_at=ticket.last_activity_at,
-            closed_at=ticket.closed_at,
-            close_cycle=ticket.close_cycle,
+        return TicketServiceBase._ticket_view_from_user(
+            ticket,
+            user,
+            int(identity.external_id),
         )

@@ -14,7 +14,7 @@ from supportbot.api_idempotency import (
     load_api_replay_response,
 )
 from supportbot.audit import record_event
-from supportbot.database import Database, retry_sqlite_locks
+from supportbot.database import retry_sqlite_locks
 from supportbot.durable_work import enqueue_topic_reconciliation
 from supportbot.models import (
     DeliveryOutbox,
@@ -28,6 +28,7 @@ from supportbot.models import (
     utcnow,
 )
 from supportbot.service_types import TicketNotFoundError, TicketView
+from supportbot.ticket_service_base import TicketServiceBase
 from supportbot.trace import get_trace_id
 
 
@@ -40,16 +41,58 @@ class OperatorMessageResult:
     ticket: TicketView | None = None
 
 
-class TicketMessageService:
+class TicketMessageService(TicketServiceBase):
     """Atomic message persistence and outbox enqueue operations."""
 
-    database: Database
+    async def _delivery_ticket(
+        self,
+        session: AsyncSession,
+        *,
+        ticket_id: str,
+        direction: Direction,
+        target_chat_id: int,
+        idempotency_key: str,
+    ) -> Ticket | None:
+        if (
+            Direction(direction) is Direction.OPERATOR_TO_USER
+            and await self._is_blocked_in_session(session, target_chat_id)
+        ) or await self._delivery_exists(session, idempotency_key):
+            return None
+        ticket = await session.get(Ticket, ticket_id)
+        if ticket is None:
+            raise TicketNotFoundError(ticket_id)
+        return ticket
 
-    async def _is_blocked_in_session(self, session: AsyncSession, telegram_user_id: int) -> bool:
-        raise NotImplementedError
-
-    async def _ticket_view(self, session: AsyncSession, ticket: Ticket) -> TicketView:
-        raise NotImplementedError
+    async def _commit_delivery(
+        self,
+        session: AsyncSession,
+        *,
+        ticket: Ticket,
+        message: TicketMessage,
+        direction: Direction,
+        idempotency_key: str,
+        payload: dict[str, object],
+        status: DeliveryStatus = DeliveryStatus.PENDING,
+    ) -> bool:
+        ticket.last_activity_at = utcnow()
+        session.add(message)
+        session.add(
+            DeliveryOutbox(
+                ticket_id=ticket.id,
+                direction=direction,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                status=status,
+            )
+        )
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            if await self._delivery_exists(session, idempotency_key):
+                return False
+            raise
+        return True
 
     async def _operator_message_replay(
         self, session: AsyncSession, command: ApiIdempotencyCommand | None
@@ -80,9 +123,7 @@ class TicketMessageService:
         idempotency_key: str,
     ) -> bool:
         async with self.database.session() as session:
-            if await session.scalar(
-                select(OperatorAction.id).where(OperatorAction.idempotency_key == idempotency_key)
-            ):
+            if await self._operator_action_exists(session, idempotency_key):
                 return False
             ticket = await session.get(Ticket, ticket_id)
             if ticket is None:
@@ -113,11 +154,7 @@ class TicketMessageService:
                 await session.commit()
             except IntegrityError:
                 await session.rollback()
-                if await session.scalar(
-                    select(OperatorAction.id).where(
-                        OperatorAction.idempotency_key == idempotency_key
-                    )
-                ):
+                if await self._operator_action_exists(session, idempotency_key):
                     return False
                 raise
             return True
@@ -137,19 +174,15 @@ class TicketMessageService:
     ) -> bool:
         idempotency_key = f"copy:{direction.value}:{source_chat_id}:{source_message_id}"
         async with self.database.session() as session:
-            if Direction(
-                direction
-            ) is Direction.OPERATOR_TO_USER and await self._is_blocked_in_session(
-                session, target_chat_id
-            ):
-                return False
-            if await session.scalar(
-                select(DeliveryOutbox.id).where(DeliveryOutbox.idempotency_key == idempotency_key)
-            ):
-                return False
-            ticket = await session.get(Ticket, ticket_id)
+            ticket = await self._delivery_ticket(
+                session,
+                ticket_id=ticket_id,
+                direction=direction,
+                target_chat_id=target_chat_id,
+                idempotency_key=idempotency_key,
+            )
             if ticket is None:
-                raise TicketNotFoundError(ticket_id)
+                return False
             resolved_thread_id = target_thread_id
             if Direction(direction) is Direction.USER_TO_OPERATOR and resolved_thread_id is None:
                 resolved_thread_id = ticket.topic_id
@@ -160,43 +193,27 @@ class TicketMessageService:
                 "target_chat_id": target_chat_id,
                 "target_thread_id": resolved_thread_id,
             }
-            ticket.last_activity_at = utcnow()
-            session.add(
-                TicketMessage(
+            return await self._commit_delivery(
+                session,
+                ticket=ticket,
+                message=TicketMessage(
                     ticket_id=ticket_id,
                     direction=direction,
                     source_chat_id=source_chat_id,
                     source_message_id=source_message_id,
                     content=content,
                     media=media,
-                )
+                ),
+                direction=direction,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                status=(
+                    DeliveryStatus.WAITING_TOPIC
+                    if Direction(direction) is Direction.USER_TO_OPERATOR
+                    and resolved_thread_id is None
+                    else DeliveryStatus.PENDING
+                ),
             )
-            session.add(
-                DeliveryOutbox(
-                    ticket_id=ticket_id,
-                    direction=direction,
-                    idempotency_key=idempotency_key,
-                    payload=payload,
-                    status=(
-                        DeliveryStatus.WAITING_TOPIC
-                        if Direction(direction) is Direction.USER_TO_OPERATOR
-                        and resolved_thread_id is None
-                        else DeliveryStatus.PENDING
-                    ),
-                )
-            )
-            try:
-                await session.commit()
-            except IntegrityError:
-                await session.rollback()
-                if await session.scalar(
-                    select(DeliveryOutbox.id).where(
-                        DeliveryOutbox.idempotency_key == idempotency_key
-                    )
-                ):
-                    return False
-                raise
-            return True
 
     @retry_sqlite_locks
     async def enqueue_text(
@@ -215,50 +232,30 @@ class TicketMessageService:
             "text": text,
         }
         async with self.database.session() as session:
-            if Direction(
-                direction
-            ) is Direction.OPERATOR_TO_USER and await self._is_blocked_in_session(
-                session, target_chat_id
-            ):
-                return False
-            if await session.scalar(
-                select(DeliveryOutbox.id).where(DeliveryOutbox.idempotency_key == idempotency_key)
-            ):
-                return False
-            ticket = await session.get(Ticket, ticket_id)
+            ticket = await self._delivery_ticket(
+                session,
+                ticket_id=ticket_id,
+                direction=direction,
+                target_chat_id=target_chat_id,
+                idempotency_key=idempotency_key,
+            )
             if ticket is None:
-                raise TicketNotFoundError(ticket_id)
-            ticket.last_activity_at = utcnow()
-            session.add(
-                TicketMessage(
+                return False
+            return await self._commit_delivery(
+                session,
+                ticket=ticket,
+                message=TicketMessage(
                     ticket_id=ticket_id,
                     direction=direction,
                     channel=channel,
                     source_chat_id=None,
                     source_message_id=None,
                     content=text,
-                )
+                ),
+                direction=direction,
+                idempotency_key=idempotency_key,
+                payload=payload,
             )
-            session.add(
-                DeliveryOutbox(
-                    ticket_id=ticket_id,
-                    direction=direction,
-                    idempotency_key=idempotency_key,
-                    payload=payload,
-                )
-            )
-            try:
-                await session.commit()
-            except IntegrityError:
-                await session.rollback()
-                if await session.scalar(
-                    select(DeliveryOutbox.id).where(
-                        DeliveryOutbox.idempotency_key == idempotency_key
-                    )
-                ):
-                    return False
-                raise
-            return True
 
     @retry_sqlite_locks
     async def send_operator_message(
@@ -321,21 +318,13 @@ class TicketMessageService:
                             raise
                         return replay
                 return OperatorMessageResult(changed=False)
-            if await session.scalar(
-                select(DeliveryOutbox.id).where(DeliveryOutbox.idempotency_key == idempotency_key)
-            ):
+            if await self._delivery_exists(session, idempotency_key):
                 return OperatorMessageResult(changed=False)
 
             was_closed = TicketStatus(ticket.status) is TicketStatus.CLOSED
-            if was_closed and await session.scalar(
-                select(OperatorAction.id).where(
-                    OperatorAction.idempotency_key == reopen_idempotency_key
-                )
-            ):
+            if was_closed and await self._operator_action_exists(session, reopen_idempotency_key):
                 return OperatorMessageResult(changed=False)
-            if await session.scalar(
-                select(OperatorAction.id).where(OperatorAction.idempotency_key == idempotency_key)
-            ):
+            if await self._operator_action_exists(session, idempotency_key):
                 return OperatorMessageResult(changed=False)
 
             transition_at = utcnow()
@@ -433,12 +422,7 @@ class TicketMessageService:
                 # hide unrelated database failures as ``changed=False``: the API
                 # must surface them so the caller can safely retry the whole
                 # atomic command.
-                duplicate_delivery = await session.scalar(
-                    select(DeliveryOutbox.id).where(
-                        DeliveryOutbox.idempotency_key == idempotency_key
-                    )
-                )
-                if duplicate_delivery is not None:
+                if await self._delivery_exists(session, idempotency_key):
                     return OperatorMessageResult(changed=False)
                 raise
 

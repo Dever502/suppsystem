@@ -9,6 +9,15 @@ logger = logging.getLogger(__name__)
 SHUTDOWN_SOFT_TIMEOUT_SECONDS = 20.0
 
 
+async def wait_for_event(event: asyncio.Event, timeout_seconds: float) -> None:
+    """Wait until an event is set or a polling timeout expires."""
+
+    try:
+        await asyncio.wait_for(event.wait(), timeout=timeout_seconds)
+    except TimeoutError:
+        pass
+
+
 async def stop_polling_task(
     polling_task: asyncio.Task[None],
     stop_polling: Callable[[], Awaitable[None]],
@@ -93,7 +102,6 @@ async def shutdown_runtime(
     *,
     polling_task: asyncio.Task[None],
     stop_polling: Callable[[], Awaitable[None]],
-    drain_telegram_handlers: Callable[[], Awaitable[None]],
     api_task: asyncio.Task[None] | None,
     request_api_stop: Callable[[], None] | None,
     worker_tasks: tuple[asyncio.Task[None], ...],
@@ -106,11 +114,10 @@ async def shutdown_runtime(
     if request_api_stop is not None:
         request_api_stop()
 
-    async def stop_and_drain_telegram() -> None:
-        await stop_polling_task(polling_task, stop_polling)
-        await drain_telegram_handlers()
-
-    telegram_task = asyncio.create_task(stop_and_drain_telegram(), name="telegram-ingress-shutdown")
+    telegram_task = asyncio.create_task(
+        stop_polling_task(polling_task, stop_polling),
+        name="telegram-ingress-shutdown",
+    )
     ingress_tasks = {telegram_task}
     if api_task is not None:
         ingress_tasks.add(api_task)

@@ -121,20 +121,34 @@ def delivery_job() -> DeliveryJob:
     )
 
 
-async def test_stopping_worker_releases_only_unstarted_claims(tmp_path: Path) -> None:
-    service = FakeTicketService()
+async def recovery_must_not_run(ticket_id: str, old_topic_id: int) -> int | None:
+    raise AssertionError("recovery should not run")
 
-    async def recovery(ticket_id: str, old_topic_id: int) -> int | None:
-        raise AssertionError("recovery should not run")
 
-    worker = DeliveryWorker(
-        bot=BotMustNotSend(),  # type: ignore[arg-type]
-        ticket_service=service,  # type: ignore[arg-type]
+def delivery_worker(
+    tmp_path: Path,
+    *,
+    service: Any,
+    bot: Any,
+    recovery: Any = recovery_must_not_run,
+    worker_type: type[DeliveryWorker] = DeliveryWorker,
+    **kwargs: Any,
+) -> DeliveryWorker:
+    return worker_type(
+        bot=bot,
+        ticket_service=service,
+        outbox=service,
         settings=settings(),
-        limiter=FakeLimiter(),  # type: ignore[arg-type]
+        limiter=FakeLimiter(),
         heartbeat_path=tmp_path / "delivery.heartbeat",
         recover_missing_topic=recovery,
+        **kwargs,
     )
+
+
+async def test_stopping_worker_releases_only_unstarted_claims(tmp_path: Path) -> None:
+    service = FakeTicketService()
+    worker = delivery_worker(tmp_path, service=service, bot=BotMustNotSend())
     jobs = [
         delivery_job(),
         DeliveryJob(
@@ -161,9 +175,6 @@ async def test_worker_finishes_current_claim_then_releases_remaining_claims(
 ) -> None:
     service = FakeTicketService()
 
-    async def recovery(ticket_id: str, old_topic_id: int) -> int | None:
-        raise AssertionError("recovery should not run")
-
     class StopAfterCurrentCopy(SuccessfulBot):
         worker: DeliveryWorker
 
@@ -172,14 +183,7 @@ async def test_worker_finishes_current_claim_then_releases_remaining_claims(
             return await super().copy_message(**kwargs)
 
     bot = StopAfterCurrentCopy()
-    worker = DeliveryWorker(
-        bot=bot,  # type: ignore[arg-type]
-        ticket_service=service,  # type: ignore[arg-type]
-        settings=settings(),
-        limiter=FakeLimiter(),  # type: ignore[arg-type]
-        heartbeat_path=tmp_path / "delivery.heartbeat",
-        recover_missing_topic=recovery,
-    )
+    worker = delivery_worker(tmp_path, service=service, bot=bot)
     bot.worker = worker
     second = DeliveryJob(
         id="delivery-2",
@@ -197,18 +201,7 @@ async def test_worker_finishes_current_claim_then_releases_remaining_claims(
 
 async def test_blocked_recipient_cancels_outgoing_delivery(tmp_path: Path) -> None:
     service = FakeTicketService(blocked_user_ids={123})
-
-    async def recovery(ticket_id: str, old_topic_id: int) -> int | None:
-        raise AssertionError("recovery should not run")
-
-    worker = DeliveryWorker(
-        bot=BotMustNotSend(),  # type: ignore[arg-type]
-        ticket_service=service,  # type: ignore[arg-type]
-        settings=settings(),
-        limiter=FakeLimiter(),  # type: ignore[arg-type]
-        heartbeat_path=tmp_path / "delivery.heartbeat",
-        recover_missing_topic=recovery,
-    )
+    worker = delivery_worker(tmp_path, service=service, bot=BotMustNotSend())
 
     await worker._deliver(
         DeliveryJob(
@@ -228,18 +221,7 @@ async def test_blocked_recipient_cancels_outgoing_delivery(tmp_path: Path) -> No
 
 async def test_successful_delivery_persists_telegram_message_id(tmp_path: Path) -> None:
     service = FakeTicketService()
-
-    async def recovery(ticket_id: str, old_topic_id: int) -> int | None:
-        raise AssertionError("recovery should not run")
-
-    worker = DeliveryWorker(
-        bot=SuccessfulBot(),  # type: ignore[arg-type]
-        ticket_service=service,  # type: ignore[arg-type]
-        settings=settings(),
-        limiter=FakeLimiter(),  # type: ignore[arg-type]
-        heartbeat_path=tmp_path / "delivery.heartbeat",
-        recover_missing_topic=recovery,
-    )
+    worker = delivery_worker(tmp_path, service=service, bot=SuccessfulBot())
 
     await worker._deliver(delivery_job())
 
@@ -248,18 +230,7 @@ async def test_successful_delivery_persists_telegram_message_id(tmp_path: Path) 
 
 async def test_stale_success_is_not_reported_as_delivered(tmp_path: Path, caplog: Any) -> None:
     service = FakeTicketService(transitions_applied=False)
-
-    async def recovery(ticket_id: str, old_topic_id: int) -> int | None:
-        raise AssertionError("recovery should not run")
-
-    worker = DeliveryWorker(
-        bot=SuccessfulBot(),  # type: ignore[arg-type]
-        ticket_service=service,  # type: ignore[arg-type]
-        settings=settings(),
-        limiter=FakeLimiter(),  # type: ignore[arg-type]
-        heartbeat_path=tmp_path / "delivery.heartbeat",
-        recover_missing_topic=recovery,
-    )
+    worker = delivery_worker(tmp_path, service=service, bot=SuccessfulBot())
 
     with caplog.at_level(logging.INFO, logger="supportbot.delivery"):
         await worker._deliver(delivery_job())
@@ -317,18 +288,13 @@ async def test_delivery_worker_recovers_stale_claims_periodically(tmp_path: Path
         async def _wait_for_poll_interval(self, *, delay_seconds: float | None = None) -> None:
             del delay_seconds
 
-    async def recovery(ticket_id: str, old_topic_id: int) -> int | None:
-        raise AssertionError("recovery should not run")
-
     clock = Clock()
     service = PollingService(clock)
-    worker = NoWaitDeliveryWorker(
-        bot=BotMustNotSend(),  # type: ignore[arg-type]
-        ticket_service=service,  # type: ignore[arg-type]
-        settings=settings(),
-        limiter=FakeLimiter(),  # type: ignore[arg-type]
-        heartbeat_path=tmp_path / "delivery.heartbeat",
-        recover_missing_topic=recovery,
+    worker = delivery_worker(
+        tmp_path,
+        service=service,
+        bot=BotMustNotSend(),
+        worker_type=NoWaitDeliveryWorker,
         stale_recovery_interval_seconds=10.0,
         stale_delivery_after_seconds=77,
         monotonic=clock,
@@ -349,13 +315,8 @@ async def test_missing_topic_recovery_failure_requeues_delivery_immediately(
     async def fail_recovery(ticket_id: str, old_topic_id: int) -> int | None:
         raise RuntimeError("topic creation failed")
 
-    worker = DeliveryWorker(
-        bot=MissingTopicBot(),  # type: ignore[arg-type]
-        ticket_service=service,  # type: ignore[arg-type]
-        settings=settings(),
-        limiter=FakeLimiter(),  # type: ignore[arg-type]
-        heartbeat_path=tmp_path / "delivery.heartbeat",
-        recover_missing_topic=fail_recovery,
+    worker = delivery_worker(
+        tmp_path, service=service, bot=MissingTopicBot(), recovery=fail_recovery
     )
 
     await worker._deliver(delivery_job())
@@ -381,14 +342,7 @@ async def test_missing_topic_recovery_retargets_unfinished_deliveries(tmp_path: 
         assert (ticket_id, old_topic_id) == ("ticket-1", 900)
         return 901
 
-    worker = DeliveryWorker(
-        bot=MissingTopicBot(),  # type: ignore[arg-type]
-        ticket_service=service,  # type: ignore[arg-type]
-        settings=settings(),
-        limiter=FakeLimiter(),  # type: ignore[arg-type]
-        heartbeat_path=tmp_path / "delivery.heartbeat",
-        recover_missing_topic=recover,
-    )
+    worker = delivery_worker(tmp_path, service=service, bot=MissingTopicBot(), recovery=recover)
 
     await worker._deliver(delivery_job())
 
@@ -408,13 +362,8 @@ async def test_missing_topic_without_replacement_requeues_delivery(tmp_path: Pat
     async def no_replacement(ticket_id: str, old_topic_id: int) -> int | None:
         return None
 
-    worker = DeliveryWorker(
-        bot=MissingTopicBot(),  # type: ignore[arg-type]
-        ticket_service=service,  # type: ignore[arg-type]
-        settings=settings(),
-        limiter=FakeLimiter(),  # type: ignore[arg-type]
-        heartbeat_path=tmp_path / "delivery.heartbeat",
-        recover_missing_topic=no_replacement,
+    worker = delivery_worker(
+        tmp_path, service=service, bot=MissingTopicBot(), recovery=no_replacement
     )
 
     await worker._deliver(delivery_job())
@@ -430,14 +379,7 @@ async def test_empty_retarget_result_requeues_current_delivery(tmp_path: Path) -
     async def recover(ticket_id: str, old_topic_id: int) -> int | None:
         return 901
 
-    worker = DeliveryWorker(
-        bot=MissingTopicBot(),  # type: ignore[arg-type]
-        ticket_service=service,  # type: ignore[arg-type]
-        settings=settings(),
-        limiter=FakeLimiter(),  # type: ignore[arg-type]
-        heartbeat_path=tmp_path / "delivery.heartbeat",
-        recover_missing_topic=recover,
-    )
+    worker = delivery_worker(tmp_path, service=service, bot=MissingTopicBot(), recovery=recover)
 
     await worker._deliver(delivery_job())
 

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import cast
 
-from sqlalchemy import case, select, update
+from sqlalchemy import case, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,10 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from supportbot.database import Database
 from supportbot.models import (
     InboundUpdate,
+    OperatorAction,
     ReconciliationOutbox,
     WorkStatus,
     utcnow,
 )
+
+MAX_RECONCILIATION_ATTEMPTS = 20
 
 
 @dataclass(frozen=True)
@@ -45,28 +48,61 @@ async def enqueue_topic_reconciliation(
     ticket_id: str,
     desired_status: str,
 ) -> None:
-    key = f"topic:{ticket_id}"
-    entry = await session.scalar(
-        select(ReconciliationOutbox).where(ReconciliationOutbox.idempotency_key == key)
+    await enqueue_topic_reconciliations(
+        session,
+        ticket_ids=(ticket_id,),
+        payload={"desired_status": desired_status},
     )
-    if entry is None:
-        session.add(
-            ReconciliationOutbox(
-                idempotency_key=key,
-                kind="telegram_topic",
-                ticket_id=ticket_id,
-                payload={"desired_status": desired_status},
-            )
-        )
+
+
+async def enqueue_topic_reconciliations(
+    session: AsyncSession,
+    *,
+    ticket_ids: Sequence[str],
+    payload: Mapping[str, object],
+    next_attempt_at: datetime | None = None,
+) -> None:
+    if not ticket_ids:
         return
-    entry.payload = {"desired_status": desired_status}
-    entry.status = WorkStatus.PENDING
-    entry.attempt_count = 0
-    entry.next_attempt_at = utcnow()
-    entry.claimed_at = None
-    entry.claim_token = None
-    entry.delivered_at = None
-    entry.last_error = None
+    retry_at = utcnow() if next_attempt_at is None else next_attempt_at
+    await session.execute(
+        update(ReconciliationOutbox)
+        .where(
+            ReconciliationOutbox.kind == "telegram_topic",
+            ReconciliationOutbox.ticket_id.in_(ticket_ids),
+        )
+        .values(
+            payload=dict(payload),
+            status=WorkStatus.PENDING,
+            attempt_count=0,
+            next_attempt_at=retry_at,
+            claimed_at=None,
+            claim_token=None,
+            delivered_at=None,
+            last_error=None,
+        )
+    )
+    queued_ticket_ids = set(
+        (
+            await session.scalars(
+                select(ReconciliationOutbox.ticket_id).where(
+                    ReconciliationOutbox.kind == "telegram_topic",
+                    ReconciliationOutbox.ticket_id.in_(ticket_ids),
+                )
+            )
+        ).all()
+    )
+    session.add_all(
+        ReconciliationOutbox(
+            idempotency_key=f"topic:{ticket_id}",
+            kind="telegram_topic",
+            ticket_id=ticket_id,
+            payload=dict(payload),
+            next_attempt_at=retry_at,
+        )
+        for ticket_id in ticket_ids
+        if ticket_id not in queued_ticket_ids
+    )
 
 
 async def enqueue_panel_reconciliation(
@@ -226,6 +262,12 @@ class DurableWorkRepository:
             .where(
                 ReconciliationOutbox.status == WorkStatus.PENDING,
                 ReconciliationOutbox.next_attempt_at <= now,
+                or_(
+                    ReconciliationOutbox.kind != "remnawave",
+                    ReconciliationOutbox.operator_action_id.in_(
+                        select(OperatorAction.id).where(OperatorAction.result != "started")
+                    ),
+                ),
             )
             .order_by(ReconciliationOutbox.created_at, ReconciliationOutbox.id)
             .limit(1)
@@ -281,7 +323,7 @@ class DurableWorkRepository:
         error: str,
         *,
         retry_after_seconds: float | None = None,
-        max_attempts: int = 20,
+        max_attempts: int = MAX_RECONCILIATION_ATTEMPTS,
     ) -> bool:
         terminal = job.attempt_count >= max_attempts
         return await self._transition_reconciliation(

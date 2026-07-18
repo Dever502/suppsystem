@@ -36,7 +36,7 @@ async def enqueue_and_claim(
         target_chat_id=telegram_user_id,
         idempotency_key=key,
     )
-    jobs = await ticket_service.claim_due_deliveries()
+    jobs = await ticket_service.outbox.claim_due_deliveries()
     assert len(jobs) == 1
     return jobs[0]
 
@@ -66,17 +66,17 @@ async def test_delivery_transitions_require_current_processing_claim(
         key="claim-owner-transitions",
     )
 
-    assert not await ticket_service.mark_delivery_delivered(
+    assert not await ticket_service.outbox.mark_delivery_delivered(
         job.id,
         claim_token="not-the-owner",
         delivered_message_id=999,
     )
-    assert not await ticket_service.mark_delivery_cancelled(
+    assert not await ticket_service.outbox.mark_delivery_cancelled(
         job.id,
         claim_token="not-the-owner",
         reason="wrong owner",
     )
-    assert not await ticket_service.mark_delivery_retry(
+    assert not await ticket_service.outbox.mark_delivery_retry(
         job.id,
         claim_token="not-the-owner",
         error="wrong owner",
@@ -89,7 +89,7 @@ async def test_delivery_transitions_require_current_processing_claim(
     assert processing.claim_token == job.claim_token
     assert processing.delivered_message_id is None
 
-    assert await ticket_service.mark_delivery_retry(
+    assert await ticket_service.outbox.mark_delivery_retry(
         job.id,
         claim_token=job.claim_token,
         error="try again",
@@ -101,9 +101,9 @@ async def test_delivery_transitions_require_current_processing_claim(
     assert pending.claimed_at is None
     assert pending.claim_token is None
 
-    reclaimed = (await ticket_service.claim_due_deliveries())[0]
+    reclaimed = (await ticket_service.outbox.claim_due_deliveries())[0]
     assert reclaimed.claim_token != job.claim_token
-    assert await ticket_service.mark_delivery_cancelled(
+    assert await ticket_service.outbox.mark_delivery_cancelled(
         reclaimed.id,
         claim_token=reclaimed.claim_token,
         reason="cancelled by owner",
@@ -124,17 +124,17 @@ async def test_late_worker_cannot_overwrite_released_and_reclaimed_delivery(
     )
     await make_claim_stale(ticket_service, stale_job.id)
 
-    assert await ticket_service.release_stale_deliveries() == 1
+    assert await ticket_service.outbox.release_stale_deliveries() == 1
     released = await load_delivery(ticket_service, stale_job.id)
     assert released.status == DeliveryStatus.PENDING
     assert released.claimed_at is None
     assert released.claim_token is None
 
-    current_job = (await ticket_service.claim_due_deliveries())[0]
+    current_job = (await ticket_service.outbox.claim_due_deliveries())[0]
     assert current_job.claim_token != stale_job.claim_token
     assert current_job.attempt_count == 2
 
-    assert not await ticket_service.mark_delivery_delivered(
+    assert not await ticket_service.outbox.mark_delivery_delivered(
         stale_job.id,
         claim_token=stale_job.claim_token,
         delivered_message_id=111,
@@ -144,7 +144,7 @@ async def test_late_worker_cannot_overwrite_released_and_reclaimed_delivery(
     assert still_processing.claim_token == current_job.claim_token
     assert still_processing.delivered_message_id is None
 
-    assert await ticket_service.mark_delivery_delivered(
+    assert await ticket_service.outbox.mark_delivery_delivered(
         current_job.id,
         claim_token=current_job.claim_token,
         delivered_message_id=222,
@@ -172,8 +172,8 @@ async def test_restart_recovers_persisted_stale_delivery_claim(tmp_path: Path) -
     restarted_database = Database(database_url)
     try:
         restarted_service = TicketService(restarted_database)
-        assert await restarted_service.release_stale_deliveries() == 1
-        recovered_job = (await restarted_service.claim_due_deliveries())[0]
+        assert await restarted_service.outbox.release_stale_deliveries() == 1
+        recovered_job = (await restarted_service.outbox.claim_due_deliveries())[0]
 
         assert recovered_job.id == stale_job.id
         assert recovered_job.claim_token != stale_job.claim_token
@@ -203,10 +203,15 @@ async def test_shutdown_release_preserves_fifo_and_attempt_budget_across_restart
             idempotency_key=f"shutdown-release-{index}",
         )
 
-    first_job = (await first_service.claim_due_deliveries())[0]
+    first_job = (await first_service.outbox.claim_due_deliveries())[0]
     assert first_job.attempt_count == 1
-    assert await first_service.release_delivery_claims([(first_job.id, "not-the-owner")]) == 0
-    assert await first_service.release_delivery_claims([(first_job.id, first_job.claim_token)]) == 1
+    assert (
+        await first_service.outbox.release_delivery_claims([(first_job.id, "not-the-owner")]) == 0
+    )
+    assert (
+        await first_service.outbox.release_delivery_claims([(first_job.id, first_job.claim_token)])
+        == 1
+    )
 
     released = await load_delivery(first_service, first_job.id)
     assert released.status == DeliveryStatus.PENDING
@@ -217,12 +222,12 @@ async def test_shutdown_release_preserves_fifo_and_attempt_budget_across_restart
     restarted_database = Database(database_url)
     try:
         restarted_service = TicketService(restarted_database)
-        reclaimed = (await restarted_service.claim_due_deliveries())[0]
+        reclaimed = (await restarted_service.outbox.claim_due_deliveries())[0]
 
         assert reclaimed.id == first_job.id
         assert reclaimed.claim_token != first_job.claim_token
         assert reclaimed.attempt_count == 1
-        assert not await restarted_service.release_delivery_claims(
+        assert not await restarted_service.outbox.release_delivery_claims(
             [(reclaimed.id, first_job.claim_token)]
         )
         processing = await load_delivery(restarted_service, reclaimed.id)

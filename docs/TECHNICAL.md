@@ -7,7 +7,8 @@
 
 Система связывает личный чат клиента с отдельной темой закрытой Telegram Forum-группы. Telegram
 служит клиентским интерфейсом и рабочим местом операторов. REST API — опциональное расширение;
-Remnawave и notification webhook в `v0.1.0` имеют статус experimental и выключены по умолчанию.
+Remnawave и notification webhook — поддерживаемые опциональные интеграции, выключенные по
+умолчанию.
 
 Архитектура рассчитана на один процесс приложения. PostgreSQL можно использовать вместо SQLite,
 но несколько одновременно работающих экземпляров пока не поддерживаются.
@@ -41,14 +42,14 @@ Operator REST API ────────────────────�
 | `telegram_topic_manager.py` | создание, восстановление и синхронизация Forum-тем |
 | `telegram_constants.py` | тексты и наборы Telegram-команд |
 | `telegram_message_utils.py` | разбор команд, metadata медиа и rating UI |
-| `telegram_lifecycle.py` | учёт активных updates и безопасный drain при shutdown |
+| `telegram_lifecycle.py` | запуск polling и упорядоченное завершение Telegram runtime |
 | `telegram_locks.py` | ограниченные по времени per-ticket locks |
 | `services.py` | ticket lifecycle, команды и стабильный публичный facade |
 | `ticket_service_base.py` | общие identity/view/blocklist persistence primitives |
 | `ticket_topic_service.py` | открытие тикета, topic binding, recovery и ticket queries |
 | `ticket_lifecycle_service.py` | close/reopen, rating и blocklist use cases |
 | `ticket_message_service.py` | атомарное сохранение сообщений и постановка в outbox |
-| `ticket_outbox_service.py` | worker-facing facade очередей |
+| `outbox_repository.py` | claim-fenced state machines очередей |
 | `delivery.py` | доставка сообщений из durable outbox |
 | `panel.py` | стабильный публичный facade Remnawave use cases |
 | `panel_types.py` | контракты панели и чистое преобразование ответов |
@@ -192,8 +193,8 @@ Uvicorn task находится под общей supervision с Telegram pollin
 
 ## Remnawave
 
-Интеграция experimental в `v0.1.0`; её недоступность при выключенной конфигурации не должна
-ломать обычную поддержку.
+Поддерживается API-контракт Remnawave 2.8.0. Выключенная или ненастроенная интеграция не влияет на
+обычные сценарии поддержки.
 
 - Telegram-тикет ищет пользователя только по `telegramId`.
 - Допустим ровно один результат; 0 или несколько результатов дают fail-closed.
@@ -202,20 +203,43 @@ Uvicorn task находится под общей supervision с Telegram pollin
 - Remnawave остаётся источником истины для ключей, сроков и устройств.
 - Для одного тикета одновременно допускается одна незавершённая мутация.
 
-Действие резервируется в `operator_actions` до HTTP-вызова. Timeout, HTTP 5xx, некорректный JSON
-и недостоверный success считаются **unknown outcome**. Потенциально выполненная мутация не
-повторяется автоматически. После аварийного старта незавершённые действия требуют ручной сверки.
+Действие и задание сверки фиксируются в БД до внешней мутации. Timeout, HTTP 5xx, некорректный JSON
+и недостоверный success считаются **unknown outcome**. Мутация автоматически не повторяется:
+worker после задержки только читает текущее состояние Remnawave и подтверждает результат.
+
+- `/gift` проверяет точную ожидаемую дату окончания;
+- `/revokelink` проверяет смену subscription URL;
+- `/resetkey` сравнивает SHA-256 fingerprint protocol credentials; исходные ключи в БД не
+  сохраняются;
+- `/resetdevices` проверяет, что список HWID-устройств пуст.
+
+После ограниченной серии сверок результат получает одну из трёх классификаций: точное ожидаемое
+состояние даёт `completed`, доказанно неизменившееся состояние — `not_applied`, а конфликтующее или
+недостаточное состояние — `inconclusive`. В последнем случае действие остаётся `unknown`, и новые
+мутации тикета блокируются. Full admin может классифицировать его командой
+`/resolvepanel <operator_action_uuid> applied|not_applied` только после независимой проверки.
+Команда не повторяет мутацию, выполняет fenced first-writer-wins переход и сохраняет решение,
+actor, время и command key в аудите. Только для подтверждённого `/revokelink applied` выполняется
+read-only lookup: текущая ссылка нужна, чтобы завершить заранее созданный notification intent.
+
+Если процесс завершился до фиксации задания сверки, startup recovery знает, что внешний вызов ещё
+не начинался. Недоступность и некорректные read-ответы Remnawave повторяются с backoff; после 20
+неудач действие становится `inconclusive` и оператор получает уведомление. Повреждённый локальный
+payload сразу переводится в `inconclusive`. Ни один из этих случаев не трактуется как `not_applied`.
 
 `/revokelink` заранее создаёт durable notification intent. Успех не финализируется, пока
 уведомление не готово к доставке, поэтому рестарт не приводит к повторному revoke.
 
 ## Notification webhook
 
-Интеграция experimental в `v0.1.0` и не входит в поддерживаемые production guarantees.
-
 Worker доставляет события из `notification_outbox` во внешний backend. Запрос подписывается
-HMAC-секретом. Повторы различают временные и постоянные ошибки и учитывают `Retry-After`.
-Получатель должен дедуплицировать события по стабильному идентификатору.
+HMAC-SHA256: подпись вычисляется для `<timestamp>.<raw-body>` и передаётся в
+`X-Support-Signature` вместе с `X-Support-Timestamp` и `X-Support-Event-Id`. Повторы различают
+временные и постоянные ошибки, учитывают `Retry-After` и сохраняют одинаковые body и `event_id`.
+
+Доставка имеет семантику **at-least-once**: если backend принял событие, а приложение не успело
+зафиксировать ответ, событие будет отправлено повторно. Получатель обязан атомарно
+дедуплицировать побочный эффект по `event_id` и только после этого отвечать кодом 2xx.
 
 ## Наблюдаемость
 

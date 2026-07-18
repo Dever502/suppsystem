@@ -22,6 +22,13 @@ from supportbot.telegram_adapter import (
     TicketLockPool,
 )
 from supportbot.telegram_errors import is_missing_topic_error
+from supportbot.telegram_formatting import operator_ticket_info, panel_action_reply, topic_name
+from supportbot.telegram_message_utils import (
+    media_metadata,
+    message_command,
+    rating_keyboard,
+    rating_report,
+)
 
 
 class FakeBot:
@@ -82,7 +89,7 @@ def test_media_metadata_includes_document_file_fields() -> None:
         ),
     )
 
-    assert TelegramSupportAdapter._media_metadata(message) == {  # type: ignore[arg-type]
+    assert media_metadata(message) == {  # type: ignore[arg-type]
         "telegram_content_type": "document",
         "file_id": "file-id",
         "file_unique_id": "unique-id",
@@ -101,7 +108,7 @@ def test_media_metadata_uses_largest_photo_size() -> None:
         ],
     )
 
-    assert TelegramSupportAdapter._media_metadata(message) == {  # type: ignore[arg-type]
+    assert media_metadata(message) == {  # type: ignore[arg-type]
         "telegram_content_type": "photo",
         "file_id": "large",
         "file_unique_id": "large-u",
@@ -119,8 +126,8 @@ def test_topic_name_uses_operator_friendly_identity_without_ticket_id() -> None:
         telegram_user_id=123456789,
     )
 
-    assert TelegramSupportAdapter._topic_name(ticket, closed=False) == "🔴 Ivan Petrov · tg:6789"  # type: ignore[arg-type]
-    assert "4244b623" not in TelegramSupportAdapter._topic_name(ticket, closed=False)  # type: ignore[arg-type]
+    assert topic_name(ticket, closed=False) == "🔴 Ivan Petrov · tg:6789"  # type: ignore[arg-type]
+    assert "4244b623" not in topic_name(ticket, closed=False)  # type: ignore[arg-type]
 
 
 def test_topic_name_falls_back_to_username_or_telegram_id() -> None:
@@ -137,8 +144,8 @@ def test_topic_name_falls_back_to_username_or_telegram_id() -> None:
         telegram_user_id=123456789,
     )
 
-    assert TelegramSupportAdapter._topic_name(username_ticket, closed=True) == "🟢 @ivan · tg:6789"  # type: ignore[arg-type]
-    assert TelegramSupportAdapter._topic_name(id_ticket, closed=False) == "🔴 tg:123456789"  # type: ignore[arg-type]
+    assert topic_name(username_ticket, closed=True) == "🟢 @ivan · tg:6789"  # type: ignore[arg-type]
+    assert topic_name(id_ticket, closed=False) == "🔴 tg:123456789"  # type: ignore[arg-type]
 
 
 def test_operator_ticket_info_is_readable() -> None:
@@ -154,7 +161,7 @@ def test_operator_ticket_info_is_readable() -> None:
         closed_at=None,
     )
 
-    assert TelegramSupportAdapter._operator_ticket_info(ticket) == (  # type: ignore[arg-type]
+    assert operator_ticket_info(ticket) == (  # type: ignore[arg-type]
         "🎫 <b>Тикет</b>\n\n"
         "Статус: 🟢 <code>Открыт</code>\n"
         "ID: <code>ticket-1</code>\n"
@@ -184,7 +191,7 @@ def test_rating_messages_use_card_format() -> None:
         "⭐ <b>Оцените поддержку</b>\n"
         "Выберите оценку ниже:"
     )
-    assert TelegramSupportAdapter._rating_report(ticket, 4) == (  # type: ignore[arg-type]
+    assert rating_report(ticket, 4) == (  # type: ignore[arg-type]
         "⭐ <b>Оценка поддержки</b>\n\n"
         "Оценка: ⭐⭐⭐⭐ <b>4/5</b>\n\n"
         "👤 <b>Клиент</b>\n\n"
@@ -192,7 +199,7 @@ def test_rating_messages_use_card_format() -> None:
         "Telegram ID: <code>123456789</code>\n"
         "Тикет: <code>ticket-1</code>"
     )
-    keyboard = TelegramSupportAdapter._rating_keyboard("ticket-1", 3)
+    keyboard = rating_keyboard("ticket-1", 3)
     assert keyboard.inline_keyboard[0][3].callback_data == "support_rating:ticket-1:3:4"
 
 
@@ -419,12 +426,12 @@ async def test_bindtopic_replaces_uncertain_claim_and_attaches_with_fresh_token(
 def test_message_command_uses_caption_for_media_commands() -> None:
     message = SimpleNamespace(text=None, caption="/Tsop please")
 
-    assert TelegramSupportAdapter._message_command(message) == "/tsop"  # type: ignore[arg-type]
+    assert message_command(message) == "/tsop"  # type: ignore[arg-type]
 
 
 def test_panel_action_reply_formats_mutation_results() -> None:
     assert (
-        TelegramSupportAdapter._panel_action_reply(
+        panel_action_reply(
             PanelActionResult(
                 action="extend_subscription",
                 status="completed",
@@ -437,7 +444,7 @@ def test_panel_action_reply_formats_mutation_results() -> None:
         == "✅ <b>Подписка продлена</b>\nЗатронуто записей: <b>1</b>."
     )
     assert (
-        TelegramSupportAdapter._panel_action_reply(
+        panel_action_reply(
             PanelActionResult(
                 action="reset_devices",
                 status="completed",
@@ -450,7 +457,7 @@ def test_panel_action_reply_formats_mutation_results() -> None:
         == "✅ <b>Устройства сброшены</b>\nУдалено устройств: <b>2</b>."
     )
     assert (
-        TelegramSupportAdapter._panel_action_reply(
+        panel_action_reply(
             PanelActionResult(
                 action="reset_key",
                 status="duplicate",
@@ -472,6 +479,7 @@ def test_topic_command_allowlist_contains_close_variants() -> None:
     assert "/resetkey" in TOPIC_COMMANDS
     assert "/revokelink" in TOPIC_COMMANDS
     assert "/resetdevices" in TOPIC_COMMANDS
+    assert "/resolvepanel" in TOPIC_COMMANDS
     assert "/note" in TOPIC_COMMANDS
     assert "/tsop" not in TOPIC_COMMANDS
 
@@ -622,6 +630,65 @@ async def test_readonly_operator_message_is_rejected_before_ticket_service() -> 
     await adapter.handle_group_message(message)  # type: ignore[arg-type]
 
     assert message.replies == ["⛔ Роль только для чтения. Действие не выполнено."]
+
+
+@pytest.mark.parametrize(("telegram_id", "allowed"), [(1, True), (2, False)])
+async def test_only_full_admin_can_resolve_inconclusive_panel_action(
+    telegram_id: int, allowed: bool
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeTicketService:
+        async def get_by_topic(self, topic_id: int) -> SimpleNamespace:
+            assert topic_id == 777
+            return SimpleNamespace(id="ticket-1")
+
+    class FakePanelService:
+        async def resolve_inconclusive_action(self, **kwargs: object) -> bool:
+            calls.append(kwargs)
+            return True
+
+    class FakeMessage:
+        def __init__(self) -> None:
+            self.from_user = SimpleNamespace(id=telegram_id, is_bot=False)
+            self.message_thread_id = 777
+            self.chat = SimpleNamespace(id=-100123)
+            self.message_id = 51
+            self.text = "/resolvepanel action-uuid applied"
+            self.caption = None
+            self.replies: list[str] = []
+
+        async def reply(self, text: str) -> None:
+            self.replies.append(text)
+
+    adapter = object.__new__(TelegramSupportAdapter)
+    adapter.authorization = AuthorizationService(
+        Settings(
+            support_bot_token=SecretStr("test-token"),
+            support_group_id=-100123,
+            full_admin_telegram_ids={1},
+            operator_telegram_ids={2},
+        )
+    )
+    adapter.ticket_service = FakeTicketService()  # type: ignore[assignment]
+    adapter.panel_service = FakePanelService()  # type: ignore[assignment]
+    message = FakeMessage()
+
+    await adapter.handle_group_message(message)  # type: ignore[arg-type]
+
+    assert bool(calls) is allowed
+    if allowed:
+        assert calls == [
+            {
+                "ticket_id": "ticket-1",
+                "operator_action_id": "action-uuid",
+                "operator_telegram_id": 1,
+                "resolution": "applied",
+                "idempotency_key": "telegram:-100123:51:/resolvepanel",
+            }
+        ]
+    else:
+        assert message.replies == ["⛔ Только full admin может разрешить неизвестный результат."]
 
 
 def test_migration_url_conversion_supports_async_postgres() -> None:

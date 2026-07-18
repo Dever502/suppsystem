@@ -3,22 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from supportbot.panel_reconciliation_service import PanelReconciliationService
-from supportbot.panel_types import (
-    PanelActionResult as PanelActionResult,
-)
-from supportbot.panel_types import (
-    PanelActionStatus as PanelActionStatus,
-)
-from supportbot.panel_types import (
-    PanelSubscriptionInfo as PanelSubscriptionInfo,
-)
-from supportbot.panel_types import (
-    safe_user_context as _safe_user_context,
-)
-from supportbot.remnawave import RemnawaveUser
+from supportbot.panel_types import PanelActionResult, PanelActionStatus, safe_remnawave_context
 from supportbot.service_types import TicketView
-
-GIFT_RECONCILE_ATTEMPTS = 3
 
 
 class PanelActionService(PanelReconciliationService):
@@ -30,9 +16,9 @@ class PanelActionService(PanelReconciliationService):
         extend_days: int,
         idempotency_key: str,
     ) -> PanelActionResult:
-        async def mutate(user: RemnawaveUser) -> tuple[PanelActionStatus, dict[str, Any]]:
+        async def mutate(user_uuid: str) -> tuple[PanelActionStatus, dict[str, Any]]:
             result = await self._operator().extend_user_expiration(
-                user_uuid=user.uuid, extend_days=extend_days
+                user_uuid=user_uuid, extend_days=extend_days
             )
             return (
                 "completed" if result.affected_rows == 1 else "unexpected_response",
@@ -55,11 +41,11 @@ class PanelActionService(PanelReconciliationService):
         operator_telegram_id: int,
         idempotency_key: str,
     ) -> PanelActionResult:
-        async def mutate(user: RemnawaveUser) -> tuple[PanelActionStatus, dict[str, Any]]:
+        async def mutate(user_uuid: str) -> tuple[PanelActionStatus, dict[str, Any]]:
             updated = await self._operator().revoke_user_subscription(
-                user_uuid=user.uuid, revoke_only_passwords=True
+                user_uuid=user_uuid, revoke_only_passwords=True
             )
-            return "completed", _safe_user_context(updated)
+            return "completed", safe_remnawave_context(updated)
 
         return await self._run_ticket_action(
             ticket=ticket,
@@ -77,12 +63,12 @@ class PanelActionService(PanelReconciliationService):
         operator_telegram_id: int,
         idempotency_key: str,
     ) -> PanelActionResult:
-        async def mutate(user: RemnawaveUser) -> tuple[PanelActionStatus, dict[str, Any]]:
+        async def mutate(user_uuid: str) -> tuple[PanelActionStatus, dict[str, Any]]:
             updated = await self._operator().revoke_user_subscription(
-                user_uuid=user.uuid, revoke_only_passwords=False
+                user_uuid=user_uuid, revoke_only_passwords=False
             )
             return "completed", {
-                **_safe_user_context(updated),
+                **safe_remnawave_context(updated),
                 "_new_subscription_url": updated.subscription_url,
             }
 
@@ -102,8 +88,8 @@ class PanelActionService(PanelReconciliationService):
         operator_telegram_id: int,
         idempotency_key: str,
     ) -> PanelActionResult:
-        async def mutate(user: RemnawaveUser) -> tuple[PanelActionStatus, dict[str, Any]]:
-            result = await self._operator().reset_user_hwid_devices(user_uuid=user.uuid)
+        async def mutate(user_uuid: str) -> tuple[PanelActionStatus, dict[str, Any]]:
+            result = await self._operator().reset_user_hwid_devices(user_uuid=user_uuid)
             return "completed", {"devices_removed": result.total}
 
         return await self._run_ticket_action(

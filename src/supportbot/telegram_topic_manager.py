@@ -17,61 +17,17 @@ from supportbot.service_types import (
 from supportbot.services import TicketService
 from supportbot.telegram_errors import is_missing_topic_error
 from supportbot.telegram_formatting import (
-    code_or_dash,
-    date_text,
-    expiration_text,
+    customer_identity,
     format_subscription_lookup,
-    operator_ticket_info,
-    panel_status_text,
-    subscription_status,
-    ticket_status_text,
-    topic_identity,
     topic_name,
-    traffic_text,
 )
 from supportbot.telegram_limits import TelegramRateLimiter
 from supportbot.telegram_locks import TicketLockPool
-from supportbot.telegram_message_utils import (
-    attachment_metadata,
-    command_argument,
-    command_key,
-    media_metadata,
-    message_command,
-    message_text,
-    metadata_fields,
-    rating_keyboard,
-    rating_report,
-)
-from supportbot.telegram_panel_handler import (
-    GIFT_DAYS_ERROR_TEXT as PANEL_GIFT_DAYS_ERROR_TEXT,
-)
 
 logger = logging.getLogger(__name__)
-GIFT_DAYS_ERROR_TEXT = PANEL_GIFT_DAYS_ERROR_TEXT
 
 
 class TelegramTopicManager:
-    _operator_ticket_info = staticmethod(operator_ticket_info)
-    _ticket_status_text = staticmethod(ticket_status_text)
-    _message_command = staticmethod(message_command)
-    _command_argument = staticmethod(command_argument)
-    _message_text = staticmethod(message_text)
-    _metadata_fields = staticmethod(metadata_fields)
-    _attachment_metadata = staticmethod(attachment_metadata)
-    _media_metadata = staticmethod(media_metadata)
-    _rating_keyboard = staticmethod(rating_keyboard)
-    _rating_report = staticmethod(rating_report)
-    _command_key = staticmethod(command_key)
-    _topic_identity = staticmethod(topic_identity)
-    _topic_name = staticmethod(topic_name)
-    _format_subscription_lookup = staticmethod(format_subscription_lookup)
-    _subscription_status = staticmethod(subscription_status)
-    _date_text = staticmethod(date_text)
-    _expiration_text = staticmethod(expiration_text)
-    _panel_status_text = staticmethod(panel_status_text)
-    _code_or_dash = staticmethod(code_or_dash)
-    _traffic_text = staticmethod(traffic_text)
-
     bot: Bot
     ticket_service: TicketService
     settings: Settings
@@ -103,9 +59,6 @@ class TelegramTopicManager:
                     "topic_id": ticket.topic_id,
                 },
             )
-
-    async def sync_ticket_topic(self, ticket: TicketView) -> bool:
-        return await self._sync_ticket_topic(ticket)
 
     async def reconcile_ticket_topic(self, ticket_id: str) -> bool:
         ticket = await self.ticket_service.get_ticket(ticket_id)
@@ -241,7 +194,7 @@ class TelegramTopicManager:
             await self.bot.edit_forum_topic(
                 chat_id=self.settings.support_group_id,
                 message_thread_id=ticket.topic_id,
-                name=self._topic_name(ticket, closed=ticket.status.value == "closed"),
+                name=topic_name(ticket, closed=ticket.status.value == "closed"),
             )
         except TelegramAPIError as error:
             logger.exception(
@@ -311,7 +264,7 @@ class TelegramTopicManager:
             await self.limiter.wait()
             topic = await self.bot.create_forum_topic(
                 chat_id=self.settings.support_group_id,
-                name=self._topic_name(ticket, closed=ticket.status.value == "closed"),
+                name=topic_name(ticket, closed=ticket.status.value == "closed"),
             )
             logger.info(
                 "Created support topic in Telegram",
@@ -372,24 +325,6 @@ class TelegramTopicManager:
                     },
                 )
             return await self.ticket_service.get_ticket(ticket.id)
-        except TelegramAPIError:
-            if topic_attached:
-                logger.exception(
-                    "Support topic was attached but post-attach setup failed",
-                    exc_info=True,
-                    extra={
-                        "event": "topic_post_attach_setup_failed",
-                        "ticket_id": ticket.id,
-                        "topic_id": ticket.topic_id,
-                    },
-                )
-            else:
-                logger.exception(
-                    "Topic creation outcome is unknown; preserving claim for manual recovery",
-                    exc_info=True,
-                    extra={"event": "topic_provisioning_uncertain", "ticket_id": ticket.id},
-                )
-            raise
         except Exception:
             if topic_attached:
                 logger.exception(
@@ -430,15 +365,9 @@ class TelegramTopicManager:
         )
 
     async def _customer_card(self, ticket: TicketView) -> str:
-        identity_parts = []
-        if ticket.display_name:
-            identity_parts.append(escape(ticket.display_name))
-        if ticket.username:
-            identity_parts.append(f"@{escape(ticket.username)}")
-        identity = " · ".join(identity_parts) or "Без имени"
         return (
             "👤 <b>Клиент</b>\n\n"
-            f"<b>{identity}</b>\n"
+            f"<b>{customer_identity(ticket)}</b>\n"
             f"Telegram ID: <code>{ticket.telegram_user_id}</code>\n"
             f"Тикет: <code>{escape(ticket.id)}</code>\n\n"
             f"{await self._subscription_block(ticket)}"
@@ -448,4 +377,4 @@ class TelegramTopicManager:
         if self.panel_service is None:
             return "💳 <b>Подписка Remnawave</b>\n\nИнтеграция не подключена."
         lookup = await self.panel_service.get_subscription_for_ticket(ticket)
-        return self._format_subscription_lookup(lookup)
+        return format_subscription_lookup(lookup)

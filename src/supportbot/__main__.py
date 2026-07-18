@@ -32,7 +32,7 @@ from supportbot.runtime_supervision import shutdown_runtime, supervise_ingress
 from supportbot.services import TicketService
 from supportbot.telegram_adapter import TelegramSupportAdapter
 from supportbot.telegram_ingress import DurableTelegramIngressMiddleware, TelegramIngressWorker
-from supportbot.telegram_lifecycle import TelegramUpdateTaskRegistry, create_polling_task
+from supportbot.telegram_lifecycle import create_polling_task
 from supportbot.telegram_limits import TelegramRateLimiter
 from supportbot.trace import TraceMiddleware
 
@@ -181,7 +181,7 @@ async def run() -> None:
         runtime_health.ready("panel")
         if recovered_actions:
             logger.error(
-                "Recovered interrupted Remnawave actions for manual reconciliation",
+                "Recovered interrupted Remnawave actions for durable reconciliation",
                 extra={
                     "event": "panel_actions_recovery_required",
                     "recovered_action_count": recovered_actions,
@@ -207,11 +207,9 @@ async def run() -> None:
         raise
     limiter = TelegramRateLimiter(settings.telegram_min_request_interval_seconds)
     dispatcher = Dispatcher()
-    telegram_tasks = TelegramUpdateTaskRegistry(dispatcher)
     ingress_worker = TelegramIngressWorker(
         bot=bot, dispatcher=dispatcher, repository=durable_work, runtime_health=runtime_health
     )
-    dispatcher.update.outer_middleware(telegram_tasks)
     dispatcher.update.outer_middleware(TraceMiddleware())
     dispatcher.update.outer_middleware(
         DurableTelegramIngressMiddleware(durable_work, ingress_worker.wake)
@@ -232,7 +230,6 @@ async def run() -> None:
                 database=database,
                 ticket_service=ticket_service,
                 settings=settings,
-                sync_ticket_topic=adapter.sync_ticket_topic,
                 runtime_health=runtime_health,
                 metrics=metrics,
             ),
@@ -249,6 +246,7 @@ async def run() -> None:
     delivery_worker = DeliveryWorker(
         bot=bot,
         ticket_service=ticket_service,
+        outbox=ticket_service.outbox,
         settings=settings,
         limiter=limiter,
         heartbeat_path=settings.data_dir / "delivery-worker-heartbeat",
@@ -259,7 +257,7 @@ async def run() -> None:
     notification_worker_task: asyncio.Task[None] | None = None
     if settings.notification_webhook_enabled:
         notification_worker = NotificationWebhookWorker(
-            ticket_service=ticket_service,
+            outbox=ticket_service.outbox,
             settings=settings,
             heartbeat_path=settings.data_dir / "notification-webhook-worker-heartbeat",
             runtime_health=runtime_health,
@@ -292,7 +290,6 @@ async def run() -> None:
         await shutdown_runtime(
             polling_task=polling_task,
             stop_polling=dispatcher.stop_polling,
-            drain_telegram_handlers=telegram_tasks.drain,
             api_task=api_task,
             request_api_stop=(api_server.request_stop if api_server is not None else None),
             worker_tasks=(

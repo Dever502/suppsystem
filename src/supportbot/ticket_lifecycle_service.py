@@ -15,25 +15,20 @@ from supportbot.api_idempotency import (
 )
 from supportbot.audit import record_event
 from supportbot.database import retry_sqlite_locks
-from supportbot.durable_work import enqueue_topic_reconciliation
+from supportbot.durable_work import (
+    enqueue_topic_reconciliation,
+    enqueue_topic_reconciliations,
+)
 from supportbot.models import (
     BlocklistEntry,
     DeliveryOutbox,
     Direction,
     OperatorAction,
-    ReconciliationOutbox,
     Ticket,
     TicketMessage,
     TicketStatus,
     User,
-    WorkStatus,
     utcnow,
-)
-from supportbot.service_types import (
-    DeliveryJob as DeliveryJob,
-)
-from supportbot.service_types import (
-    NotificationJob as NotificationJob,
 )
 from supportbot.service_types import (
     TicketNotFoundError,
@@ -68,9 +63,7 @@ class TicketLifecycleService(TicketTopicService):
             replay = await load_api_replay(session, api_idempotency)
             if replay is not None:
                 return replay
-            if await session.scalar(
-                select(OperatorAction.id).where(OperatorAction.idempotency_key == action_key)
-            ):
+            if await self._operator_action_exists(session, action_key):
                 return False
             ticket = await session.get(Ticket, ticket_id)
             if ticket is None:
@@ -167,9 +160,7 @@ class TicketLifecycleService(TicketTopicService):
                 replay = await load_api_replay(session, api_idempotency)
                 if replay is not None:
                     return replay
-                if await session.scalar(
-                    select(OperatorAction.id).where(OperatorAction.idempotency_key == action_key)
-                ):
+                if await self._operator_action_exists(session, action_key):
                     return False
                 raise
         record_event(
@@ -193,9 +184,7 @@ class TicketLifecycleService(TicketTopicService):
             raise ValueError("score must be between 1 and 5")
 
         async with self.database.session() as session:
-            if await session.scalar(
-                select(DeliveryOutbox.id).where(DeliveryOutbox.idempotency_key == idempotency_key)
-            ):
+            if await self._delivery_exists(session, idempotency_key):
                 return False
             rating_guard = await session.execute(
                 update(Ticket)
@@ -242,18 +231,14 @@ class TicketLifecycleService(TicketTopicService):
                 await session.commit()
             except IntegrityError:
                 await session.rollback()
-                duplicate_delivery = await session.scalar(
-                    select(DeliveryOutbox.id).where(
-                        DeliveryOutbox.idempotency_key == idempotency_key
-                    )
-                )
+                duplicate_delivery = await self._delivery_exists(session, idempotency_key)
                 duplicate_rating = await session.scalar(
                     select(TicketMessage.id).where(
                         TicketMessage.ticket_id == ticket_id,
                         TicketMessage.rating_cycle == close_cycle,
                     )
                 )
-                if duplicate_delivery is not None or duplicate_rating is not None:
+                if duplicate_delivery or duplicate_rating is not None:
                     return False
                 raise
             return True
@@ -263,9 +248,7 @@ class TicketLifecycleService(TicketTopicService):
         self, *, operator_telegram_id: int, idempotency_key: str
     ) -> list[TicketView]:
         async with self.database.session() as session:
-            if await session.scalar(
-                select(OperatorAction.id).where(OperatorAction.idempotency_key == idempotency_key)
-            ):
+            if await self._operator_action_exists(session, idempotency_key):
                 return []
             session.add(
                 OperatorAction(
@@ -280,11 +263,7 @@ class TicketLifecycleService(TicketTopicService):
                 await session.flush()
             except IntegrityError:
                 await session.rollback()
-                if await session.scalar(
-                    select(OperatorAction.id).where(
-                        OperatorAction.idempotency_key == idempotency_key
-                    )
-                ):
+                if await self._operator_action_exists(session, idempotency_key):
                     return []
                 raise
 
@@ -319,44 +298,11 @@ class TicketLifecycleService(TicketTopicService):
                         for ticket_id in ticket_ids
                     ]
                 )
-                await session.execute(
-                    update(ReconciliationOutbox)
-                    .where(
-                        ReconciliationOutbox.kind == "telegram_topic",
-                        ReconciliationOutbox.ticket_id.in_(ticket_ids),
-                    )
-                    .values(
-                        payload={"desired_status": TicketStatus.CLOSED.value},
-                        status=WorkStatus.PENDING,
-                        attempt_count=0,
-                        next_attempt_at=transition_at,
-                        claimed_at=None,
-                        claim_token=None,
-                        delivered_at=None,
-                        last_error=None,
-                    )
-                )
-                queued_ticket_ids = set(
-                    (
-                        await session.scalars(
-                            select(ReconciliationOutbox.ticket_id).where(
-                                ReconciliationOutbox.kind == "telegram_topic",
-                                ReconciliationOutbox.ticket_id.in_(ticket_ids),
-                            )
-                        )
-                    ).all()
-                )
-                session.add_all(
-                    [
-                        ReconciliationOutbox(
-                            idempotency_key=f"topic:{ticket_id}",
-                            kind="telegram_topic",
-                            ticket_id=ticket_id,
-                            payload={"desired_status": TicketStatus.CLOSED.value},
-                        )
-                        for ticket_id in ticket_ids
-                        if ticket_id not in queued_ticket_ids
-                    ]
+                await enqueue_topic_reconciliations(
+                    session,
+                    ticket_ids=ticket_ids,
+                    payload={"desired_status": TicketStatus.CLOSED.value},
+                    next_attempt_at=transition_at,
                 )
                 tickets = list(
                     (
@@ -373,11 +319,7 @@ class TicketLifecycleService(TicketTopicService):
                 await session.commit()
             except IntegrityError:
                 await session.rollback()
-                if await session.scalar(
-                    select(OperatorAction.id).where(
-                        OperatorAction.idempotency_key == idempotency_key
-                    )
-                ):
+                if await self._operator_action_exists(session, idempotency_key):
                     return []
                 raise
         for view in views:
@@ -400,9 +342,7 @@ class TicketLifecycleService(TicketTopicService):
     ) -> bool:
         action_key = idempotency_key or f"block:{telegram_user_id}:{uuid.uuid4()}"
         async with self.database.session() as session:
-            if await session.scalar(
-                select(OperatorAction.id).where(OperatorAction.idempotency_key == action_key)
-            ):
+            if await self._operator_action_exists(session, action_key):
                 return False
             entry = await session.get(BlocklistEntry, telegram_user_id)
             if entry is None:
@@ -427,9 +367,7 @@ class TicketLifecycleService(TicketTopicService):
                 await session.commit()
             except IntegrityError:
                 await session.rollback()
-                if await session.scalar(
-                    select(OperatorAction.id).where(OperatorAction.idempotency_key == action_key)
-                ):
+                if await self._operator_action_exists(session, action_key):
                     return False
                 raise
         record_event(
@@ -450,9 +388,7 @@ class TicketLifecycleService(TicketTopicService):
     ) -> bool:
         action_key = idempotency_key or f"unblock:{telegram_user_id}:{uuid.uuid4()}"
         async with self.database.session() as session:
-            if await session.scalar(
-                select(OperatorAction.id).where(OperatorAction.idempotency_key == action_key)
-            ):
+            if await self._operator_action_exists(session, action_key):
                 return False
             entry = await session.get(BlocklistEntry, telegram_user_id)
             if entry is not None:
@@ -472,8 +408,8 @@ class TicketLifecycleService(TicketTopicService):
                 await session.commit()
             except IntegrityError:
                 await session.rollback()
-                if operator_telegram_id is not None and await session.scalar(
-                    select(OperatorAction.id).where(OperatorAction.idempotency_key == action_key)
+                if operator_telegram_id is not None and await self._operator_action_exists(
+                    session, action_key
                 ):
                     return False
                 raise
@@ -516,9 +452,7 @@ class TicketLifecycleService(TicketTopicService):
             replay = await load_api_replay(session, api_idempotency)
             if replay is not None:
                 return replay
-            if await session.scalar(
-                select(OperatorAction.id).where(OperatorAction.idempotency_key == idempotency_key)
-            ):
+            if await self._operator_action_exists(session, idempotency_key):
                 return False
             ticket = await session.get(Ticket, ticket_id)
             if ticket is None:
@@ -583,11 +517,7 @@ class TicketLifecycleService(TicketTopicService):
                 replay = await load_api_replay(session, api_idempotency)
                 if replay is not None:
                     return replay
-                if await session.scalar(
-                    select(OperatorAction.id).where(
-                        OperatorAction.idempotency_key == idempotency_key
-                    )
-                ):
+                if await self._operator_action_exists(session, idempotency_key):
                     return False
                 raise
         record_event(
@@ -600,55 +530,10 @@ class TicketLifecycleService(TicketTopicService):
             ticket_ids = list((await session.scalars(select(Ticket.id))).all())
             if not ticket_ids:
                 return 0
-            now = utcnow()
-            await session.execute(
-                update(ReconciliationOutbox)
-                .where(
-                    ReconciliationOutbox.kind == "telegram_topic",
-                    ReconciliationOutbox.ticket_id.in_(ticket_ids),
-                )
-                .values(
-                    payload={"reason": "bulk_sync"},
-                    status=WorkStatus.PENDING,
-                    attempt_count=0,
-                    next_attempt_at=now,
-                    claimed_at=None,
-                    claim_token=None,
-                    delivered_at=None,
-                    last_error=None,
-                )
-            )
-            queued_ticket_ids = set(
-                (
-                    await session.scalars(
-                        select(ReconciliationOutbox.ticket_id).where(
-                            ReconciliationOutbox.kind == "telegram_topic",
-                            ReconciliationOutbox.ticket_id.in_(ticket_ids),
-                        )
-                    )
-                ).all()
-            )
-            session.add_all(
-                [
-                    ReconciliationOutbox(
-                        idempotency_key=f"topic:{ticket_id}",
-                        kind="telegram_topic",
-                        ticket_id=ticket_id,
-                        payload={"reason": "bulk_sync"},
-                    )
-                    for ticket_id in ticket_ids
-                    if ticket_id not in queued_ticket_ids
-                ]
+            await enqueue_topic_reconciliations(
+                session,
+                ticket_ids=ticket_ids,
+                payload={"reason": "bulk_sync"},
             )
             await session.commit()
             return len(ticket_ids)
-
-    async def list_tickets_with_topics(self) -> list[TicketView]:
-        async with self.database.session() as session:
-            statement = (
-                select(Ticket)
-                .options(joinedload(Ticket.user).selectinload(User.identities))
-                .where(Ticket.topic_id.is_not(None))
-            )
-            tickets = list((await session.scalars(statement)).all())
-            return [self._loaded_ticket_view(ticket) for ticket in tickets]

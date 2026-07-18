@@ -16,7 +16,7 @@ Suppsystem — Telegram-first система технической поддер
 - SQLite для простого запуска и PostgreSQL для production-инсталляции;
 - опциональный Operator API;
 - healthcheck, readiness, Prometheus-метрики, JSON-логи и backup/restore;
-- экспериментальные интеграции Remnawave и notification webhook.
+- интеграция с Remnawave 2.8.0 и подписанный notification webhook.
 
 ## Как это работает
 
@@ -95,8 +95,8 @@ PyPI-пакет и wheel для релиза не публикуются.
   дубль сообщения.
 - Operator API использует один статический административный токен и должен публиковаться только
   через HTTPS reverse proxy.
-- Remnawave и notification webhook выключены по умолчанию и не входят в поддерживаемые гарантии
-  текущего релиза.
+- Remnawave и notification webhook поддерживаются, но как опциональные интеграции выключены по
+  умолчанию; проверен контракт Remnawave 2.8.0.
 
 ## Разработка
 

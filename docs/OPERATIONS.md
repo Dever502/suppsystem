@@ -162,8 +162,7 @@ supervisor. При штатном завершении новые HTTP/Telegram 
 
 ### Remnawave
 
-В `v0.1.0` интеграция имеет статус experimental, выключена по умолчанию и не входит в
-поддерживаемые production guarantees первого релиза.
+Поддерживается контракт Remnawave 2.8.0. Интеграция опциональна и выключена по умолчанию.
 
 | Переменная | По умолчанию | Назначение |
 | --- | --- | --- |
@@ -173,12 +172,14 @@ supervisor. При штатном завершении новые HTTP/Telegram 
 | `REMNAWAVE_TIMEOUT_SECONDS` | `5` | HTTP timeout |
 | `REMNAWAVE_RECONCILE_DELAY_SECONDS` | `10` | задержка перед сверкой результата |
 
-Включение требует URL и token. Не задавайте reconcile delay равным нулю вне тестов.
+Включение требует URL и token. Не задавайте reconcile delay равным нулю вне тестов. При
+`unknown outcome` не повторяйте команду: durable worker сверит состояние без повторной мутации.
+Если результат останется неоднозначным, действие сохранится как `inconclusive` и потребует
+явного решения full admin.
 
 ### Notification webhook
 
-В `v0.1.0` интеграция имеет статус experimental, выключена по умолчанию и не входит в
-поддерживаемые production guarantees первого релиза.
+Интеграция опциональна и выключена по умолчанию. Доставка имеет семантику at-least-once.
 
 | Переменная | По умолчанию | Назначение |
 | --- | --- | --- |
@@ -190,7 +191,8 @@ supervisor. При штатном завершении новые HTTP/Telegram 
 | `NOTIFICATION_WEBHOOK_POLL_INTERVAL_SECONDS` | `1` | интервал чтения очереди |
 
 Внешние URL требуют HTTPS. HTTP разрешён только для localhost/loopback. Credentials внутри URL и
-fragments запрещены.
+fragments запрещены. Получатель должен проверить HMAC-SHA256 подпись raw body и атомарно
+дедуплицировать события по `event_id` до выполнения побочного эффекта.
 
 ## Команды операторов
 
@@ -207,6 +209,7 @@ fragments запрещены.
 | `/resetkey` | operator/full admin | заменить protocol credentials |
 | `/revokelink` | operator/full admin | заменить subscription URL и уведомить клиента |
 | `/resetdevices` | operator/full admin | удалить HWID-устройства |
+| `/resolvepanel UUID applied\|not_applied` | full admin | разрешить проверенный `inconclusive` |
 | `/block` | full access | заблокировать клиента |
 | `/unblock` | full access | снять блокировку |
 | `/stopall` | full access | закрыть все открытые тикеты |
@@ -438,8 +441,25 @@ make production-preflight # проверка уже записанного produ
 
 ### Remnawave вернул unknown outcome
 
-Не повторяйте мутацию вслепую. Сверьте состояние непосредственно в Remnawave и найдите
-`operator_action_id`. Запрос мог выполниться, хотя приложение не получило достоверного ответа.
+Не повторяйте мутацию вслепую: пока идёт автоматическая read-only сверка, следующая команда для
+этого тикета заблокирована. Найдите `operator_action_id` и дождитесь `completed`, `not_applied` или
+`inconclusive`. Недоступные и некорректные read-ответы повторяются с backoff; после 20 неудачных
+попыток действие безопасно переходит в `inconclusive`.
+
+При `inconclusive` уведомление содержит UUID действия. Full admin должен независимо установить
+судьбу именно исходного вызова и выполнить в той же теме одну из команд:
+
+```text
+/resolvepanel <operator_action_uuid> applied
+/resolvepanel <operator_action_uuid> not_applied
+```
+
+`applied` допустим только при доказательстве, что исходная мутация выполнилась, `not_applied` —
+только при доказательстве обратного. Одного текущего состояния Remnawave недостаточно: оно могло
+измениться конкурентно. Если доказательства нет, оставьте действие заблокированным. Команда не
+повторяет мутацию и сохраняет actor, время, решение и idempotency key в аудите. Исключение —
+`/revokelink ... applied`: выполняется read-only lookup новой ссылки для durable-уведомления
+клиента. Если ссылка недоступна или не изменилась, решение не фиксируется.
 
 ### `/ready` возвращает 503
 

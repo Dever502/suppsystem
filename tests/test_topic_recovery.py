@@ -16,6 +16,7 @@ from supportbot.delivery import DeliveryWorker
 from supportbot.models import DeliveryOutbox, DeliveryStatus, Direction, TicketStatus
 from supportbot.services import TicketService
 from supportbot.telegram_adapter import TelegramSupportAdapter, TicketLockPool
+from supportbot.telegram_formatting import topic_name
 
 
 class FakeLimiter:
@@ -112,7 +113,7 @@ async def test_restart_recovers_unclaimed_waiting_delivery_after_partial_success
         source_message_id=1,
         target_chat_id=-100123,
     )
-    assert await first_service.claim_due_deliveries() == []
+    assert await first_service.outbox.claim_due_deliveries() == []
     await first_database.dispose()
 
     restarted_database = Database(database_url)
@@ -148,7 +149,7 @@ async def test_restart_recovers_unclaimed_waiting_delivery_after_partial_success
             assert DeliveryStatus(pending.status) is DeliveryStatus.PENDING
             assert pending.payload["target_thread_id"] == 61_101
 
-        jobs = await restarted_service.claim_due_deliveries()
+        jobs = await restarted_service.outbox.claim_due_deliveries()
         assert len(jobs) == 1
         assert jobs[0].payload["target_thread_id"] == 61_101
         async with restarted_database.session() as session:
@@ -193,7 +194,7 @@ async def test_restart_never_retries_unknown_topic_creation_outcome(tmp_path: Pa
         assert len(bot.created_topics) == 1
         assert await restarted_service.list_waiting_topic_recovery_ticket_ids() == []
         assert await restarted_service.list_topic_provisioning_ticket_ids() == [ticket.id]
-        assert await restarted_service.claim_due_deliveries() == []
+        assert await restarted_service.outbox.claim_due_deliveries() == []
     finally:
         await restarted_database.dispose()
 
@@ -243,12 +244,12 @@ async def test_restart_recovers_closed_waiting_delivery_without_reopening(
         assert recovered_ticket.closed_at == closed_before.closed_at
         assert recovered_ticket.topic_id == 61_104
         assert len(bot.created_topics) == 1
-        assert bot.created_topics[0]["name"] == adapter._topic_name(
+        assert bot.created_topics[0]["name"] == topic_name(
             recovered_ticket,
             closed=True,
         )
 
-        jobs = await restarted_service.claim_due_deliveries()
+        jobs = await restarted_service.outbox.claim_due_deliveries()
         assert len(jobs) == 1
         assert jobs[0].payload["target_thread_id"] == 61_104
     finally:
@@ -283,7 +284,7 @@ async def test_deleted_topic_recovery_delivers_closed_ticket_queue_without_reope
             idempotency_key="close-before-deleted-topic-recovery",
         )
         closed_before = await service.get_ticket(ticket.id)
-        first_job = (await service.claim_due_deliveries())[0]
+        first_job = (await service.outbox.claim_due_deliveries())[0]
 
         bot = RecoveryBot(replacement_topic_id=61_201, missing_topic_id=61_200)
         settings = recovery_settings(tmp_path)
@@ -291,6 +292,7 @@ async def test_deleted_topic_recovery_delivers_closed_ticket_queue_without_reope
         worker = DeliveryWorker(
             bot=bot,  # type: ignore[arg-type]
             ticket_service=service,
+            outbox=service.outbox,
             settings=settings,
             limiter=FakeLimiter(),  # type: ignore[arg-type]
             heartbeat_path=tmp_path / "delivery-worker-heartbeat",
@@ -304,14 +306,14 @@ async def test_deleted_topic_recovery_delivers_closed_ticket_queue_without_reope
         assert recovered_ticket.closed_at == closed_before.closed_at
         assert recovered_ticket.topic_id == 61_201
         assert len(bot.created_topics) == 1
-        assert bot.created_topics[0]["name"] == adapter._topic_name(recovered_ticket, closed=True)
+        assert bot.created_topics[0]["name"] == topic_name(recovered_ticket, closed=True)
 
         for _ in range(2):
-            jobs = await service.claim_due_deliveries()
+            jobs = await service.outbox.claim_due_deliveries()
             assert len(jobs) == 1
             assert jobs[0].payload["target_thread_id"] == 61_201
             await worker._deliver(jobs[0])
-        assert await service.claim_due_deliveries() == []
+        assert await service.outbox.claim_due_deliveries() == []
 
         async with database.session() as session:
             deliveries = list(

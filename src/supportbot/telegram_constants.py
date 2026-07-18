@@ -25,6 +25,7 @@ TOPIC_COMMANDS = {
     "/resetkey",
     "/revokelink",
     "/resetdevices",
+    "/resolvepanel",
     "/note",
     "/stopall",
     "/synctopics",

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
-
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi import FastAPI, Query, status
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
@@ -24,7 +22,6 @@ from supportbot.database import Database
 from supportbot.metrics import MetricsRegistry
 from supportbot.models import Direction, TicketMessage, TicketStatus
 from supportbot.runtime_health import RuntimeHealth
-from supportbot.service_types import TicketNotFoundError, TicketView
 from supportbot.services import TicketService
 
 API_TICKET_CLOSED_TEXT = (
@@ -68,11 +65,7 @@ def register_routes(
     settings: Settings,
     runtime_health: RuntimeHealth,
     metrics: MetricsRegistry,
-    sync_ticket_topic: Callable[[TicketView], Awaitable[bool]] | None,
 ) -> None:
-    async def get_database() -> AsyncIterator[Database]:
-        yield database
-
     @app.get("/health", tags=["health"])
     async def health() -> dict[str, str]:
         return {"status": "ok"}
@@ -123,11 +116,7 @@ def register_routes(
 
     @app.get("/api/v1/tickets/{ticket_id}", response_model=TicketResponse, tags=["tickets"])
     async def get_ticket(ticket_id: TicketId) -> TicketResponse:
-        try:
-            ticket = await ticket_service.get_ticket(ticket_id)
-        except TicketNotFoundError as error:
-            raise HTTPException(status_code=404, detail="Ticket not found") from error
-        return ticket_response(ticket)
+        return ticket_response(await ticket_service.get_ticket(ticket_id))
 
     @app.get(
         "/api/v1/tickets/{ticket_id}/messages",
@@ -138,13 +127,9 @@ def register_routes(
         ticket_id: TicketId,
         limit: int = Query(default=50, ge=1, le=100),
         offset: int = Query(default=0, ge=0, le=100_000),
-        db: Database = Depends(get_database),
     ) -> list[MessageResponse]:
-        try:
-            await ticket_service.get_ticket(ticket_id)
-        except TicketNotFoundError as error:
-            raise HTTPException(status_code=404, detail="Ticket not found") from error
-        return await read_messages(ticket_id, db, limit=limit, offset=offset)
+        await ticket_service.get_ticket(ticket_id)
+        return await read_messages(ticket_id, database, limit=limit, offset=offset)
 
     @app.post(
         "/api/v1/tickets/{ticket_id}/messages",
@@ -162,17 +147,14 @@ def register_routes(
             key=x_idempotency_key,
             payload={"text": request.text},
         )
-        try:
-            result = await ticket_service.send_operator_message(
-                ticket_id=ticket_id,
-                operator_telegram_id=settings.api_operator_telegram_id,
-                text=request.text,
-                idempotency_key=command.storage_key,
-                reopen_idempotency_key=(f"api:message-reopen:{ticket_id}:{x_idempotency_key}"),
-                api_idempotency=command,
-            )
-        except TicketNotFoundError as error:
-            raise HTTPException(status_code=404, detail="Ticket not found") from error
+        result = await ticket_service.send_operator_message(
+            ticket_id=ticket_id,
+            operator_telegram_id=settings.api_operator_telegram_id,
+            text=request.text,
+            idempotency_key=command.storage_key,
+            reopen_idempotency_key=(f"api:message-reopen:{ticket_id}:{x_idempotency_key}"),
+            api_idempotency=command,
+        )
         return MutationResponse(changed=result.changed)
 
     @app.post(
@@ -192,21 +174,18 @@ def register_routes(
             key=x_idempotency_key,
             payload={"notify_user": notify_user},
         )
-        try:
-            ticket = await ticket_service.get_ticket(ticket_id)
-            changed = await ticket_service.close(
-                ticket_id=ticket_id,
-                operator_telegram_id=settings.api_operator_telegram_id,
-                idempotency_key=command.storage_key,
-                notification_text=API_TICKET_CLOSED_TEXT if notify_user else None,
-                notification_target_chat_id=ticket.telegram_user_id if notify_user else None,
-                notification_idempotency_key=(
-                    f"api:close:{ticket_id}:{x_idempotency_key}:notification"
-                ),
-                api_idempotency=command,
-            )
-        except TicketNotFoundError as error:
-            raise HTTPException(status_code=404, detail="Ticket not found") from error
+        ticket = await ticket_service.get_ticket(ticket_id)
+        changed = await ticket_service.close(
+            ticket_id=ticket_id,
+            operator_telegram_id=settings.api_operator_telegram_id,
+            idempotency_key=command.storage_key,
+            notification_text=API_TICKET_CLOSED_TEXT if notify_user else None,
+            notification_target_chat_id=ticket.telegram_user_id if notify_user else None,
+            notification_idempotency_key=(
+                f"api:close:{ticket_id}:{x_idempotency_key}:notification"
+            ),
+            api_idempotency=command,
+        )
         return MutationResponse(changed=changed)
 
     @app.post(
@@ -223,13 +202,10 @@ def register_routes(
             key=x_idempotency_key,
             payload={},
         )
-        try:
-            changed = await ticket_service.reopen(
-                ticket_id=ticket_id,
-                operator_telegram_id=settings.api_operator_telegram_id,
-                idempotency_key=command.storage_key,
-                api_idempotency=command,
-            )
-        except TicketNotFoundError as error:
-            raise HTTPException(status_code=404, detail="Ticket not found") from error
+        changed = await ticket_service.reopen(
+            ticket_id=ticket_id,
+            operator_telegram_id=settings.api_operator_telegram_id,
+            idempotency_key=command.storage_key,
+            api_idempotency=command,
+        )
         return MutationResponse(changed=changed)

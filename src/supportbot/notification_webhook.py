@@ -14,9 +14,10 @@ import httpx
 
 from supportbot.config import Settings
 from supportbot.metrics import MetricsRegistry
+from supportbot.outbox_repository import OutboxRepository
 from supportbot.runtime_health import RuntimeHealth
+from supportbot.runtime_supervision import wait_for_event
 from supportbot.service_types import NotificationJob
-from supportbot.services import TicketService
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ class NotificationWebhookWorker:
     def __init__(
         self,
         *,
-        ticket_service: TicketService,
+        outbox: OutboxRepository,
         settings: Settings,
         client: httpx.AsyncClient | None = None,
         heartbeat_path: Path | None = None,
@@ -38,7 +39,7 @@ class NotificationWebhookWorker:
             raise ValueError("notification_webhook_url is required")
         if settings.notification_webhook_secret is None:
             raise ValueError("notification_webhook_secret is required")
-        self.ticket_service = ticket_service
+        self.outbox = outbox
         self.settings = settings
         self.url = settings.notification_webhook_url
         self.secret = settings.notification_webhook_secret.get_secret_value()
@@ -58,7 +59,7 @@ class NotificationWebhookWorker:
             try:
                 await self._release_stale_if_due()
                 self._record_progress()
-                jobs = await self.ticket_service.claim_due_notifications(limit=1)
+                jobs = await self.outbox.claim_due_notifications(limit=1)
                 self._record_progress()
                 if not jobs:
                     await self._wait_for_poll_interval()
@@ -83,7 +84,7 @@ class NotificationWebhookWorker:
         now = time.monotonic()
         if now < self._next_stale_recovery_at:
             return
-        await self.ticket_service.release_stale_notifications(
+        await self.outbox.release_stale_notifications(
             stale_after_seconds=self.stale_notification_after_seconds
         )
         self._next_stale_recovery_at = now + self.stale_recovery_interval_seconds
@@ -126,7 +127,7 @@ class NotificationWebhookWorker:
                 await client.aclose()
 
         if 200 <= response.status_code < 300:
-            changed = await self.ticket_service.mark_notification_delivered(
+            changed = await self.outbox.mark_notification_delivered(
                 job.id, claim_token=job.claim_token
             )
             if not changed:
@@ -159,7 +160,7 @@ class NotificationWebhookWorker:
                 retry_after_seconds=parse_retry_after(response.headers.get("Retry-After")),
             )
         else:
-            changed = await self.ticket_service.mark_notification_failed(
+            changed = await self.outbox.mark_notification_failed(
                 job.id, claim_token=job.claim_token, error=message
             )
             if not changed:
@@ -186,7 +187,7 @@ class NotificationWebhookWorker:
             if retry_after_seconds is not None
             else min(60.0, 2.0 ** min(job.attempt_count, 6))
         )
-        changed = await self.ticket_service.mark_notification_retry(
+        changed = await self.outbox.mark_notification_retry(
             job.id,
             claim_token=job.claim_token,
             error=error,
@@ -239,17 +240,12 @@ class NotificationWebhookWorker:
         }
 
     async def _wait_for_poll_interval(self, *, delay_seconds: float | None = None) -> None:
-        try:
-            await asyncio.wait_for(
-                self._stopped.wait(),
-                timeout=(
-                    self.settings.notification_webhook_poll_interval_seconds
-                    if delay_seconds is None
-                    else delay_seconds
-                ),
-            )
-        except TimeoutError:
-            pass
+        await wait_for_event(
+            self._stopped,
+            self.settings.notification_webhook_poll_interval_seconds
+            if delay_seconds is None
+            else delay_seconds,
+        )
 
 
 def parse_retry_after(value: str | None, *, now: datetime | None = None) -> float | None:

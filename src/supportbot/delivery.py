@@ -14,7 +14,9 @@ from aiogram.types import InlineKeyboardMarkup
 from supportbot.audit import record_event
 from supportbot.config import Settings
 from supportbot.models import Direction
+from supportbot.outbox_repository import OutboxRepository
 from supportbot.runtime_health import RuntimeHealth
+from supportbot.runtime_supervision import wait_for_event
 from supportbot.service_types import DeliveryJob
 from supportbot.services import TicketService
 from supportbot.telegram_errors import is_missing_topic_error
@@ -33,13 +35,14 @@ def _payload_int(payload: dict[str, object], key: str) -> int:
 
 
 class DeliveryWorker:
-    """Persists retries through TicketService instead of relying on process memory."""
+    """Persists retries through the outbox instead of relying on process memory."""
 
     def __init__(
         self,
         *,
         bot: Bot,
         ticket_service: TicketService,
+        outbox: OutboxRepository,
         settings: Settings,
         limiter: TelegramRateLimiter,
         heartbeat_path: Path,
@@ -55,6 +58,7 @@ class DeliveryWorker:
             raise ValueError("stale_delivery_after_seconds must be positive")
         self.bot = bot
         self.ticket_service = ticket_service
+        self.outbox = outbox
         self.settings = settings
         self.limiter = limiter
         self.heartbeat_path = heartbeat_path
@@ -73,7 +77,7 @@ class DeliveryWorker:
             try:
                 await self._release_stale_deliveries_if_due()
                 self._record_progress()
-                jobs = await self.ticket_service.claim_due_deliveries()
+                jobs = await self.outbox.claim_due_deliveries()
                 self._record_progress()
                 if jobs:
                     logger.info(
@@ -101,7 +105,7 @@ class DeliveryWorker:
         now = self._monotonic()
         if now < self._next_stale_recovery_at:
             return None
-        released = await self.ticket_service.release_stale_deliveries(
+        released = await self.outbox.release_stale_deliveries(
             stale_after_seconds=self.stale_delivery_after_seconds
         )
         self._next_stale_recovery_at = now + self.stale_recovery_interval_seconds
@@ -134,7 +138,7 @@ class DeliveryWorker:
             self._record_progress()
 
     async def _release_unstarted_jobs(self, jobs: list[DeliveryJob]) -> None:
-        released = await self.ticket_service.release_delivery_claims(
+        released = await self.outbox.release_delivery_claims(
             [(job.id, job.claim_token) for job in jobs]
         )
         if released:
@@ -188,6 +192,27 @@ class DeliveryWorker:
         )
         return False
 
+    async def _retry_delivery(
+        self,
+        job: DeliveryJob,
+        payload: dict[str, object],
+        error: str,
+        retry_after_seconds: float,
+        *,
+        max_attempts: int | None = None,
+        transition: str = "retry",
+    ) -> bool:
+        retried = await self.outbox.mark_delivery_retry(
+            job.id,
+            claim_token=job.claim_token,
+            error=error,
+            retry_after_seconds=retry_after_seconds,
+            max_attempts=(
+                self.settings.delivery_max_attempts if max_attempts is None else max_attempts
+            ),
+        )
+        return self._claim_transition_applied(job, payload, transition=transition, applied=retried)
+
     async def _recipient_is_blocked(self, job: DeliveryJob, payload: dict[str, object]) -> bool:
         if Direction(job.direction) is not Direction.OPERATOR_TO_USER:
             return False
@@ -197,7 +222,7 @@ class DeliveryWorker:
             return False
         if not await self.ticket_service.is_blocked(target_chat_id):
             return False
-        cancelled = await self.ticket_service.mark_delivery_cancelled(
+        cancelled = await self.outbox.mark_delivery_cancelled(
             job.id,
             claim_token=job.claim_token,
             reason="recipient is blocked",
@@ -257,16 +282,7 @@ class DeliveryWorker:
         except TelegramRetryAfter as error:
             retry_after = float(error.retry_after)
             await self.limiter.defer(retry_after)
-            retried = await self.ticket_service.mark_delivery_retry(
-                job.id,
-                claim_token=job.claim_token,
-                error=str(error),
-                retry_after_seconds=retry_after,
-                max_attempts=self.settings.delivery_max_attempts,
-            )
-            if not self._claim_transition_applied(
-                job, payload, transition="retry", applied=retried
-            ):
+            if not await self._retry_delivery(job, payload, str(error), retry_after):
                 return
             logger.warning(
                 "Telegram flood control delayed delivery",
@@ -297,16 +313,7 @@ class DeliveryWorker:
                 try:
                     new_topic_id = await self.recover_missing_topic(job.ticket_id, old_topic_id)
                     if new_topic_id is None:
-                        retried = await self.ticket_service.mark_delivery_retry(
-                            job.id,
-                            claim_token=job.claim_token,
-                            error=error_text,
-                            retry_after_seconds=5,
-                            max_attempts=self.settings.delivery_max_attempts,
-                        )
-                        self._claim_transition_applied(
-                            job, payload, transition="retry", applied=retried
-                        )
+                        await self._retry_delivery(job, payload, error_text, 5)
                         return
                     retargeted = await self.ticket_service.retarget_topic_deliveries(
                         ticket_id=job.ticket_id,
@@ -314,15 +321,11 @@ class DeliveryWorker:
                         new_topic_id=new_topic_id,
                     )
                     if retargeted == 0:
-                        retried = await self.ticket_service.mark_delivery_retry(
-                            job.id,
-                            claim_token=job.claim_token,
-                            error="topic recovered but delivery was not retargeted",
-                            retry_after_seconds=5,
-                            max_attempts=self.settings.delivery_max_attempts,
-                        )
-                        if not self._claim_transition_applied(
-                            job, payload, transition="retry", applied=retried
+                        if not await self._retry_delivery(
+                            job,
+                            payload,
+                            "topic recovered but delivery was not retargeted",
+                            5,
                         ):
                             return
                         logger.error(
@@ -346,15 +349,8 @@ class DeliveryWorker:
                         },
                     )
                 except Exception as recovery_error:
-                    retried = await self.ticket_service.mark_delivery_retry(
-                        job.id,
-                        claim_token=job.claim_token,
-                        error=f"topic recovery failed: {recovery_error}"[:1000],
-                        retry_after_seconds=5,
-                        max_attempts=self.settings.delivery_max_attempts,
-                    )
-                    if not self._claim_transition_applied(
-                        job, payload, transition="retry", applied=retried
+                    if not await self._retry_delivery(
+                        job, payload, f"topic recovery failed: {recovery_error}"[:1000], 5
                     ):
                         return
                     logger.exception(
@@ -367,15 +363,13 @@ class DeliveryWorker:
                         },
                     )
                 return
-            retried = await self.ticket_service.mark_delivery_retry(
-                job.id,
-                claim_token=job.claim_token,
-                error=error_text,
-                retry_after_seconds=0,
+            if not await self._retry_delivery(
+                job,
+                payload,
+                error_text,
+                0,
                 max_attempts=job.attempt_count,
-            )
-            if not self._claim_transition_applied(
-                job, payload, transition="failed", applied=retried
+                transition="failed",
             ):
                 return
             logger.error(
@@ -390,16 +384,7 @@ class DeliveryWorker:
             await self._alert(job, f"permanent Telegram delivery error: {error_text[:200]}")
         except TelegramAPIError as error:
             retry_after = min(60.0, 2.0 ** min(job.attempt_count, 6))
-            retried = await self.ticket_service.mark_delivery_retry(
-                job.id,
-                claim_token=job.claim_token,
-                error=str(error),
-                retry_after_seconds=retry_after,
-                max_attempts=self.settings.delivery_max_attempts,
-            )
-            if not self._claim_transition_applied(
-                job, payload, transition="retry", applied=retried
-            ):
+            if not await self._retry_delivery(job, payload, str(error), retry_after):
                 return
             logger.warning(
                 "Telegram API delivery error; retry scheduled",
@@ -432,16 +417,7 @@ class DeliveryWorker:
                     "error_kind": type(error).__name__,
                 },
             )
-            retried = await self.ticket_service.mark_delivery_retry(
-                job.id,
-                claim_token=job.claim_token,
-                error="unexpected delivery failure",
-                retry_after_seconds=30,
-                max_attempts=self.settings.delivery_max_attempts,
-            )
-            if not self._claim_transition_applied(
-                job, payload, transition="retry", applied=retried
-            ):
+            if not await self._retry_delivery(job, payload, "unexpected delivery failure", 30):
                 return
             if job.attempt_count >= self.settings.delivery_max_attempts:
                 logger.error(
@@ -455,7 +431,7 @@ class DeliveryWorker:
                 )
                 await self._alert(job, "delivery exhausted after unexpected error")
         else:
-            delivered = await self.ticket_service.mark_delivery_delivered(
+            delivered = await self.outbox.mark_delivery_delivered(
                 job.id,
                 claim_token=job.claim_token,
                 delivered_message_id=delivered_message_id,
@@ -506,14 +482,9 @@ class DeliveryWorker:
             )
 
     async def _wait_for_poll_interval(self, *, delay_seconds: float | None = None) -> None:
-        try:
-            await asyncio.wait_for(
-                self._stopped.wait(),
-                timeout=(
-                    self.settings.delivery_poll_interval_seconds
-                    if delay_seconds is None
-                    else delay_seconds
-                ),
-            )
-        except TimeoutError:
-            pass
+        await wait_for_event(
+            self._stopped,
+            self.settings.delivery_poll_interval_seconds
+            if delay_seconds is None
+            else delay_seconds,
+        )

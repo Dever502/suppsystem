@@ -21,10 +21,7 @@ from supportbot.runtime_supervision import (
     supervise_ingress,
 )
 from supportbot.telegram_ingress import DurableTelegramIngressMiddleware
-from supportbot.telegram_lifecycle import (
-    TelegramUpdateTaskRegistry,
-    create_polling_task,
-)
+from supportbot.telegram_lifecycle import create_polling_task
 
 
 def _settings() -> Settings:
@@ -130,45 +127,15 @@ async def test_polling_keeps_bot_session_owned_by_runtime(monkeypatch: pytest.Mo
     assert captured["handle_as_tasks"] is False
 
 
-def test_telegram_task_registry_fails_fast_on_incompatible_aiogram() -> None:
-    with pytest.raises(RuntimeError, match="incompatible with safe Telegram update shutdown"):
-        TelegramUpdateTaskRegistry(object())  # type: ignore[arg-type]
-
-
-async def test_registry_drains_task_created_before_middleware_entry() -> None:
-    dispatcher = Dispatcher()
-    registry = TelegramUpdateTaskRegistry(dispatcher)
-    release = asyncio.Event()
-
-    async def not_entered_middleware_yet() -> None:
-        await release.wait()
-
-    handler_task = asyncio.create_task(not_entered_middleware_yet())
-    dispatcher_tasks = dispatcher._handle_update_tasks
-    dispatcher_tasks.add(handler_task)
-    handler_task.add_done_callback(dispatcher_tasks.discard)
-
-    drain_task = asyncio.create_task(registry.drain())
-    await asyncio.sleep(0)
-
-    assert not drain_task.done()
-    release.set()
-    await drain_task
-    assert handler_task.done()
-
-
 async def test_shutdown_waits_for_handlers_api_and_workers_before_resources(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    dispatcher = Dispatcher()
-    registry = TelegramUpdateTaskRegistry(dispatcher)
     handler_release = asyncio.Event()
     api_release = asyncio.Event()
     worker_stopped = asyncio.Event()
     events: list[str] = []
 
-    async def slow_handler(event: Update, data: dict[str, Any]) -> None:
-        del event, data
+    async def slow_polling_handler() -> None:
         try:
             await handler_release.wait()
         except asyncio.CancelledError:  # pragma: no cover - regression sentinel
@@ -176,7 +143,7 @@ async def test_shutdown_waits_for_handlers_api_and_workers_before_resources(
             raise
         events.append("handler_done")
 
-    handler_task = asyncio.create_task(registry(slow_handler, Update(update_id=1), {}))
+    polling_task = asyncio.create_task(slow_polling_handler(), name="telegram-polling")
     await asyncio.sleep(0)
 
     async def api_request() -> None:
@@ -197,8 +164,6 @@ async def test_shutdown_waits_for_handlers_api_and_workers_before_resources(
         events.append("worker_stop")
         worker_stopped.set()
 
-    polling_task = asyncio.create_task(asyncio.sleep(0))
-    await polling_task
     api_task = asyncio.create_task(api_request(), name="api-server")
     worker_task = asyncio.create_task(worker(), name="delivery-worker")
 
@@ -207,7 +172,6 @@ async def test_shutdown_waits_for_handlers_api_and_workers_before_resources(
         shutdown_runtime(
             polling_task=polling_task,
             stop_polling=AsyncMock(),
-            drain_telegram_handlers=registry.drain,
             api_task=api_task,
             request_api_stop=request_api_stop,
             worker_tasks=(worker_task,),
@@ -222,7 +186,7 @@ async def test_shutdown_waits_for_handlers_api_and_workers_before_resources(
     )
     await asyncio.sleep(0.03)
 
-    assert not handler_task.cancelled()
+    assert not polling_task.cancelled()
     assert any(
         getattr(record, "event", None) == "shutdown_soft_deadline_exceeded"
         for record in caplog.records
@@ -231,7 +195,7 @@ async def test_shutdown_waits_for_handlers_api_and_workers_before_resources(
     assert "bot_close" not in events
 
     handler_release.set()
-    await handler_task
+    await polling_task
     await asyncio.sleep(0)
     assert "worker_stop" not in events
 

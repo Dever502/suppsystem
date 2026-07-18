@@ -134,7 +134,7 @@ async def test_api_close_can_notify_user_via_outbox(
             headers=headers,
             json={"notify_user": True},
         )
-    jobs = await ticket_service.claim_due_deliveries()
+    jobs = await ticket_service.outbox.claim_due_deliveries()
 
     assert response.status_code == 200
     assert response.json()["changed"] is True
@@ -279,7 +279,7 @@ async def test_api_close_rejects_same_key_with_different_notification_payload(
     assert first.json() == {"changed": True}
     assert conflict.status_code == 409
     assert conflict.json()["error"]["code"] == "idempotency_conflict"
-    assert await ticket_service.claim_due_deliveries() == []
+    assert await ticket_service.outbox.claim_due_deliveries() == []
 
 
 async def test_api_noop_result_is_durably_replayed(
@@ -417,24 +417,13 @@ async def test_api_message_queues_topic_reconciliation_after_atomic_commit(
         operator_telegram_id=999,
         idempotency_key="atomic-sync-close",
     )
-    observed: list[tuple[TicketStatus, tuple[int, int, int, int]]] = []
-
-    async def sync_committed_ticket(view: TicketView) -> bool:
-        observed.append((view.status, await _api_message_counts(database, view.id)))
-        return True
-
     settings = Settings(
         support_bot_token=SecretStr("test-token"),
         support_group_id=-100123,
         api_admin_token=SecretStr("admin-token"),
         api_operator_telegram_id=999,
     )
-    app = create_app(
-        database=database,
-        ticket_service=ticket_service,
-        settings=settings,
-        sync_ticket_topic=sync_committed_ticket,
-    )
+    app = create_app(database=database, ticket_service=ticket_service, settings=settings)
     async with _client(app) as client:
         response = await client.post(
             f"/api/v1/tickets/{ticket.id}/messages",
@@ -446,7 +435,6 @@ async def test_api_message_queues_topic_reconciliation_after_atomic_commit(
         )
 
     assert response.json()["changed"] is True
-    assert observed == []
     async with database.session() as session:
         job = await session.scalar(
             select(ReconciliationOutbox).where(

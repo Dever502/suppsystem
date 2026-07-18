@@ -69,11 +69,15 @@ Tune thresholds for your traffic before using them as paging alerts. For quiet i
 
 ### Remnawave unknown outcome
 
-1. Do not repeat the operator command blindly.
-2. Open Remnawave and verify the subscription state directly.
-3. Find the related `operator_action_id` in logs or database audit rows.
-4. Decide whether the mutation completed, did not apply, or needs manual correction.
-5. Record the reconciliation result in the incident notes.
+1. Do not repeat the operator command while durable reconciliation is pending.
+2. Find the related `operator_action_id` and reconciliation job in logs or database audit rows.
+3. Wait for automatic `completed`, `not_applied` or `inconclusive` classification.
+4. Unavailable or malformed reads retry with backoff and become `inconclusive` after 20 failures.
+5. For `inconclusive`, independently prove the fate of the original call. A full admin may then use
+   `/resolvepanel <operator_action_uuid> applied|not_applied`; otherwise leave the action blocked.
+6. Resolution never repeats a mutation. Confirmed `revokelink applied` performs one read-only lookup
+   so the durable notification contains the current link.
+7. Correlate `panel_action_manually_reconciled` with the actor and action ID in incident notes.
 
 ### Suspected secret exposure
 

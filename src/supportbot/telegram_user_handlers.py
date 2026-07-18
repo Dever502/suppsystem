@@ -9,13 +9,10 @@ from supportbot.service_types import (
     TicketNotFoundError,
 )
 from supportbot.telegram_constants import SUPPORT_PENDING_TEXT, WELCOME_TEXT
-from supportbot.telegram_panel_handler import (
-    GIFT_DAYS_ERROR_TEXT as PANEL_GIFT_DAYS_ERROR_TEXT,
-)
+from supportbot.telegram_message_utils import media_metadata, message_text, rating_report
 from supportbot.telegram_topic_manager import TelegramTopicManager
 
 logger = logging.getLogger(__name__)
-GIFT_DAYS_ERROR_TEXT = PANEL_GIFT_DAYS_ERROR_TEXT
 
 
 class TelegramUserHandlers(TelegramTopicManager):
@@ -32,18 +29,15 @@ class TelegramUserHandlers(TelegramTopicManager):
         await message.answer(WELCOME_TEXT)
 
     async def handle_rating_callback(self, callback: CallbackQuery) -> None:
-        if callback.data is None:
-            await callback.answer("Некорректная оценка.", show_alert=False)
-            return
-
         try:
+            if callback.data is None:
+                raise ValueError
             _, ticket_id, close_cycle_raw, score_raw = callback.data.split(":", maxsplit=3)
             close_cycle = int(close_cycle_raw)
             score = int(score_raw)
+            if score not in range(1, 6):
+                raise ValueError
         except ValueError:
-            await callback.answer("Некорректная оценка.", show_alert=False)
-            return
-        if score not in range(1, 6):
             await callback.answer("Некорректная оценка.", show_alert=False)
             return
 
@@ -62,7 +56,7 @@ class TelegramUserHandlers(TelegramTopicManager):
             score=score,
             close_cycle=close_cycle,
             target_chat_id=self.settings.support_group_id,
-            text=self._rating_report(ticket, score),
+            text=rating_report(ticket, score),
             idempotency_key=(f"rating:{ticket.id}:{close_cycle}:{ticket.telegram_user_id}"),
         )
         logger.info(
@@ -118,8 +112,8 @@ class TelegramUserHandlers(TelegramTopicManager):
                 source_chat_id=message.chat.id,
                 source_message_id=message.message_id,
                 target_chat_id=self.settings.support_group_id,
-                content=self._message_text(message),
-                media=self._media_metadata(message),
+                content=message_text(message),
+                media=media_metadata(message),
             )
             if result.blocked:
                 logger.info(

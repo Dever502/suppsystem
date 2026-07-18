@@ -11,6 +11,7 @@ from aiogram.types import TelegramObject, Update
 
 from supportbot.durable_work import DurableWorkRepository
 from supportbot.runtime_health import RuntimeHealth
+from supportbot.runtime_supervision import wait_for_event
 
 logger = logging.getLogger(__name__)
 
@@ -123,10 +124,7 @@ class TelegramIngressWorker:
 
     async def _wait(self, *, delay_seconds: float | None = None) -> None:
         self._wake.clear()
-        try:
-            await asyncio.wait_for(
-                self._wake.wait(),
-                timeout=self.poll_interval_seconds if delay_seconds is None else delay_seconds,
-            )
-        except TimeoutError:
-            pass
+        await wait_for_event(
+            self._wake,
+            self.poll_interval_seconds if delay_seconds is None else delay_seconds,
+        )

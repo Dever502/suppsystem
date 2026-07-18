@@ -26,6 +26,9 @@ def test_roles_have_expected_permissions() -> None:
     assert authorization.role_for(2) is OperatorRole.OPERATOR
     assert authorization.role_for(3) is OperatorRole.OPERATOR_RO
     assert authorization.role_for(4) is None
+    assert authorization.is_full_admin(1) is True
+    assert authorization.is_full_admin(2) is False
+    assert authorization.is_full_admin(3) is False
 
     for telegram_id in (1, 2):
         assert authorization.can_read(telegram_id) is True
@@ -48,6 +51,7 @@ def test_legacy_admin_ids_are_full_admins() -> None:
 
     assert authorization.role_for(10) is OperatorRole.FULL_ADMIN
     assert authorization.has_full_access(10) is True
+    assert authorization.is_full_admin(10) is True
 
 
 @pytest.mark.parametrize(

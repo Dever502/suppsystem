@@ -94,7 +94,7 @@ async def enqueue_text_and_claim(
         target_chat_id=telegram_user_id,
         idempotency_key=idempotency_key,
     )
-    jobs = await service.claim_due_deliveries()
+    jobs = await service.outbox.claim_due_deliveries()
     assert len(jobs) == 1
     return jobs[0]
 
@@ -299,7 +299,7 @@ async def test_postgres_closed_topic_recovery_claim_is_exclusive(
             )
             == 1
         )
-        jobs = await service.claim_due_deliveries()
+        jobs = await service.outbox.claim_due_deliveries()
         assert len(jobs) == 1
         assert jobs[0].payload["target_thread_id"] == 51_022
 
@@ -600,19 +600,19 @@ async def test_postgres_retry_preserves_delivery_fifo(
                 target_thread_id=ticket.topic_id,
             )
 
-        first_batch = await service.claim_due_deliveries()
+        first_batch = await service.outbox.claim_due_deliveries()
         assert len(first_batch) == 1
         assert first_batch[0].payload["source_message_id"] == 1
         first_token = first_batch[0].claim_token
 
-        assert await service.mark_delivery_retry(
+        assert await service.outbox.mark_delivery_retry(
             first_batch[0].id,
             claim_token=first_token,
             error="temporary PostgreSQL failure",
             retry_after_seconds=60,
             max_attempts=8,
         )
-        assert await service.claim_due_deliveries() == []
+        assert await service.outbox.claim_due_deliveries() == []
 
         async with database.session() as session:
             retriable = await session.get(DeliveryOutbox, first_batch[0].id)
@@ -620,16 +620,16 @@ async def test_postgres_retry_preserves_delivery_fifo(
             retriable.next_attempt_at = utcnow()
             await session.commit()
 
-        retry_batch = await service.claim_due_deliveries()
+        retry_batch = await service.outbox.claim_due_deliveries()
         assert len(retry_batch) == 1
         assert retry_batch[0].id == first_batch[0].id
         assert retry_batch[0].claim_token != first_token
-        assert await service.mark_delivery_delivered(
+        assert await service.outbox.mark_delivery_delivered(
             retry_batch[0].id,
             claim_token=retry_batch[0].claim_token,
         )
 
-        second_batch = await service.claim_due_deliveries()
+        second_batch = await service.outbox.claim_due_deliveries()
         assert len(second_batch) == 1
         assert second_batch[0].payload["source_message_id"] == 2
 
@@ -653,8 +653,8 @@ async def test_postgres_concurrent_delivery_claim_has_one_owner(
 
         first_batch, second_batch = await asyncio.wait_for(
             asyncio.gather(
-                service.claim_due_deliveries(limit=1),
-                service.claim_due_deliveries(limit=1),
+                service.outbox.claim_due_deliveries(limit=1),
+                service.outbox.claim_due_deliveries(limit=1),
             ),
             timeout=10,
         )
@@ -678,12 +678,12 @@ async def test_postgres_late_worker_cannot_overwrite_reclaimed_delivery(
         )
         await make_delivery_stale(database, stale_job.id)
 
-        assert await service.release_stale_deliveries() == 1
-        current_job = (await service.claim_due_deliveries())[0]
+        assert await service.outbox.release_stale_deliveries() == 1
+        current_job = (await service.outbox.claim_due_deliveries())[0]
         assert current_job.claim_token != stale_job.claim_token
         assert current_job.attempt_count == 2
 
-        assert not await service.mark_delivery_delivered(
+        assert not await service.outbox.mark_delivery_delivered(
             stale_job.id,
             claim_token=stale_job.claim_token,
             delivered_message_id=111,
@@ -693,7 +693,7 @@ async def test_postgres_late_worker_cannot_overwrite_reclaimed_delivery(
         assert processing.claim_token == current_job.claim_token
         assert processing.delivered_message_id is None
 
-        assert await service.mark_delivery_delivered(
+        assert await service.outbox.mark_delivery_delivered(
             current_job.id,
             claim_token=current_job.claim_token,
             delivered_message_id=222,
@@ -723,8 +723,8 @@ async def test_postgres_restart_recovers_persisted_stale_delivery_claim(
     restarted_database = Database(postgres_database_url)
     try:
         restarted_service = TicketService(restarted_database)
-        assert await restarted_service.release_stale_deliveries() == 1
-        recovered = await restarted_service.claim_due_deliveries()
+        assert await restarted_service.outbox.release_stale_deliveries() == 1
+        recovered = await restarted_service.outbox.claim_due_deliveries()
 
         assert len(recovered) == 1
         assert recovered[0].id == stale_job.id

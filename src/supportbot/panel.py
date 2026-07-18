@@ -9,9 +9,7 @@ from supportbot.panel_types import PanelSubscriptionInfo as PanelSubscriptionInf
 from supportbot.panel_types import PanelSubscriptionLookup as PanelSubscriptionLookup
 from supportbot.panel_types import RemnawaveOperator as RemnawaveOperator
 from supportbot.panel_types import RemnawaveReader as RemnawaveReader
-from supportbot.panel_types import subscription_info
-
-_subscription_info = subscription_info
+from supportbot.panel_types import subscription_info as subscription_info
 
 
 class PanelService(PanelActionService):

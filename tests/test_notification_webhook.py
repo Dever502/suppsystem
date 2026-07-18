@@ -3,14 +3,19 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 import pytest
 from pydantic import SecretStr
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from supportbot.config import Settings
+from supportbot.database import Database
+from supportbot.models import NotificationOutbox, NotificationStatus
 from supportbot.notification_webhook import NotificationWebhookWorker, parse_retry_after
-from supportbot.services import NotificationJob
+from supportbot.outbox_repository import OutboxRepository
+from supportbot.services import NotificationJob, TicketService
 
 
 class FakeTicketService:
@@ -102,7 +107,7 @@ async def test_worker_claims_one_notification_at_a_time_during_shutdown() -> Non
 
     service = ClaimLimitService()
     worker = NotificationWebhookWorker(
-        ticket_service=service,  # type: ignore[arg-type]
+        outbox=service,  # type: ignore[arg-type]
         settings=settings(),
         client=client(lambda request: httpx.Response(204)),
     )
@@ -125,7 +130,7 @@ async def test_notification_webhook_posts_signed_payload() -> None:
 
     service = FakeTicketService()
     worker = NotificationWebhookWorker(
-        ticket_service=service,
+        outbox=service,
         settings=settings(),
         client=client(handler),
     )
@@ -154,10 +159,91 @@ async def test_notification_webhook_posts_signed_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_webhook_redelivers_same_event_after_local_ack_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bodies: list[bytes] = []
+    event_ids: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(request.content)
+        event_ids.append(request.headers["X-Support-Event-Id"])
+        return httpx.Response(204)
+
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/support.db")
+    await database.create_schema_for_tests()
+    try:
+        ticket_service = TicketService(database)
+        ticket = await ticket_service.open_or_reopen(
+            telegram_user_id=123456789,
+            display_name="Webhook user",
+            username=None,
+        )
+        assert await ticket_service.enqueue_notification(
+            ticket_id=ticket.id,
+            event_type="subscription_link_reissued",
+            destination="subscription_owner",
+            recipient_identity_provider="telegram",
+            recipient_identity_value=str(ticket.telegram_user_id),
+            payload={"subscription_url": "https://sub.example/new"},
+            idempotency_key="notification-reclaim",
+        )
+        outbox = OutboxRepository(database)
+        first = (await outbox.claim_due_notifications())[0]
+
+        real_commit = AsyncSession.commit
+        fail_ack = True
+
+        async def fail_first_commit(session: AsyncSession) -> None:
+            nonlocal fail_ack
+            if fail_ack:
+                fail_ack = False
+                raise RuntimeError("local ack commit failed")
+            await real_commit(session)
+
+        async with client(handler) as http_client:
+            worker = NotificationWebhookWorker(
+                outbox=outbox,
+                settings=settings(),
+                client=http_client,
+            )
+            monkeypatch.setattr(AsyncSession, "commit", fail_first_commit)
+            with pytest.raises(RuntimeError, match="local ack commit failed"):
+                await worker._deliver(first)
+            monkeypatch.setattr(AsyncSession, "commit", real_commit)
+
+            async with database.session() as session:
+                pending_ack = await session.get(NotificationOutbox, first.id)
+            assert pending_ack is not None
+            assert pending_ack.status == NotificationStatus.PROCESSING
+            assert pending_ack.claim_token == first.claim_token
+            assert pending_ack.delivered_at is None
+
+            assert await outbox.release_stale_notifications(stale_after_seconds=0) == 1
+            second = (await outbox.claim_due_notifications())[0]
+            assert second.id == first.id
+            assert second.claim_token != first.claim_token
+            assert second.attempt_count == 2
+            await worker._deliver(second)
+
+        async with database.session() as session:
+            delivered = await session.get(NotificationOutbox, first.id)
+        assert delivered is not None
+        assert delivered.status == NotificationStatus.DELIVERED
+        assert delivered.claim_token is None
+        assert delivered.attempt_count == 2
+        assert bodies[0] == bodies[1]
+        assert event_ids == [first.id, first.id]
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_notification_webhook_retries_5xx() -> None:
     service = FakeTicketService()
     worker = NotificationWebhookWorker(
-        ticket_service=service,
+        outbox=service,
         settings=settings(),
         client=client(lambda request: httpx.Response(503)),
     )
@@ -173,7 +259,7 @@ async def test_notification_webhook_retries_5xx() -> None:
 async def test_notification_webhook_respects_retry_after() -> None:
     service = FakeTicketService()
     worker = NotificationWebhookWorker(
-        ticket_service=service,
+        outbox=service,
         settings=settings(),
         client=client(lambda request: httpx.Response(429, headers={"Retry-After": "120"})),
     )
@@ -194,7 +280,7 @@ def test_retry_after_parses_http_date_and_rejects_invalid_value() -> None:
 async def test_notification_webhook_marks_4xx_failed() -> None:
     service = FakeTicketService()
     worker = NotificationWebhookWorker(
-        ticket_service=service,
+        outbox=service,
         settings=settings(),
         client=client(lambda request: httpx.Response(400)),
     )

@@ -119,13 +119,16 @@ def internal_notes_text(notes: Sequence[InternalNoteView]) -> str:
         content = note.content.strip()
         if len(content) > INTERNAL_NOTE_PREVIEW_LENGTH:
             content = content[: INTERNAL_NOTE_PREVIEW_LENGTH - 1].rstrip() + "…"
-        author = (
-            f" · оператор <code>{note.operator_telegram_id}</code>"
-            if note.operator_telegram_id is not None
-            else ""
-        )
+        if note.operator_display_name:
+            author = escape(note.operator_display_name)
+        elif note.operator_username:
+            author = f"@{escape(note.operator_username)}"
+        elif note.operator_telegram_id is not None:
+            author = f"<code>TG:{note.operator_telegram_id}</code>"
+        else:
+            author = "Неизвестный оператор"
         blocks.append(
-            f"<code>{date_text(note.created_at)}</code>{author}\n{escape(content) or '—'}"
+            f"<code>{date_text(note.created_at)}</code> · {author}\n«{escape(content) or '—'}»"
         )
     return "📝 <b>Заметки</b>\n\n" + "\n\n".join(blocks)
 

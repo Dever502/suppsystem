@@ -128,13 +128,40 @@ def test_internal_notes_text_is_readable_and_escapes_content() -> None:
         content="Проверить <оплату>",
         operator_telegram_id=42,
         created_at=datetime(2026, 7, 2, 14, 30, tzinfo=UTC),
+        operator_display_name="Alice <Operator>",
+        operator_username="alice",
     )
 
     assert internal_notes_text([]) == "📝 <b>Заметки</b>\n\nЗаметок пока нет."
     assert internal_notes_text([note]) == (
         "📝 <b>Заметки</b>\n\n"
-        "<code>02.07.2026, 14:30 UTC</code> · оператор <code>42</code>\n"
-        "Проверить &lt;оплату&gt;"
+        "<code>02.07.2026, 14:30 UTC</code> · Alice &lt;Operator&gt;\n"
+        "«Проверить &lt;оплату&gt;»"
+    )
+
+
+@pytest.mark.parametrize(
+    ("display_name", "username", "expected_author"),
+    [
+        ("Alice", "alice", "Alice"),
+        (None, "alice", "@alice"),
+        (None, None, "<code>TG:42</code>"),
+    ],
+)
+def test_internal_notes_author_uses_name_username_then_telegram_id(
+    display_name: str | None, username: str | None, expected_author: str
+) -> None:
+    note = InternalNoteView(
+        content="Заметка",
+        operator_telegram_id=42,
+        created_at=datetime(2026, 7, 2, 14, 30, tzinfo=UTC),
+        operator_display_name=display_name,
+        operator_username=username,
+    )
+
+    assert (
+        f"<code>02.07.2026, 14:30 UTC</code> · {expected_author}\n«Заметка»"
+        in internal_notes_text([note])
     )
 
 

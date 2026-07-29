@@ -180,6 +180,8 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
             changed = await self.ticket_service.add_internal_note(
                 ticket_id=ticket.id,
                 operator_telegram_id=message.from_user.id,
+                operator_display_name=message.from_user.full_name or None,
+                operator_username=message.from_user.username,
                 note=note,
                 source_chat_id=message.chat.id,
                 source_message_id=message.message_id,

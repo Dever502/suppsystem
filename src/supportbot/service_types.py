@@ -40,6 +40,8 @@ class InternalNoteView:
     content: str
     operator_telegram_id: int | None
     created_at: datetime
+    operator_display_name: str | None = None
+    operator_username: str | None = None
 
 
 @dataclass(frozen=True)

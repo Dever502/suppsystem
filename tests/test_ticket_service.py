@@ -161,6 +161,8 @@ async def test_internal_note_is_saved_without_delivery(
     first = await ticket_service.add_internal_note(
         ticket_id=ticket.id,
         operator_telegram_id=42,
+        operator_display_name="Alice Operator",
+        operator_username="alice",
         note="Call back after 12:00",
         source_chat_id=-100123,
         source_message_id=77,
@@ -169,6 +171,8 @@ async def test_internal_note_is_saved_without_delivery(
     duplicate = await ticket_service.add_internal_note(
         ticket_id=ticket.id,
         operator_telegram_id=42,
+        operator_display_name="Alice Operator",
+        operator_username="alice",
         note="Call back after 12:00",
         source_chat_id=-100123,
         source_message_id=77,
@@ -183,6 +187,8 @@ async def test_internal_note_is_saved_without_delivery(
     assert len(notes) == 1
     assert notes[0].content == "Call back after 12:00"
     assert notes[0].operator_telegram_id == 42
+    assert notes[0].operator_display_name == "Alice Operator"
+    assert notes[0].operator_username == "alice"
 
 
 async def test_delivery_enqueue_is_idempotent(ticket_service: TicketService) -> None:

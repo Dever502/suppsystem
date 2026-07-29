@@ -117,6 +117,8 @@ class TicketMessageService(TicketServiceBase):
         *,
         ticket_id: str,
         operator_telegram_id: int,
+        operator_display_name: str | None,
+        operator_username: str | None,
         note: str,
         source_chat_id: int,
         source_message_id: int,
@@ -135,7 +137,11 @@ class TicketMessageService(TicketServiceBase):
                     direction=Direction.OPERATOR_TO_USER,
                     channel="internal_note",
                     content=note,
-                    media={"operator_telegram_id": operator_telegram_id},
+                    media={
+                        "operator_telegram_id": operator_telegram_id,
+                        "operator_display_name": operator_display_name,
+                        "operator_username": operator_username,
+                    },
                     source_chat_id=source_chat_id,
                     source_message_id=source_message_id,
                 )
@@ -175,17 +181,26 @@ class TicketMessageService(TicketServiceBase):
             messages = list((await session.scalars(statement)).all())
         notes: list[InternalNoteView] = []
         for message in messages:
-            raw_operator_id = (message.media or {}).get("operator_telegram_id")
+            media = message.media or {}
+            raw_operator_id = media.get("operator_telegram_id")
             operator_id = (
                 raw_operator_id
                 if isinstance(raw_operator_id, int) and not isinstance(raw_operator_id, bool)
                 else None
             )
+            raw_display_name = media.get("operator_display_name")
+            display_name = (
+                raw_display_name if isinstance(raw_display_name, str) and raw_display_name else None
+            )
+            raw_username = media.get("operator_username")
+            username = raw_username if isinstance(raw_username, str) and raw_username else None
             notes.append(
                 InternalNoteView(
                     content=message.content or "",
                     operator_telegram_id=operator_id,
                     created_at=message.created_at,
+                    operator_display_name=display_name,
+                    operator_username=username,
                 )
             )
         return notes

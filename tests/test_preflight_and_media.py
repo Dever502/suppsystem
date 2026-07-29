@@ -700,6 +700,55 @@ async def test_private_message_is_persisted_before_topic_provisioning() -> None:
     assert message.answers == [SUPPORT_PENDING_TEXT]
 
 
+@pytest.mark.parametrize(
+    ("actor_id", "topic_name_value", "expected_deleted"),
+    [
+        (42, "🟢 Nest", True),
+        (42, "🔴 Nest", True),
+        (7, "🟢 Название оператора", False),
+        (42, "Название без маркера", False),
+    ],
+)
+async def test_only_bot_status_topic_rename_messages_are_deleted(
+    actor_id: int, topic_name_value: str, expected_deleted: bool
+) -> None:
+    class FakeDeleteBot:
+        id = 42
+
+        def __init__(self) -> None:
+            self.delete_calls: list[dict[str, int]] = []
+
+        async def delete_message(self, **kwargs: int) -> None:
+            self.delete_calls.append(kwargs)
+
+    class FakeLimiter:
+        def __init__(self) -> None:
+            self.wait_calls = 0
+
+        async def wait(self) -> None:
+            self.wait_calls += 1
+
+    message = SimpleNamespace(
+        forum_topic_edited=SimpleNamespace(name=topic_name_value),
+        from_user=SimpleNamespace(id=actor_id, is_bot=actor_id == 42),
+        chat=SimpleNamespace(id=-100123),
+        message_id=51,
+        message_thread_id=777,
+    )
+    bot = FakeDeleteBot()
+    limiter = FakeLimiter()
+    adapter = object.__new__(TelegramSupportAdapter)
+    adapter.bot = bot  # type: ignore[assignment]
+    adapter.limiter = limiter  # type: ignore[assignment]
+
+    await adapter.handle_group_message(message)  # type: ignore[arg-type]
+
+    assert bool(bot.delete_calls) is expected_deleted
+    assert limiter.wait_calls == int(expected_deleted)
+    if expected_deleted:
+        assert bot.delete_calls == [{"chat_id": -100123, "message_id": 51}]
+
+
 async def test_readonly_operator_can_list_internal_notes() -> None:
     note = InternalNoteView(
         content="Проверить оплату",

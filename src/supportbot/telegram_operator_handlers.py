@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from html import escape
 
+from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Message
 
 from supportbot.authorization import AuthorizationService
@@ -38,7 +39,51 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
     authorization: AuthorizationService
     panel_commands: TelegramPanelCommandHandler
 
+    async def _handle_topic_rename_service_message(self, message: Message) -> bool:
+        topic_edit = getattr(message, "forum_topic_edited", None)
+        if topic_edit is None:
+            return False
+        actor = message.from_user
+        new_name = topic_edit.name
+        if (
+            actor is None
+            or actor.id != self.bot.id
+            or new_name is None
+            or not new_name.startswith(("🔴 ", "🟢 "))
+        ):
+            return True
+        try:
+            await self.limiter.wait()
+            await self.bot.delete_message(
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+            )
+        except TelegramAPIError:
+            logger.warning(
+                "Unable to remove bot topic rename service message",
+                exc_info=True,
+                extra={
+                    "event": "topic_rename_service_message_delete_failed",
+                    "chat_id": message.chat.id,
+                    "message_id": message.message_id,
+                    "topic_id": message.message_thread_id,
+                },
+            )
+        else:
+            logger.info(
+                "Removed bot topic rename service message",
+                extra={
+                    "event": "topic_rename_service_message_deleted",
+                    "chat_id": message.chat.id,
+                    "message_id": message.message_id,
+                    "topic_id": message.message_thread_id,
+                },
+            )
+        return True
+
     async def handle_group_message(self, message: Message) -> None:
+        if await self._handle_topic_rename_service_message(message):
+            return
         if message.from_user is None or message.from_user.is_bot:
             return
         if message.message_thread_id is None:

@@ -179,6 +179,10 @@ async def test_internal_note_is_saved_without_delivery(
     assert first is True
     assert duplicate is False
     assert jobs == []
+    notes = await ticket_service.list_internal_notes(ticket.id)
+    assert len(notes) == 1
+    assert notes[0].content == "Call back after 12:00"
+    assert notes[0].operator_telegram_id == 42
 
 
 async def test_delivery_enqueue_is_idempotent(ticket_service: TicketService) -> None:

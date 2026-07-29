@@ -12,7 +12,7 @@ from supportbot.authorization import AuthorizationService
 from supportbot.config import Settings
 from supportbot.models import TicketStatus
 from supportbot.panel import PanelActionResult
-from supportbot.service_types import TopicProvisioningConflictError
+from supportbot.service_types import InternalNoteView, TopicProvisioningConflictError
 from supportbot.telegram_adapter import (
     GIFT_DAYS_ERROR_TEXT,
     SUPPORT_PENDING_TEXT,
@@ -22,7 +22,12 @@ from supportbot.telegram_adapter import (
     TicketLockPool,
 )
 from supportbot.telegram_errors import is_missing_topic_error
-from supportbot.telegram_formatting import operator_ticket_info, panel_action_reply, topic_name
+from supportbot.telegram_formatting import (
+    internal_notes_text,
+    operator_ticket_info,
+    panel_action_reply,
+    topic_name,
+)
 from supportbot.telegram_message_utils import (
     media_metadata,
     message_command,
@@ -118,6 +123,21 @@ def test_media_metadata_uses_largest_photo_size() -> None:
     }
 
 
+def test_internal_notes_text_is_readable_and_escapes_content() -> None:
+    note = InternalNoteView(
+        content="Проверить <оплату>",
+        operator_telegram_id=42,
+        created_at=datetime(2026, 7, 2, 14, 30, tzinfo=UTC),
+    )
+
+    assert internal_notes_text([]) == "📝 <b>Заметки</b>\n\nЗаметок пока нет."
+    assert internal_notes_text([note]) == (
+        "📝 <b>Заметки</b>\n\n"
+        "<code>02.07.2026, 14:30 UTC</code> · оператор <code>42</code>\n"
+        "Проверить &lt;оплату&gt;"
+    )
+
+
 def test_topic_name_uses_operator_friendly_identity_without_ticket_id() -> None:
     ticket = SimpleNamespace(
         id="4244b623-d894-463c-9753-6fd42160ac48",
@@ -126,7 +146,7 @@ def test_topic_name_uses_operator_friendly_identity_without_ticket_id() -> None:
         telegram_user_id=123456789,
     )
 
-    assert topic_name(ticket, closed=False) == "🔴 Ivan Petrov · tg:6789"  # type: ignore[arg-type]
+    assert topic_name(ticket, closed=False) == "🔴 Ivan Petrov"  # type: ignore[arg-type]
     assert "4244b623" not in topic_name(ticket, closed=False)  # type: ignore[arg-type]
 
 
@@ -144,8 +164,8 @@ def test_topic_name_falls_back_to_username_or_telegram_id() -> None:
         telegram_user_id=123456789,
     )
 
-    assert topic_name(username_ticket, closed=True) == "🟢 @ivan · tg:6789"  # type: ignore[arg-type]
-    assert topic_name(id_ticket, closed=False) == "🔴 tg:123456789"  # type: ignore[arg-type]
+    assert topic_name(username_ticket, closed=True) == "🟢 @ivan"  # type: ignore[arg-type]
+    assert topic_name(id_ticket, closed=False) == "🔴 TG:123456789"  # type: ignore[arg-type]
 
 
 def test_operator_ticket_info_is_readable() -> None:
@@ -225,7 +245,7 @@ async def test_ticket_lock_pool_releases_unused_entries() -> None:
     assert len(pool) == 0
 
 
-async def test_customer_card_keeps_ticket_id_for_recovery_commands() -> None:
+async def test_customer_card_hides_internal_ticket_id() -> None:
     ticket = SimpleNamespace(
         id="4244b623-d894-463c-9753-6fd42160ac48",
         display_name="Ivan <Petrov>",
@@ -238,7 +258,7 @@ async def test_customer_card_keeps_ticket_id_for_recovery_commands() -> None:
 
     card = await adapter._customer_card(ticket)  # type: ignore[arg-type]
 
-    assert "Тикет: <code>4244b623-d894-463c-9753-6fd42160ac48</code>" in card
+    assert "4244b623-d894-463c-9753-6fd42160ac48" not in card
     assert "Telegram ID: <code>123456789</code>" in card
     assert "<b>Ivan &lt;Petrov&gt; · @ivan</b>" in card
 
@@ -286,8 +306,7 @@ async def test_send_customer_card_posts_to_support_topic() -> None:
             "text": (
                 "👤 <b>Клиент</b>\n\n"
                 "<b>Ivan Petrov · @ivan</b>\n"
-                "Telegram ID: <code>123456789</code>\n"
-                "Тикет: <code>4244b623-d894-463c-9753-6fd42160ac48</code>\n\n"
+                "Telegram ID: <code>123456789</code>\n\n"
                 "💳 <b>Подписка Remnawave</b>\n\n"
                 "Интеграция не подключена."
             ),
@@ -481,6 +500,7 @@ def test_topic_command_allowlist_contains_close_variants() -> None:
     assert "/resetdevices" in TOPIC_COMMANDS
     assert "/resolvepanel" in TOPIC_COMMANDS
     assert "/note" in TOPIC_COMMANDS
+    assert "/notes" in TOPIC_COMMANDS
     assert "/tsop" not in TOPIC_COMMANDS
 
 
@@ -596,6 +616,51 @@ async def test_private_message_is_persisted_before_topic_provisioning() -> None:
 
     assert calls == ["persist", "provision"]
     assert message.answers == [SUPPORT_PENDING_TEXT]
+
+
+async def test_readonly_operator_can_list_internal_notes() -> None:
+    note = InternalNoteView(
+        content="Проверить оплату",
+        operator_telegram_id=42,
+        created_at=datetime(2026, 7, 2, 14, 30, tzinfo=UTC),
+    )
+
+    class FakeTicketService:
+        async def get_by_topic(self, topic_id: int) -> SimpleNamespace:
+            assert topic_id == 777
+            return SimpleNamespace(id="ticket-1")
+
+        async def list_internal_notes(self, ticket_id: str) -> list[InternalNoteView]:
+            assert ticket_id == "ticket-1"
+            return [note]
+
+    class ReadonlyMessage:
+        def __init__(self) -> None:
+            self.from_user = SimpleNamespace(id=3, is_bot=False)
+            self.message_thread_id = 777
+            self.chat = SimpleNamespace(id=-100123)
+            self.message_id = 49
+            self.text = "/notes"
+            self.caption = None
+            self.replies: list[str] = []
+
+        async def reply(self, text: str) -> None:
+            self.replies.append(text)
+
+    adapter = object.__new__(TelegramSupportAdapter)
+    adapter.authorization = AuthorizationService(
+        Settings(
+            support_bot_token=SecretStr("test-token"),
+            support_group_id=-100123,
+            readonly_operator_telegram_ids={3},
+        )
+    )
+    adapter.ticket_service = FakeTicketService()  # type: ignore[assignment]
+    message = ReadonlyMessage()
+
+    await adapter.handle_group_message(message)  # type: ignore[arg-type]
+
+    assert message.replies == [internal_notes_text([note])]
 
 
 async def test_readonly_operator_message_is_rejected_before_ticket_service() -> None:

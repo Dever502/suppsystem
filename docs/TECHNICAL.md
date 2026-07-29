@@ -129,7 +129,7 @@ SQLite использует foreign keys, WAL и `busy_timeout=5000` на каж
 | --- | --- |
 | `full_admin` | полный доступ ко всем операторским командам |
 | `operator` | полный доступ ко всем операторским командам в текущей версии |
-| `operator_ro` | только `/info` и `/subinfo` |
+| `operator_ro` | только `/info`, `/subinfo` и `/notes` |
 
 Сейчас `full_admin` и `operator` имеют одинаковый full access; разделение ролей сохранено для
 будущего ограничения полномочий.

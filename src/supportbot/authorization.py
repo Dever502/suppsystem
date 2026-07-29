@@ -45,4 +45,4 @@ class AuthorizationService:
         role = self.role_for(telegram_user_id)
         if role in {OperatorRole.FULL_ADMIN, OperatorRole.OPERATOR}:
             return True
-        return role is OperatorRole.OPERATOR_RO and command in {"/info", "/subinfo"}
+        return role is OperatorRole.OPERATOR_RO and command in {"/info", "/subinfo", "/notes"}

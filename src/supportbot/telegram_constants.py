@@ -27,6 +27,7 @@ TOPIC_COMMANDS = {
     "/resetdevices",
     "/resolvepanel",
     "/note",
+    "/notes",
     "/stopall",
     "/synctopics",
     "/block",

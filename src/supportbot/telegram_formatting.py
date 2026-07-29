@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from html import escape
 
@@ -10,7 +11,9 @@ from supportbot.panel import (
     PanelLookupStatus,
     PanelSubscriptionLookup,
 )
-from supportbot.service_types import TicketView
+from supportbot.service_types import InternalNoteView, TicketView
+
+INTERNAL_NOTE_PREVIEW_LENGTH = 300
 
 COMMAND_ALREADY_HANDLED_TEXT = "ℹ️ Команда уже обработана."
 
@@ -108,20 +111,36 @@ def operator_ticket_info(ticket: TicketView) -> str:
     )
 
 
+def internal_notes_text(notes: Sequence[InternalNoteView]) -> str:
+    if not notes:
+        return "📝 <b>Заметки</b>\n\nЗаметок пока нет."
+    blocks: list[str] = []
+    for note in notes:
+        content = note.content.strip()
+        if len(content) > INTERNAL_NOTE_PREVIEW_LENGTH:
+            content = content[: INTERNAL_NOTE_PREVIEW_LENGTH - 1].rstrip() + "…"
+        author = (
+            f" · оператор <code>{note.operator_telegram_id}</code>"
+            if note.operator_telegram_id is not None
+            else ""
+        )
+        blocks.append(
+            f"<code>{date_text(note.created_at)}</code>{author}\n{escape(content) or '—'}"
+        )
+    return "📝 <b>Заметки</b>\n\n" + "\n\n".join(blocks)
+
+
 def topic_identity(ticket: TicketView) -> str:
     if ticket.display_name:
         return ticket.display_name
     if ticket.username:
         return f"@{ticket.username}"
-    return f"tg:{ticket.telegram_user_id}"
+    return f"TG:{ticket.telegram_user_id}"
 
 
 def topic_name(ticket: TicketView, *, closed: bool) -> str:
     marker = "🟢" if closed else "🔴"
-    identity = topic_identity(ticket)
-    if ticket.display_name or ticket.username:
-        identity = f"{identity} · tg:{str(ticket.telegram_user_id)[-4:]}"
-    return f"{marker} {identity}"[:128]
+    return f"{marker} {topic_identity(ticket)}"[:128]
 
 
 def subscription_status(status: str) -> str:

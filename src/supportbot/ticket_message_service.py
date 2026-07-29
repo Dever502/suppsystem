@@ -27,7 +27,7 @@ from supportbot.models import (
     TicketStatus,
     utcnow,
 )
-from supportbot.service_types import TicketNotFoundError, TicketView
+from supportbot.service_types import InternalNoteView, TicketNotFoundError, TicketView
 from supportbot.ticket_service_base import TicketServiceBase
 from supportbot.trace import get_trace_id
 
@@ -158,6 +158,37 @@ class TicketMessageService(TicketServiceBase):
                     return False
                 raise
             return True
+
+    async def list_internal_notes(
+        self, ticket_id: str, *, limit: int = 10
+    ) -> list[InternalNoteView]:
+        statement = (
+            select(TicketMessage)
+            .where(
+                TicketMessage.ticket_id == ticket_id,
+                TicketMessage.channel == "internal_note",
+            )
+            .order_by(TicketMessage.created_at.desc())
+            .limit(limit)
+        )
+        async with self.database.session() as session:
+            messages = list((await session.scalars(statement)).all())
+        notes: list[InternalNoteView] = []
+        for message in messages:
+            raw_operator_id = (message.media or {}).get("operator_telegram_id")
+            operator_id = (
+                raw_operator_id
+                if isinstance(raw_operator_id, int) and not isinstance(raw_operator_id, bool)
+                else None
+            )
+            notes.append(
+                InternalNoteView(
+                    content=message.content or "",
+                    operator_telegram_id=operator_id,
+                    created_at=message.created_at,
+                )
+            )
+        return notes
 
     @retry_sqlite_locks
     async def enqueue_copy(

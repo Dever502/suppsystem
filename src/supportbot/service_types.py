@@ -36,6 +36,13 @@ class TicketView:
 
 
 @dataclass(frozen=True)
+class InternalNoteView:
+    content: str
+    operator_telegram_id: int | None
+    created_at: datetime
+
+
+@dataclass(frozen=True)
 class DeliveryJob:
     id: str
     ticket_id: str

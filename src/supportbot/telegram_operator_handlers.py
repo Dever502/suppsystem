@@ -17,7 +17,7 @@ from supportbot.telegram_constants import (
     TICKET_CLOSED_TEXT,
     TOPIC_COMMANDS,
 )
-from supportbot.telegram_formatting import operator_ticket_info
+from supportbot.telegram_formatting import internal_notes_text, operator_ticket_info
 from supportbot.telegram_message_utils import (
     command_argument,
     media_metadata,
@@ -130,6 +130,10 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
             return
         if command == "/subinfo":
             await message.reply(await self._subscription_block(ticket))
+            return
+        if command == "/notes":
+            notes = await self.ticket_service.list_internal_notes(ticket.id)
+            await message.reply(internal_notes_text(notes))
             return
         if command == "/resolvepanel":
             if not self.authorization.is_full_admin(message.from_user.id):

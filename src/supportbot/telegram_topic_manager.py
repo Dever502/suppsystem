@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from html import escape
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
@@ -368,8 +367,7 @@ class TelegramTopicManager:
         return (
             "👤 <b>Клиент</b>\n\n"
             f"<b>{customer_identity(ticket)}</b>\n"
-            f"Telegram ID: <code>{ticket.telegram_user_id}</code>\n"
-            f"Тикет: <code>{escape(ticket.id)}</code>\n\n"
+            f"Telegram ID: <code>{ticket.telegram_user_id}</code>\n\n"
             f"{await self._subscription_block(ticket)}"
         )
 

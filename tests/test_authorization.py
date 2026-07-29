@@ -40,6 +40,7 @@ def test_roles_have_expected_permissions() -> None:
     assert authorization.can_reply(3) is False
     assert authorization.can_execute_topic_action(3, "/info") is True
     assert authorization.can_execute_topic_action(3, "/subinfo") is True
+    assert authorization.can_execute_topic_action(3, "/notes") is True
     assert authorization.can_execute_topic_action(3, "/gift") is False
     assert authorization.can_execute_topic_action(3, "") is False
 

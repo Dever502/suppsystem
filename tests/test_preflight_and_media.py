@@ -472,7 +472,7 @@ async def test_bindtopic_replaces_uncertain_claim_and_attaches_with_fresh_token(
     )
 
     class FakeAuthorization:
-        def has_full_access(self, telegram_user_id: int) -> bool:
+        def is_admin(self, telegram_user_id: int) -> bool:
             return telegram_user_id == 7
 
     class FakeTicketService:
@@ -559,7 +559,7 @@ def test_panel_action_reply_formats_mutation_results() -> None:
                 devices_removed=2,
             )
         )
-        == "✅ <b>Устройства сброшены</b>\nУдалено устройств: <b>2</b>."
+        == "✅ <b>Устройства сброшены</b>"
     )
     assert (
         panel_action_reply(
@@ -587,6 +587,8 @@ def test_topic_command_allowlist_contains_close_variants() -> None:
     assert "/resolvepanel" in TOPIC_COMMANDS
     assert "/note" in TOPIC_COMMANDS
     assert "/notes" in TOPIC_COMMANDS
+    assert "/closeall" in TOPIC_COMMANDS
+    assert "/stopall" not in TOPIC_COMMANDS
     assert "/tsop" not in TOPIC_COMMANDS
 
 
@@ -753,7 +755,7 @@ async def test_operator_reply_reopen_sends_operator_notice_and_customer_card() -
         Settings(
             support_bot_token=SecretStr("test-token"),
             support_group_id=-100123,
-            operator_telegram_ids={2},
+            admin_telegram_ids={2},
         )
     )
     adapter.ticket_service = FakeTicketService()  # type: ignore[assignment]
@@ -805,7 +807,7 @@ async def test_stop_builds_rating_keyboard_from_committed_close_cycle() -> None:
         Settings(
             support_bot_token=SecretStr("test-token"),
             support_group_id=-100123,
-            operator_telegram_ids={2},
+            admin_telegram_ids={2},
         )
     )
     adapter.ticket_service = FakeTicketService()  # type: ignore[assignment]
@@ -917,89 +919,7 @@ async def test_only_bot_status_topic_rename_messages_are_deleted(
         assert bot.delete_calls == [{"chat_id": -100123, "message_id": 51}]
 
 
-async def test_readonly_operator_can_list_internal_notes() -> None:
-    note = InternalNoteView(
-        content="Проверить оплату",
-        operator_telegram_id=42,
-        created_at=datetime(2026, 7, 2, 14, 30, tzinfo=UTC),
-    )
-
-    class FakeTicketService:
-        async def get_by_topic(self, topic_id: int) -> SimpleNamespace:
-            assert topic_id == 777
-            return SimpleNamespace(id="ticket-1")
-
-        async def list_internal_notes(self, ticket_id: str) -> list[InternalNoteView]:
-            assert ticket_id == "ticket-1"
-            return [note]
-
-    class ReadonlyMessage:
-        def __init__(self) -> None:
-            self.from_user = SimpleNamespace(id=3, is_bot=False)
-            self.message_thread_id = 777
-            self.chat = SimpleNamespace(id=-100123)
-            self.message_id = 49
-            self.text = "/notes"
-            self.caption = None
-            self.replies: list[str] = []
-
-        async def reply(self, text: str) -> None:
-            self.replies.append(text)
-
-    adapter = object.__new__(TelegramSupportAdapter)
-    adapter.authorization = AuthorizationService(
-        Settings(
-            support_bot_token=SecretStr("test-token"),
-            support_group_id=-100123,
-            readonly_operator_telegram_ids={3},
-        )
-    )
-    adapter.ticket_service = FakeTicketService()  # type: ignore[assignment]
-    message = ReadonlyMessage()
-
-    await adapter.handle_group_message(message)  # type: ignore[arg-type]
-
-    assert message.replies == [internal_notes_text([note])]
-
-
-async def test_readonly_operator_message_is_rejected_before_ticket_service() -> None:
-    class ReadonlyMessage:
-        def __init__(self) -> None:
-            self.from_user = SimpleNamespace(id=3, is_bot=False)
-            self.message_thread_id = 777
-            self.chat = SimpleNamespace(id=-100123)
-            self.message_id = 50
-            self.text = "Ответ клиенту"
-            self.caption = None
-            self.replies: list[str] = []
-
-        async def reply(self, text: str) -> None:
-            self.replies.append(text)
-
-    class TicketServiceMustNotBeCalled:
-        async def get_by_topic(self, topic_id: int) -> None:
-            raise AssertionError("read-only message reached ticket service")
-
-    adapter = object.__new__(TelegramSupportAdapter)
-    adapter.authorization = AuthorizationService(
-        Settings(
-            support_bot_token=SecretStr("test-token"),
-            support_group_id=-100123,
-            readonly_operator_telegram_ids={3},
-        )
-    )
-    adapter.ticket_service = TicketServiceMustNotBeCalled()  # type: ignore[assignment]
-    message = ReadonlyMessage()
-
-    await adapter.handle_group_message(message)  # type: ignore[arg-type]
-
-    assert message.replies == ["⛔ Роль только для чтения. Действие не выполнено."]
-
-
-@pytest.mark.parametrize(("telegram_id", "allowed"), [(1, True), (2, False)])
-async def test_only_full_admin_can_resolve_inconclusive_panel_action(
-    telegram_id: int, allowed: bool
-) -> None:
+async def test_admin_can_resolve_inconclusive_panel_action() -> None:
     calls: list[dict[str, object]] = []
 
     class FakeTicketService:
@@ -1014,7 +934,7 @@ async def test_only_full_admin_can_resolve_inconclusive_panel_action(
 
     class FakeMessage:
         def __init__(self) -> None:
-            self.from_user = SimpleNamespace(id=telegram_id, is_bot=False)
+            self.from_user = SimpleNamespace(id=1, is_bot=False)
             self.message_thread_id = 777
             self.chat = SimpleNamespace(id=-100123)
             self.message_id = 51
@@ -1030,8 +950,7 @@ async def test_only_full_admin_can_resolve_inconclusive_panel_action(
         Settings(
             support_bot_token=SecretStr("test-token"),
             support_group_id=-100123,
-            full_admin_telegram_ids={1},
-            operator_telegram_ids={2},
+            admin_telegram_ids={1},
         )
     )
     adapter.ticket_service = FakeTicketService()  # type: ignore[assignment]
@@ -1040,19 +959,16 @@ async def test_only_full_admin_can_resolve_inconclusive_panel_action(
 
     await adapter.handle_group_message(message)  # type: ignore[arg-type]
 
-    assert bool(calls) is allowed
-    if allowed:
-        assert calls == [
-            {
-                "ticket_id": "ticket-1",
-                "operator_action_id": "action-uuid",
-                "operator_telegram_id": 1,
-                "resolution": "applied",
-                "idempotency_key": "telegram:-100123:51:/resolvepanel",
-            }
-        ]
-    else:
-        assert message.replies == ["⛔ Только full admin может разрешить неизвестный результат."]
+    assert calls == [
+        {
+            "ticket_id": "ticket-1",
+            "operator_action_id": "action-uuid",
+            "operator_telegram_id": 1,
+            "resolution": "applied",
+            "idempotency_key": "telegram:-100123:51:/resolvepanel",
+        }
+    ]
+    assert message.replies == ["✅ Результат Remnawave зафиксирован; новые команды разблокированы."]
 
 
 def test_migration_url_conversion_supports_async_postgres() -> None:

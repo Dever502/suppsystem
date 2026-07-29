@@ -25,6 +25,10 @@ from supportbot.models import (
     utcnow,
 )
 from supportbot.panel import PanelService
+from supportbot.panel_notifications import (
+    gift_notification_text,
+    revoke_link_notification_text,
+)
 from supportbot.reconciliation import ReconciliationWorker
 from supportbot.remnawave import (
     RemnawaveAmbiguousIdentityError,
@@ -353,6 +357,42 @@ def test_expiration_text_is_compact(expire_at: datetime, expected: str) -> None:
     assert expiration_text(expire_at, now=now) == expected
 
 
+@pytest.mark.parametrize(
+    ("extend_days", "expected_duration"),
+    [
+        (1, "Вам добавлен <b>1 день</b> подписки."),
+        (2, "Вам добавлено <b>2 дня</b> подписки."),
+        (5, "Вам добавлено <b>5 дней</b> подписки."),
+        (11, "Вам добавлено <b>11 дней</b> подписки."),
+        (21, "Вам добавлен <b>21 день</b> подписки."),
+    ],
+)
+def test_gift_notification_formats_days_and_expiration(
+    extend_days: int, expected_duration: str
+) -> None:
+    text = gift_notification_text(
+        extend_days,
+        datetime(2026, 8, 5, 12, 0, tzinfo=UTC),
+    )
+
+    assert text == (
+        "🎁 <b>Подписка продлена</b>\n\n"
+        f"{expected_duration}\n\n"
+        "Новая дата окончания: <b>5 августа 2026</b>"
+    )
+
+
+def test_revoke_link_notification_escapes_subscription_url() -> None:
+    text = revoke_link_notification_text("https://sub.example/new?x=1&next=<unsafe>")
+
+    assert text == (
+        "🔐 <b>Ссылка подписки обновлена</b>\n\n"
+        "Старая ссылка больше не работает.\n\n"
+        "Новая ссылка:\n"
+        "<code>https://sub.example/new?x=1&amp;next=&lt;unsafe&gt;</code>"
+    )
+
+
 @pytest.fixture
 async def database(tmp_path: Path) -> Database:
     db = Database(f"sqlite+aiosqlite:///{tmp_path}/support.db")
@@ -394,18 +434,37 @@ async def test_panel_extend_subscription_audits_and_is_idempotent(database: Data
         action = await session.scalar(
             select(OperatorAction).where(OperatorAction.idempotency_key == "telegram:-100:1:/gift")
         )
+        assert action is not None
+        notification = await session.scalar(
+            select(DeliveryOutbox).where(
+                DeliveryOutbox.idempotency_key == f"panel-gift:{action.id}:user-notification"
+            )
+        )
 
     assert first.completed is True
     assert first.affected_rows == 1
+    assert first.subscription is not None
+    assert first.subscription.expire_at == remnawave_user().expire_at + timedelta(days=30)
     assert duplicate.status == "duplicate"
     assert remnawave.telegram_ids == [123456789]
     assert remnawave.extend_calls == [("11111111-1111-1111-1111-111111111111", 30)]
-    assert action is not None
     assert action.action == "remnawave_extend_subscription"
     assert action.result == "completed"
     assert action.payload["extend_days"] == 30
     assert action.payload["remnawave_uuid"] == "11111111-1111-1111-1111-111111111111"
+    assert action.payload["new_expire_at"] == "2026-08-24T12:00:00+00:00"
     assert "subscription_url" not in action.payload
+    assert notification is not None
+    assert notification.payload == {
+        "kind": "send_text",
+        "target_chat_id": 123456789,
+        "text": (
+            "🎁 <b>Подписка продлена</b>\n\n"
+            "Вам добавлено <b>30 дней</b> подписки.\n\n"
+            "Новая дата окончания: <b>24 августа 2026</b>"
+        ),
+        "parse_mode": "HTML",
+    }
 
 
 @pytest.mark.asyncio
@@ -625,8 +684,33 @@ async def test_gift_reconcile_worker_handles_eventual_consistency(database: Data
     )
     action, job = await load_action_and_job(database, "telegram:-100:70:/gift")
     assert result.status == "unknown"
+    async with database.session() as session:
+        notification = await session.scalar(
+            select(DeliveryOutbox).where(
+                DeliveryOutbox.idempotency_key == f"panel-gift:{action.id}:user-notification"
+            )
+        )
+    assert notification is None
     assert await service.reconcile_durable_action(action.id, job.payload) is False
     assert await service.reconcile_durable_action(action.id, job.payload) is True
+    assert await service.reconcile_durable_action(action.id, job.payload) is True
+    async with database.session() as session:
+        notifications = list(
+            (
+                await session.scalars(
+                    select(DeliveryOutbox).where(
+                        DeliveryOutbox.idempotency_key
+                        == f"panel-gift:{action.id}:user-notification"
+                    )
+                )
+            ).all()
+        )
+    assert len(notifications) == 1
+    assert notifications[0].payload["text"] == (
+        "🎁 <b>Подписка продлена</b>\n\n"
+        "Вам добавлено <b>30 дней</b> подписки.\n\n"
+        "Новая дата окончания: <b>24 августа 2026</b>"
+    )
 
 
 @pytest.mark.asyncio
@@ -1299,6 +1383,76 @@ async def test_revoke_intent_exists_before_external_mutation(database: Database)
         )
     assert intent is not None
     assert intent.payload["subscription_url"] == "https://sub.example/reissued"
+
+
+@pytest.mark.parametrize(
+    ("telegram_enabled", "expected_delivery"),
+    [(True, True), (False, False)],
+)
+@pytest.mark.asyncio
+async def test_revoke_link_telegram_delivery_mode(
+    database: Database,
+    telegram_enabled: bool,
+    expected_delivery: bool,
+) -> None:
+    class ReissuedRemnawave(FakeRemnawave):
+        async def revoke_user_subscription(
+            self, *, user_uuid: str, revoke_only_passwords: bool
+        ) -> RemnawaveUser:
+            self.revoke_calls.append((user_uuid, revoke_only_passwords))
+            assert isinstance(self.result, RemnawaveUser)
+            return replace(
+                self.result,
+                subscription_url="https://sub.example/mode-test",
+            )
+
+    key = f"telegram:-100:{int(telegram_enabled)}:/revokelink-mode"
+    remnawave = ReissuedRemnawave(remnawave_user())
+    service = PanelService(
+        remnawave,
+        database=database,
+        revoke_link_telegram_notification=telegram_enabled,
+    )
+
+    result = await service.revoke_subscription_link_for_ticket(
+        ticket=ticket_view(),
+        operator_telegram_id=42,
+        idempotency_key=key,
+    )
+
+    async with database.session() as session:
+        action = await session.scalar(
+            select(OperatorAction).where(OperatorAction.idempotency_key == key)
+        )
+        assert action is not None
+        intent = await session.scalar(
+            select(NotificationOutbox).where(NotificationOutbox.operator_action_id == action.id)
+        )
+        delivery = await session.scalar(
+            select(DeliveryOutbox).where(
+                DeliveryOutbox.idempotency_key
+                == f"panel-revoke-link:{action.id}:telegram-notification"
+            )
+        )
+
+    assert result.completed is True
+    assert action is not None
+    assert intent is not None
+    assert intent.status == NotificationStatus.PENDING
+    assert intent.payload["subscription_url"] == "https://sub.example/mode-test"
+    assert (delivery is not None) is expected_delivery
+    if delivery is not None:
+        assert delivery.payload == {
+            "kind": "send_text",
+            "target_chat_id": 123456789,
+            "text": (
+                "🔐 <b>Ссылка подписки обновлена</b>\n\n"
+                "Старая ссылка больше не работает.\n\n"
+                "Новая ссылка:\n"
+                "<code>https://sub.example/mode-test</code>"
+            ),
+            "parse_mode": "HTML",
+        }
 
 
 @pytest.mark.asyncio

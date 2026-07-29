@@ -8,7 +8,7 @@
 - Linux-сервер с Docker Engine и Docker Compose v2;
 - Telegram-бот;
 - закрытая Telegram supergroup с включёнными Topics;
-- Telegram ID операторов;
+- Telegram ID администраторов;
 - HTTPS reverse proxy, если operator API доступен извне.
 
 Для разработки нужны Python 3.12+ и `uv`.
@@ -18,7 +18,7 @@
 1. Создайте бота через `@BotFather`.
 2. Создайте приватную supergroup и включите Topics.
 3. Добавьте бота администратором с правом управления темами.
-4. Определите числовой ID группы и Telegram ID операторов.
+4. Определите числовой ID группы и Telegram ID администраторов.
 
 `SUPPORT_GROUP_ID` у supergroup обычно начинается с `-100`. При старте приложение проверяет
 тип группы, режим форума и права бота. Ошибка preflight останавливает запуск.
@@ -34,7 +34,7 @@ cp .env.example .env
 ```dotenv
 SUPPORT_BOT_TOKEN=replace-with-bot-token
 SUPPORT_GROUP_ID=replace-with-forum-group-id
-FULL_ADMIN_TELEGRAM_IDS=replace-with-admin-id
+ADMIN_TELEGRAM_IDS=replace-with-admin-id
 DATA_DIR=./data
 ```
 
@@ -79,17 +79,12 @@ POSTGRES_RUNTIME_PASSWORD=третий-url-safe-случайный-пароль
 | --- | --- | --- |
 | `SUPPORT_BOT_TOKEN` | обязательна | токен Telegram-бота |
 | `SUPPORT_GROUP_ID` | обязательна | ID закрытой Forum-группы |
-| `FULL_ADMIN_TELEGRAM_IDS` | пусто | ID администраторов через запятую |
-| `OPERATOR_TELEGRAM_IDS` | пусто | ID операторов через запятую |
-| `READONLY_OPERATOR_TELEGRAM_IDS` | пусто | ID операторов только для чтения |
-| `ADMIN_TELEGRAM_IDS` | пусто | устаревший alias full admin |
+| `ADMIN_TELEGRAM_IDS` | пусто | числовые ID администраторов через запятую; доступ ко всем командам |
 | `DATA_DIR` | `./data` | каталог runtime-данных: SQLite и heartbeat-файлы |
 | `DATABASE_URL` | SQLite в `DATA_DIR/support.db` | optional SQLAlchemy async URL override |
 | `MIGRATION_DATABASE_URL` | значение `DATABASE_URL` | отдельный migration target; production Compose задаёт migration role |
 | `MIGRATIONS_AT_STARTUP` | `true` | production PostgreSQL Compose ставит `false` и использует one-shot migration service |
 | `LOG_LEVEL` | `INFO` | уровень логирования |
-
-Один Telegram ID нельзя включать в несколько ролей.
 
 ### Доставка
 
@@ -148,20 +143,24 @@ sessions.
 
 ### Remnawave
 
-Поддерживается контракт Remnawave 2.8.0. Интеграция опциональна и выключена по умолчанию.
+Поддерживается контракт Remnawave 2.8.x. Интеграция опциональна и выключена по умолчанию.
 
 | Переменная | По умолчанию | Назначение |
 | --- | --- | --- |
 | `REMNAWAVE_ENABLED` | `false` | включает интеграцию |
-| `REMNAWAVE_BASE_URL` | пусто | HTTPS URL панели |
+| `REMNAWAVE_BASE_URL` | пусто | HTTPS origin панели без `/api` |
 | `REMNAWAVE_API_TOKEN` | пусто | token, минимум 32 символа |
 | `REMNAWAVE_TIMEOUT_SECONDS` | `5` | HTTP timeout |
 | `REMNAWAVE_RECONCILE_DELAY_SECONDS` | `10` | задержка перед сверкой результата |
+| `REMNAWAVE_REVOKE_LINK_TELEGRAM_NOTIFICATION` | `true` | дополнительно отправлять новую ссылку клиенту в Telegram |
+
+`/revokelink` всегда создаёт webhook-событие. Этот флаг управляет только прямым сообщением
+клиенту; отправка события требует `NOTIFICATION_WEBHOOK_ENABLED=true`.
 
 Включение требует URL и token. Не задавайте reconcile delay равным нулю вне тестов. При
 `unknown outcome` не повторяйте команду: durable worker сверит состояние без повторной мутации.
 Если результат останется неоднозначным, действие сохранится как `inconclusive` и потребует
-явного решения full admin.
+явного решения администратора.
 
 ### Notification webhook
 
@@ -179,27 +178,27 @@ sessions.
 Внешние URL требуют HTTPS; HTTP разрешён только для loopback. URL с credentials или fragments
 запрещены. Получатель проверяет HMAC-SHA256 и дедуплицирует эффект по `event_id`.
 
-## Команды операторов
+## Команды администраторов
 
 Команды выполняются внутри связанной Forum-темы.
 
 | Команда | Доступ | Действие |
 | --- | --- | --- |
-| `/info` | все роли | локальная информация о тикете |
-| `/subinfo` | все роли | свежие данные подписки Remnawave |
-| `/notes` | все роли | последние внутренние заметки |
-| `/note текст` | operator/full admin | внутренняя заметка |
-| `/stop` | operator/full admin | закрыть и уведомить клиента |
-| `/hidestop` | operator/full admin | закрыть без уведомления |
-| `/gift N` | operator/full admin | продлить подписку на 1–9999 дней |
-| `/resetkey` | operator/full admin | заменить protocol credentials |
-| `/revokelink` | operator/full admin | заменить subscription URL и уведомить клиента |
-| `/resetdevices` | operator/full admin | удалить HWID-устройства |
-| `/resolvepanel UUID applied\|not_applied` | full admin | разрешить проверенный `inconclusive` |
-| `/block` | full access | заблокировать клиента |
-| `/unblock` | full access | снять блокировку |
-| `/stopall` | full access | закрыть все открытые тикеты |
-| `/synctopics` | full access | синхронизировать Forum-темы |
+| `/info` | admin | локальная информация о тикете |
+| `/subinfo` | admin | свежие данные подписки Remnawave |
+| `/notes` | admin | последние внутренние заметки |
+| `/note текст` | admin | внутренняя заметка |
+| `/stop` | admin | закрыть и уведомить клиента |
+| `/hidestop` | admin | закрыть без уведомления |
+| `/gift N` | admin | продлить подписку на 1–9999 дней |
+| `/resetkey` | admin | заменить protocol credentials |
+| `/revokelink` | admin | заменить subscription URL и уведомить клиента |
+| `/resetdevices` | admin | удалить HWID-устройства |
+| `/resolvepanel UUID applied\|not_applied` | admin | разрешить проверенный `inconclusive` |
+| `/block` | admin | заблокировать клиента |
+| `/unblock` | admin | снять блокировку |
+| `/closeall` | admin | закрыть все открытые тикеты |
+| `/synctopics` | admin | синхронизировать Forum-темы |
 
 Ответ в теме уходит клиенту и при необходимости открывает тикет снова. Неизвестные команды не
 пересылаются.
@@ -380,12 +379,10 @@ make test-postgres # PostgreSQL migration/concurrency matrix
 
 ### Приложение не запускается
 
-Проверьте логи через `scripts/production-compose.sh`, обязательные переменные, роли, секреты,
+Проверьте логи через `scripts/production-compose.sh`, обязательные переменные, секреты,
 Telegram и базу.
 
-При `Configuration error` исправьте `/opt/supportbot/.env` и перезапустите сервис. Ошибка
-`Telegram operator roles must not overlap` означает, что Telegram ID указан в нескольких ролях;
-оставьте его только в одной.
+При `Configuration error` исправьте `/opt/supportbot/.env` и перезапустите сервис.
 
 ### Не проходит Telegram preflight
 

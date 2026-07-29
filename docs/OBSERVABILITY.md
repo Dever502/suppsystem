@@ -61,8 +61,8 @@ Tune thresholds to traffic. Failed jobs and unknown Remnawave outcomes are usual
 2. Find the related `operator_action_id` and reconciliation job in logs or database audit rows.
 3. Wait for automatic `completed`, `not_applied` or `inconclusive` classification.
 4. Unavailable or malformed reads retry with backoff and become `inconclusive` after 20 failures.
-5. For `inconclusive`, independently prove the fate of the original call. A full admin may then use
-   `/resolvepanel <operator_action_uuid> applied|not_applied`; otherwise leave the action blocked.
+5. For `inconclusive`, independently prove the fate of the original call. An administrator may
+   then use `/resolvepanel <operator_action_uuid> applied|not_applied`; otherwise leave the action blocked.
 6. Resolution never repeats a mutation. Confirmed `revokelink applied` performs one read-only lookup
    so the durable notification contains the current link.
 7. Correlate `panel_action_manually_reconciled` with the actor and action ID in incident notes.

@@ -93,7 +93,7 @@ async def test_router_registers_and_routes_private_and_authorized_group_boundari
     settings = Settings(
         support_bot_token=SecretStr("test-token"),
         support_group_id=-100123,
-        readonly_operator_telegram_ids={3},
+        admin_telegram_ids={2},
     )
     adapter = TelegramSupportAdapter(
         bot=bot,
@@ -136,10 +136,7 @@ async def test_router_registers_and_routes_private_and_authorized_group_boundari
         ),
     )
 
-    assert len(session.requests) == 1
-    assert isinstance(session.requests[0], SendMessage)
-    assert session.requests[0].text == "⛔ Роль только для чтения. Действие не выполнено."
-    session.requests.clear()
+    assert session.requests == []
 
     await dispatcher.feed_update(
         bot,

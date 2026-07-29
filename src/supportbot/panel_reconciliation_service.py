@@ -133,6 +133,7 @@ class PanelReconciliationService(PanelPersistenceService):
             "remnawave_reset_devices",
         )
         revoke_identity_value: str | None = None
+        revoke_telegram_id: int | None = None
         async with database.session() as session:
             if await session.scalar(duplicate_query):
                 return False
@@ -169,9 +170,8 @@ class PanelReconciliationService(PanelPersistenceService):
         if revoke_before_url is not None:
             assert revoke_identity_value is not None
             try:
-                revoke_user = await self.remnawave.get_user_by_telegram_id(
-                    int(revoke_identity_value)
-                )
+                revoke_telegram_id = int(revoke_identity_value)
+                revoke_user = await self.remnawave.get_user_by_telegram_id(revoke_telegram_id)
             except (RemnawaveError, ValueError):
                 return False
             if revoke_user.subscription_url == revoke_before_url:
@@ -222,6 +222,15 @@ class PanelReconciliationService(PanelPersistenceService):
                             await session.rollback()
                             return False
                         self._fill_revoke_notification(intent, revoke_user, recovered=True)
+                        if self.revoke_link_telegram_notification:
+                            assert revoke_telegram_id is not None
+                            self._queue_revoke_link_telegram_notification(
+                                session,
+                                ticket_id=ticket_id,
+                                operator_action_id=operator_action_id,
+                                recipient_telegram_id=revoke_telegram_id,
+                                subscription_url=revoke_user.subscription_url,
+                            )
                     else:
                         intent.status = NotificationStatus.CANCELLED
                 else:
@@ -366,16 +375,34 @@ class PanelReconciliationService(PanelPersistenceService):
         new_subscription_url = result_payload.pop("_new_subscription_url", None)
         if action == "revoke_subscription_link" and isinstance(new_subscription_url, str):
             result_subscription = replace(subscription, subscription_url=new_subscription_url)
+        if action == "extend_subscription" and status == "completed":
+            extend_days = request_payload["extend_days"]
+            assert isinstance(extend_days, int)
+            result_subscription = replace(
+                subscription,
+                expire_at=subscription.expire_at + timedelta(days=extend_days),
+            )
+            result_payload["new_expire_at"] = result_subscription.expire_at.isoformat()
         audit_payload = {
             **safe_remnawave_context(subscription),
             **result_payload,
             **({"requires_reconcile": True} if status == "unknown" else {}),
         }
-        if action == "revoke_subscription_link" and status == "completed":
+        if action == "extend_subscription" and status == "completed":
+            extend_days = request_payload["extend_days"]
+            assert isinstance(extend_days, int)
+            status = await self._complete_gift_with_notification(
+                idempotency_key=idempotency_key,
+                audit_payload=audit_payload,
+                extend_days=extend_days,
+                expire_at=result_subscription.expire_at,
+            )
+        elif action == "revoke_subscription_link" and status == "completed":
             status = await self._complete_revoke_with_notification(
                 idempotency_key=idempotency_key,
                 audit_payload=audit_payload,
                 subscription=result_subscription,
+                recipient_telegram_id=ticket.telegram_user_id,
             )
         else:
             await self._finish_action(idempotency_key, status, audit_payload)
@@ -463,6 +490,8 @@ class PanelReconciliationService(PanelPersistenceService):
             stored_action_name = current_action.action.removeprefix("remnawave_")
 
         outcome: Literal["applied", "not_applied", "inconclusive"]
+        extend_days: int | None = None
+        telegram_id: int | None = None
         user: RemnawaveUser | None = None
         terminal_error: Exception | None = None
         terminal_failure: str | None = None
@@ -550,6 +579,8 @@ class PanelReconciliationService(PanelPersistenceService):
                 reconciliation_failure=terminal_failure,
                 reconciliation_error_type=type(terminal_error).__name__,
             )
+        if action_name == "extend_subscription" and outcome == "applied" and user is not None:
+            reconciled_payload["new_expire_at"] = user.expire_at.isoformat()
         async with database.session() as session:
             updated = await session.execute(
                 update(OperatorAction)
@@ -574,6 +605,7 @@ class PanelReconciliationService(PanelPersistenceService):
             if row is None:
                 await session.rollback()
                 return True
+            revoke_intent_ready = False
             if action_name == "revoke_subscription_link":
                 intent = await session.scalar(
                     select(NotificationOutbox).where(
@@ -584,52 +616,80 @@ class PanelReconciliationService(PanelPersistenceService):
                     if outcome == "applied":
                         assert user is not None
                         self._fill_revoke_notification(intent, user, recovered=True)
+                        revoke_intent_ready = True
                     elif outcome == "not_applied":
                         intent.status = NotificationStatus.CANCELLED
-            if self.support_group_id is not None and row.ticket_id is not None:
-                ticket = await session.get(Ticket, row.ticket_id)
-                if ticket is not None:
-                    if outcome == "applied":
-                        completed_text = {
-                            "extend_subscription": "подписка продлена",
-                            "revoke_subscription_link": "ссылка перевыпущена",
-                            "reset_key": "ключи обновлены",
-                            "reset_devices": "устройства сброшены",
-                        }[action_name]
-                        text = f"✅ Автоматическая сверка Remnawave: {completed_text}."
-                    elif outcome == "not_applied":
-                        text = (
-                            "⚠️ Автоматическая сверка Remnawave: изменение не обнаружено; "
-                            "команду можно повторить."
-                        )
-                    else:
-                        text = (
-                            "⚠️ Автоматическая сверка Remnawave не смогла однозначно "
-                            "определить результат; не повторяйте команду до ручной проверки.\n"
-                            f"Action ID: <code>{operator_action_id}</code>\n"
-                            "После проверки: <code>/resolvepanel &lt;action_uuid&gt; "
-                            "applied|not_applied</code>"
-                        )
-                    session.add(
-                        DeliveryOutbox(
-                            ticket_id=ticket.id,
-                            direction=Direction.USER_TO_OPERATOR,
-                            idempotency_key=(
-                                f"panel-reconcile:{operator_action_id}:operator-notification"
-                            ),
-                            payload={
-                                "kind": "send_text",
-                                "target_chat_id": self.support_group_id,
-                                "target_thread_id": ticket.topic_id,
-                                "text": text,
-                                "parse_mode": "HTML",
-                            },
-                            status=(
-                                DeliveryStatus.PENDING
-                                if ticket.topic_id is not None
-                                else DeliveryStatus.WAITING_TOPIC
-                            ),
-                        )
+            ticket = await session.get(Ticket, row.ticket_id) if row.ticket_id is not None else None
+            if (
+                action_name == "revoke_subscription_link"
+                and outcome == "applied"
+                and ticket is not None
+                and self.revoke_link_telegram_notification
+                and revoke_intent_ready
+            ):
+                assert user is not None
+                assert telegram_id is not None
+                self._queue_revoke_link_telegram_notification(
+                    session,
+                    ticket_id=ticket.id,
+                    operator_action_id=operator_action_id,
+                    recipient_telegram_id=telegram_id,
+                    subscription_url=user.subscription_url,
+                )
+            if action_name == "extend_subscription" and outcome == "applied" and ticket is not None:
+                assert user is not None
+                assert extend_days is not None
+                assert telegram_id is not None
+                self._queue_gift_notification(
+                    session,
+                    ticket_id=ticket.id,
+                    operator_action_id=operator_action_id,
+                    recipient_telegram_id=telegram_id,
+                    extend_days=extend_days,
+                    expire_at=user.expire_at,
+                )
+            if self.support_group_id is not None and ticket is not None:
+                if outcome == "applied":
+                    completed_text = {
+                        "extend_subscription": "подписка продлена",
+                        "revoke_subscription_link": "ссылка перевыпущена",
+                        "reset_key": "ключи обновлены",
+                        "reset_devices": "устройства сброшены",
+                    }[action_name]
+                    text = f"✅ Автоматическая сверка Remnawave: {completed_text}."
+                elif outcome == "not_applied":
+                    text = (
+                        "⚠️ Автоматическая сверка Remnawave: изменение не обнаружено; "
+                        "команду можно повторить."
                     )
+                else:
+                    text = (
+                        "⚠️ Автоматическая сверка Remnawave не смогла однозначно "
+                        "определить результат; не повторяйте команду до ручной проверки.\n"
+                        f"Action ID: <code>{operator_action_id}</code>\n"
+                        "После проверки: <code>/resolvepanel &lt;action_uuid&gt; "
+                        "applied|not_applied</code>"
+                    )
+                session.add(
+                    DeliveryOutbox(
+                        ticket_id=ticket.id,
+                        direction=Direction.USER_TO_OPERATOR,
+                        idempotency_key=(
+                            f"panel-reconcile:{operator_action_id}:operator-notification"
+                        ),
+                        payload={
+                            "kind": "send_text",
+                            "target_chat_id": self.support_group_id,
+                            "target_thread_id": ticket.topic_id,
+                            "text": text,
+                            "parse_mode": "HTML",
+                        },
+                        status=(
+                            DeliveryStatus.PENDING
+                            if ticket.topic_id is not None
+                            else DeliveryStatus.WAITING_TOPIC
+                        ),
+                    )
+                )
             await session.commit()
         return True

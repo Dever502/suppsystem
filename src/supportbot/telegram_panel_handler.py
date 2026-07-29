@@ -67,6 +67,6 @@ class TelegramPanelCommandHandler:
             return
 
         reply = panel_action_reply(result)
-        if command == "/revokelink" and result.completed:
+        if command in {"/gift", "/revokelink"} and result.completed:
             reply += "\n\n✅ Уведомление пользователю поставлено в очередь."
         await message.reply(reply)

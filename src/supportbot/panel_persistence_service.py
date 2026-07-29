@@ -1,14 +1,28 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Any, Literal, cast
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from supportbot.audit import record_event
 from supportbot.database import Database
-from supportbot.models import NotificationOutbox, NotificationStatus, OperatorAction, utcnow
+from supportbot.models import (
+    DeliveryOutbox,
+    Direction,
+    NotificationOutbox,
+    NotificationStatus,
+    OperatorAction,
+    TicketMessage,
+    utcnow,
+)
+from supportbot.panel_notifications import (
+    gift_notification_text,
+    revoke_link_notification_text,
+)
 from supportbot.panel_types import (
     PanelActionStatus,
     PanelSubscriptionInfo,
@@ -31,11 +45,13 @@ class PanelPersistenceService:
         *,
         reconcile_delay_seconds: float = 10.0,
         support_group_id: int | None = None,
+        revoke_link_telegram_notification: bool = True,
     ) -> None:
         self.remnawave = remnawave
         self.database = database
         self.reconcile_delay_seconds = reconcile_delay_seconds
         self.support_group_id = support_group_id
+        self.revoke_link_telegram_notification = revoke_link_telegram_notification
 
     def _operator(self) -> RemnawaveOperator:
         return cast(RemnawaveOperator, self.remnawave)
@@ -155,6 +171,7 @@ class PanelPersistenceService:
         idempotency_key: str,
         audit_payload: dict[str, Any],
         subscription: PanelSubscriptionInfo,
+        recipient_telegram_id: int,
     ) -> PanelActionStatus:
         database = self._require_database()
         async with database.session() as session:
@@ -181,11 +198,151 @@ class PanelPersistenceService:
                 await session.commit()
                 return "unknown"
 
+            if self.revoke_link_telegram_notification and action.ticket_id is None:
+                action.result = "unknown"
+                action.payload = {
+                    **action.payload,
+                    **audit_payload,
+                    "requires_reconcile": True,
+                    "recovery_reason": "revoke_telegram_notification_ticket_missing",
+                }
+                await session.commit()
+                return "unknown"
+
             self._fill_revoke_notification(intent, subscription)
             action.result = "completed"
             action.payload = {**action.payload, **audit_payload}
+            if self.revoke_link_telegram_notification:
+                assert action.ticket_id is not None
+                self._queue_revoke_link_telegram_notification(
+                    session,
+                    ticket_id=action.ticket_id,
+                    operator_action_id=action.id,
+                    recipient_telegram_id=recipient_telegram_id,
+                    subscription_url=subscription.subscription_url,
+                )
             await session.commit()
             return "completed"
+
+    async def _complete_gift_with_notification(
+        self,
+        *,
+        idempotency_key: str,
+        audit_payload: dict[str, Any],
+        extend_days: int,
+        expire_at: datetime,
+    ) -> PanelActionStatus:
+        database = self._require_database()
+        async with database.session() as session:
+            action = await session.scalar(
+                select(OperatorAction)
+                .where(OperatorAction.idempotency_key == idempotency_key)
+                .with_for_update()
+            )
+            if action is None:
+                return "unknown"
+            if action.result == "completed":
+                return "completed"
+            identity_value = action.payload.get("identity_value")
+            if action.ticket_id is None or not isinstance(identity_value, str):
+                action.result = "unknown"
+                action.payload = {
+                    **action.payload,
+                    **audit_payload,
+                    "requires_reconcile": True,
+                    "recovery_reason": "gift_notification_recipient_missing",
+                }
+                await session.commit()
+                return "unknown"
+            try:
+                recipient_telegram_id = int(identity_value)
+            except ValueError:
+                action.result = "unknown"
+                action.payload = {
+                    **action.payload,
+                    **audit_payload,
+                    "requires_reconcile": True,
+                    "recovery_reason": "gift_notification_recipient_invalid",
+                }
+                await session.commit()
+                return "unknown"
+            action.result = "completed"
+            action.payload = {**action.payload, **audit_payload}
+            self._queue_gift_notification(
+                session,
+                ticket_id=action.ticket_id,
+                operator_action_id=action.id,
+                recipient_telegram_id=recipient_telegram_id,
+                extend_days=extend_days,
+                expire_at=expire_at,
+            )
+            await session.commit()
+            return "completed"
+
+    @staticmethod
+    def _queue_gift_notification(
+        session: AsyncSession,
+        *,
+        ticket_id: str,
+        operator_action_id: str,
+        recipient_telegram_id: int,
+        extend_days: int,
+        expire_at: datetime,
+    ) -> None:
+        text = gift_notification_text(extend_days, expire_at)
+        session.add(
+            TicketMessage(
+                ticket_id=ticket_id,
+                direction=Direction.OPERATOR_TO_USER,
+                channel="system",
+                content=text,
+            )
+        )
+        session.add(
+            DeliveryOutbox(
+                ticket_id=ticket_id,
+                direction=Direction.OPERATOR_TO_USER,
+                idempotency_key=f"panel-gift:{operator_action_id}:user-notification",
+                payload={
+                    "kind": "send_text",
+                    "target_chat_id": recipient_telegram_id,
+                    "text": text,
+                    "parse_mode": "HTML",
+                },
+            )
+        )
+
+    @staticmethod
+    def _queue_revoke_link_telegram_notification(
+        session: AsyncSession,
+        *,
+        ticket_id: str,
+        operator_action_id: str,
+        recipient_telegram_id: int,
+        subscription_url: str,
+    ) -> None:
+        text = revoke_link_notification_text(subscription_url)
+        session.add(
+            TicketMessage(
+                ticket_id=ticket_id,
+                direction=Direction.OPERATOR_TO_USER,
+                channel="system",
+                content=text,
+            )
+        )
+        session.add(
+            DeliveryOutbox(
+                ticket_id=ticket_id,
+                direction=Direction.OPERATOR_TO_USER,
+                idempotency_key=(f"panel-revoke-link:{operator_action_id}:telegram-notification"),
+                payload={
+                    "kind": "send_text",
+                    "target_chat_id": recipient_telegram_id,
+                    "text": text,
+                    "parse_mode": "HTML",
+                },
+            )
+        )
 
     @staticmethod
     def _fill_revoke_notification(

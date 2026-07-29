@@ -116,9 +116,9 @@ def test_public_documentation_is_curated() -> None:
     assert "## Ограничения" not in readme
     assert "## Разработка" not in readme
     assert "Официальный способ поставки — container image" in readme
-    assert "полноценная интеграция с Remnawave 2.8.0" in readme
+    assert "полноценная интеграция с Remnawave 2.8.x" in readme
     assert "notification webhook с durable at-least-once доставкой" in readme
-    assert "Remnawave 2.8.0" in readme
+    assert "Remnawave 2.8.x" in readme
     assert "@sha256:<digest>" in readme
 
     public_markdown = "\n".join(

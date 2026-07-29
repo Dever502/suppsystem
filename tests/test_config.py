@@ -63,30 +63,32 @@ def test_startup_migrations_are_enabled_by_default_and_can_be_delegated() -> Non
     assert settings(migrations_at_startup=False).migrations_at_startup is False
 
 
-def test_role_overlap_error_names_conflicting_environment_variables() -> None:
-    with pytest.raises(ValidationError) as captured:
-        settings(full_admin_telegram_ids={8387907909}, operator_telegram_ids={8387907909})
+def test_revoke_link_telegram_notification_is_enabled_by_default_and_can_be_disabled() -> None:
+    assert settings().remnawave_revoke_link_telegram_notification is True
+    assert (
+        settings(
+            remnawave_revoke_link_telegram_notification=False
+        ).remnawave_revoke_link_telegram_notification
+        is False
+    )
 
-    message = str(captured.value)
 
-    assert "Telegram operator roles must not overlap" in message
-    assert "8387907909" in message
-    assert "FULL_ADMIN_TELEGRAM_IDS" in message
-    assert "OPERATOR_TELEGRAM_IDS" in message
+def test_admin_ids_accept_comma_separated_values() -> None:
+    configured = settings(admin_telegram_ids="8387907909, 7")
+
+    assert configured.admin_telegram_ids == frozenset({8387907909, 7})
 
 
 def test_configuration_error_formatter_is_operator_readable() -> None:
     from supportbot.__main__ import format_configuration_error
 
     with pytest.raises(ValidationError) as captured:
-        settings(full_admin_telegram_ids={8387907909}, operator_telegram_ids={8387907909})
+        settings(delivery_poll_interval_seconds=0)
 
     message = format_configuration_error(captured.value)
 
     assert message.startswith("Configuration error:\n")
-    assert "8387907909" in message
-    assert "FULL_ADMIN_TELEGRAM_IDS" in message
-    assert "OPERATOR_TELEGRAM_IDS" in message
+    assert "DELIVERY_POLL_INTERVAL_SECONDS" in message
     assert "/opt/suppsystem/.env" in message
     assert "Traceback" not in message
     assert "pydantic_core" not in message

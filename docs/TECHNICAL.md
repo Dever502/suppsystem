@@ -34,7 +34,7 @@ Operator REST API ────────────────────�
 | Часть | Ответственность |
 | --- | --- |
 | `telegram_*` | handlers, Forum-темы и lifecycle Telegram runtime |
-| `ticket_*`, `services.py` | тикеты, сообщения, роли и blocklist |
+| `ticket_*`, `services.py` | тикеты, сообщения, авторизация и blocklist |
 | `outbox_repository.py`, `delivery.py` | durable очереди и доставка |
 | `panel*`, `remnawave.py` | Remnawave use cases, recovery и HTTP-клиент |
 | `api*` | Operator API, DTO, middleware и endpoints |
@@ -121,18 +121,12 @@ Provisioning идемпотентно настраивает роли, ownership
 SQLite использует foreign keys, WAL и `busy_timeout=5000` на каждом соединении. Временная
 конкуренция записи обрабатывается ограниченными повторными попытками.
 
-## Роли и права
+## Администраторы
 
-Один Telegram ID должен состоять ровно в одной роли.
-
-| Роль | Возможности |
-| --- | --- |
-| `full_admin` | полный доступ ко всем операторским командам |
-| `operator` | полный доступ ко всем операторским командам в текущей версии |
-| `operator_ro` | только `/info`, `/subinfo` и `/notes` |
-
-Сейчас `full_admin` и `operator` имеют одинаковый full access; разделение ролей сохранено для
-будущего ограничения полномочий.
+`ADMIN_TELEGRAM_IDS` содержит числовые Telegram ID администраторов. Каждый указанный
+администратор может читать и отвечать в связанных Forum-темах, выполнять все команды
+поддержки, Remnawave и восстановления, включая `/resolvepanel`. Права пользователя в
+Telegram-группе сами по себе не дают доступ к приложению.
 
 ## Operator API
 
@@ -157,7 +151,7 @@ Uvicorn и Telegram polling работают под общей supervision. Пр
 
 ## Remnawave
 
-Поддерживается API-контракт Remnawave 2.8.0. Выключенная или ненастроенная интеграция не влияет на
+Поддерживается API-контракт Remnawave 2.8.x. Выключенная или ненастроенная интеграция не влияет на
 обычные сценарии поддержки.
 
 - Telegram-тикет ищет пользователя только по `telegramId`.
@@ -188,8 +182,11 @@ read-only lookup: текущая ссылка нужна, чтобы завер�
 `inconclusive`. Повреждённый локальный payload получает тот же статус. Эти случаи никогда не
 трактуются как `not_applied`.
 
-`/revokelink` заранее создаёт durable notification intent. Успех не финализируется, пока
-уведомление не готово к доставке, поэтому рестарт не приводит к повторному revoke.
+`/revokelink` заранее создаёт durable webhook intent. По умолчанию после подтверждения новой
+ссылки независимо ставятся в очередь webhook и сообщение клиенту в Telegram. При
+`REMNAWAVE_REVOKE_LINK_TELEGRAM_NOTIFICATION=false` создаётся только webhook. Успех не
+финализируется, пока intents не готовы к доставке, поэтому рестарт не приводит к повторному
+revoke.
 
 ## Notification webhook
 

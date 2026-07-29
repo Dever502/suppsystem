@@ -145,10 +145,6 @@ class Settings(BaseSettings):
 
     support_bot_token: SecretStr
     support_group_id: int
-    full_admin_telegram_ids: frozenset[int] = Field(default_factory=frozenset)
-    operator_telegram_ids: frozenset[int] = Field(default_factory=frozenset)
-    readonly_operator_telegram_ids: frozenset[int] = Field(default_factory=frozenset)
-    # Deprecated compatibility alias for FULL_ADMIN_TELEGRAM_IDS.
     admin_telegram_ids: frozenset[int] = Field(default_factory=frozenset)
     data_dir: Path = Path("./data")
     database_url: str | None = None
@@ -174,6 +170,7 @@ class Settings(BaseSettings):
     remnawave_api_token: SecretStr | None = None
     remnawave_timeout_seconds: float = 5.0
     remnawave_reconcile_delay_seconds: float = 10.0
+    remnawave_revoke_link_telegram_notification: bool = True
     notification_webhook_enabled: bool = False
     notification_webhook_url: str | None = None
     notification_webhook_secret: SecretStr | None = None
@@ -181,13 +178,7 @@ class Settings(BaseSettings):
     notification_webhook_max_attempts: int = 8
     notification_webhook_poll_interval_seconds: float = 1.0
 
-    @field_validator(
-        "full_admin_telegram_ids",
-        "operator_telegram_ids",
-        "readonly_operator_telegram_ids",
-        "admin_telegram_ids",
-        mode="before",
-    )
+    @field_validator("admin_telegram_ids", mode="before")
     @classmethod
     def parse_telegram_ids(cls, value: object) -> frozenset[int]:
         if value is None or value == "":
@@ -236,31 +227,6 @@ class Settings(BaseSettings):
         if self.migration_database_url is None:
             self.migration_database_url = self.database_url
         validate_database_url_secret("MIGRATION_DATABASE_URL", self.migration_database_url)
-        role_sources: dict[int, set[str]] = {}
-        for variable_name, ids in (
-            ("FULL_ADMIN_TELEGRAM_IDS", self.full_admin_telegram_ids),
-            ("ADMIN_TELEGRAM_IDS", self.admin_telegram_ids),
-            ("OPERATOR_TELEGRAM_IDS", self.operator_telegram_ids),
-            ("READONLY_OPERATOR_TELEGRAM_IDS", self.readonly_operator_telegram_ids),
-        ):
-            for telegram_id in ids:
-                role_sources.setdefault(telegram_id, set()).add(variable_name)
-        conflicts = {
-            telegram_id: sources
-            for telegram_id, sources in role_sources.items()
-            if (
-                bool(sources & {"FULL_ADMIN_TELEGRAM_IDS", "ADMIN_TELEGRAM_IDS"})
-                + ("OPERATOR_TELEGRAM_IDS" in sources)
-                + ("READONLY_OPERATOR_TELEGRAM_IDS" in sources)
-            )
-            > 1
-        }
-        if conflicts:
-            details = "; ".join(
-                f"{telegram_id}: {', '.join(sorted(sources))}"
-                for telegram_id, sources in sorted(conflicts.items())
-            )
-            raise ValueError(f"Telegram operator roles must not overlap ({details})")
         if self.remnawave_base_url is not None:
             validate_external_url("REMNAWAVE_BASE_URL", self.remnawave_base_url)
         if self.notification_webhook_url is not None:
@@ -307,10 +273,6 @@ class Settings(BaseSettings):
         if self.notification_webhook_poll_interval_seconds <= 0:
             raise ValueError("NOTIFICATION_WEBHOOK_POLL_INTERVAL_SECONDS must be positive")
         return self
-
-    @property
-    def effective_full_admin_ids(self) -> frozenset[int]:
-        return self.full_admin_telegram_ids | self.admin_telegram_ids
 
 
 @lru_cache

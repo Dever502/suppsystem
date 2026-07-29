@@ -62,12 +62,7 @@ def panel_action_reply(result: PanelActionResult) -> str:
     if result.action == "revoke_subscription_link":
         return "✅ Ссылка подписки перевыпущена."
     if result.action == "reset_devices":
-        suffix = (
-            f"\nУдалено устройств: <b>{result.devices_removed}</b>."
-            if result.devices_removed is not None
-            else ""
-        )
-        return "✅ <b>Устройства сброшены</b>" + suffix
+        return "✅ <b>Устройства сброшены</b>"
     return "✅ Операция Remnawave выполнена."
 
 

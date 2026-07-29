@@ -11,12 +11,12 @@ Suppsystem — Telegram-first система технической поддер
 - один постоянный тикет и одна Forum-тема на клиента;
 - двусторонняя передача текста и Telegram-медиа;
 - закрытие и повторное открытие обращений, оценки, блокировка и внутренние заметки;
-- роли администратора, оператора и оператора только для чтения;
+- единый список администраторов с доступом ко всем командам;
 - durable очередь доставки с повторами и восстановлением после сбоев;
 - SQLite для простого запуска и PostgreSQL для production-инсталляции;
 - опциональный Operator API;
 - healthcheck, readiness, Prometheus-метрики, JSON-логи и backup/restore;
-- полноценная интеграция с Remnawave 2.8.0: подписка, продление, перевыпуск ссылки и ключей,
+- полноценная интеграция с Remnawave 2.8.x: подписка, продление, перевыпуск ссылки и ключей,
   сброс устройств и безопасное восстановление неизвестного результата;
 - подписанный notification webhook с durable at-least-once доставкой.
 
@@ -51,7 +51,7 @@ Telegram-чат  <──>  Telegram-бот + база данных  <──>  Fo
    ```dotenv
    SUPPORT_BOT_TOKEN=replace-with-bot-token
    SUPPORT_GROUP_ID=replace-with-forum-group-id
-   FULL_ADMIN_TELEGRAM_IDS=replace-with-admin-id
+   ADMIN_TELEGRAM_IDS=replace-with-admin-id
    DATA_DIR=./data
    ```
 

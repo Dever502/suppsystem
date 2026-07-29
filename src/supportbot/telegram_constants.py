@@ -35,7 +35,7 @@ TOPIC_COMMANDS = {
     "/resolvepanel",
     "/note",
     "/notes",
-    "/stopall",
+    "/closeall",
     "/synctopics",
     "/block",
     "/unblock",

@@ -130,11 +130,6 @@ async def validate_support_group(bot: Bot, support_group_id: int) -> None:
 async def run() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
-    if settings.admin_telegram_ids:
-        logger.warning(
-            "ADMIN_TELEGRAM_IDS is deprecated; use FULL_ADMIN_TELEGRAM_IDS",
-            extra={"event": "deprecated_admin_role_config"},
-        )
     assert settings.database_url is not None
     assert settings.migration_database_url is not None
     _ensure_sqlite_directory(settings.database_url)
@@ -176,6 +171,9 @@ async def run() -> None:
             database=database,
             reconcile_delay_seconds=settings.remnawave_reconcile_delay_seconds,
             support_group_id=settings.support_group_id,
+            revoke_link_telegram_notification=(
+                settings.remnawave_revoke_link_telegram_notification
+            ),
         )
         recovered_actions = await panel_service.recover_interrupted_actions()
         runtime_health.ready("panel")

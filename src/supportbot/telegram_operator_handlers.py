@@ -98,7 +98,7 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
             )
             await self._handle_root_command(message)
             return
-        if not self.authorization.can_read(message.from_user.id):
+        if not self.authorization.is_admin(message.from_user.id):
             logger.info(
                 "Ignored operator message without authorization",
                 extra={
@@ -112,18 +112,6 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
             return
 
         command = message_command(message)
-        if not self.authorization.can_execute_topic_action(message.from_user.id, command):
-            logger.info(
-                "Blocked read-only operator action",
-                extra={
-                    "event": "readonly_operator_action_blocked",
-                    "operator_telegram_id": message.from_user.id,
-                    "topic_id": message.message_thread_id,
-                    "command": command if command.startswith("/") else None,
-                },
-            )
-            await message.reply("⛔ Роль только для чтения. Действие не выполнено.")
-            return
         ticket = await self.ticket_service.get_by_topic(message.message_thread_id)
         if ticket is None:
             logger.info(
@@ -181,9 +169,6 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
             await message.reply(internal_notes_text(notes))
             return
         if command == "/resolvepanel":
-            if not self.authorization.is_full_admin(message.from_user.id):
-                await message.reply("⛔ Только full admin может разрешить неизвестный результат.")
-                return
             if self.panel_service is None:
                 await message.reply("⚠️ Интеграция с Remnawave не подключена.")
                 return
@@ -270,11 +255,7 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
                 else "✅ <b>Тикет закрыт</b>\n\nУведомление пользователю не отправлено."
             )
             return
-        if command in {"/stopall", "/synctopics", "/block", "/unblock"}:
-            if not self.authorization.has_full_access(message.from_user.id):
-                await message.reply("⛔ Недостаточно прав для этой команды.")
-                return
-        if command == "/stopall":
+        if command == "/closeall":
             closed = await self.ticket_service.close_all(
                 operator_telegram_id=message.from_user.id,
                 idempotency_key=command_key,
@@ -342,9 +323,7 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
         )
 
     async def _handle_root_command(self, message: Message) -> None:
-        if message.from_user is None or not self.authorization.has_full_access(
-            message.from_user.id
-        ):
+        if message.from_user is None or not self.authorization.is_admin(message.from_user.id):
             return
         parts = (message.text or "").split()
         command = parts[0].lower().split("@", maxsplit=1)[0] if parts else ""
@@ -358,9 +337,7 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
         )
 
     async def _handle_orphan_topic_command(self, message: Message, command: str) -> None:
-        if message.from_user is None or not self.authorization.has_full_access(
-            message.from_user.id
-        ):
+        if message.from_user is None or not self.authorization.is_admin(message.from_user.id):
             return
         parts = (message.text or "").split()
         if command != "/bindtopic" or len(parts) != 2 or message.message_thread_id is None:
@@ -370,7 +347,7 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
         try:
             target = await self.ticket_service.get_ticket(ticket_id)
             async with self._ticket_locks.hold(target.telegram_user_id):
-                # /bindtopic is an explicit full-admin recovery decision. Cancel
+                # /bindtopic is an explicit administrator recovery decision. Cancel
                 # any uncertain automatic claim, then attach only under a fresh
                 # token so a late automatic result cannot overwrite this binding.
                 await self.ticket_service.reset_topic_provisioning(ticket_id)

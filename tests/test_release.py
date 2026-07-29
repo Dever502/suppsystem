@@ -57,6 +57,7 @@ def test_ci_build_scan_sbom_and_evidence_share_one_immutable_image() -> None:
     assert "ghcr.io/dever502/suppsystem" in text
     assert "IMAGE_REFERENCE=%s" in text
     assert "supportbot-image.tar" in text
+    assert "chmod 0644 supportbot-image.tar" in text
     assert "HIGH,CRITICAL" in rendered_steps
     assert "--ignore-unfixed" not in text
     assert "aquasec/trivy:0.70.0@sha256:" in text

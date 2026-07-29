@@ -132,6 +132,7 @@ jobs:
         run: |
           set -euo pipefail
           docker image save --output supportbot-image.tar "$IMAGE_TAG"
+          chmod 0644 supportbot-image.tar
       - name: Smoke-test candidate image
         env:
           IMAGE_TAG: ${{ steps.metadata.outputs.image_tag }}

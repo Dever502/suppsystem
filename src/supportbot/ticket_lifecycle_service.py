@@ -50,6 +50,7 @@ class TicketLifecycleService(TicketTopicService):
         notification_target_chat_id: int | None = None,
         notification_idempotency_key: str | None = None,
         notification_reply_markup: dict[str, object] | None = None,
+        notification_parse_mode: str | None = None,
         api_idempotency: ApiIdempotencyCommand | None = None,
     ) -> bool:
         action_key = idempotency_key or f"close:{ticket_id}:{uuid.uuid4()}"
@@ -143,6 +144,11 @@ class TicketLifecycleService(TicketTopicService):
                                 "target_chat_id": notification_chat_id,
                                 "text": notification_text,
                                 **(
+                                    {"parse_mode": notification_parse_mode}
+                                    if notification_parse_mode is not None
+                                    else {}
+                                ),
+                                **(
                                     {"reply_markup": notification_reply_markup}
                                     if notification_reply_markup is not None
                                     else {}
@@ -179,6 +185,7 @@ class TicketLifecycleService(TicketTopicService):
         target_chat_id: int,
         text: str,
         idempotency_key: str,
+        parse_mode: str | None = None,
     ) -> bool:
         if score not in range(1, 6):
             raise ValueError("score must be between 1 and 5")
@@ -224,6 +231,7 @@ class TicketLifecycleService(TicketTopicService):
                         "kind": "send_text",
                         "target_chat_id": target_chat_id,
                         "text": text,
+                        **({"parse_mode": parse_mode} if parse_mode is not None else {}),
                     },
                 )
             )

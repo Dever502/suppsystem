@@ -204,6 +204,7 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
                 notification_text=TICKET_CLOSED_TEXT if notify_user else None,
                 notification_target_chat_id=ticket.telegram_user_id if notify_user else None,
                 notification_idempotency_key=f"{command_key}:user-notification",
+                notification_parse_mode="HTML" if notify_user else None,
                 notification_reply_markup=(
                     rating_keyboard(ticket.id, ticket.close_cycle + 1).model_dump(
                         mode="json", exclude_none=True

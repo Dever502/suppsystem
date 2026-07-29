@@ -32,6 +32,15 @@ class SuccessfulBot:
         return SimpleNamespace(message_id=789)
 
 
+class RecordingTextBot(SuccessfulBot):
+    def __init__(self) -> None:
+        self.send_calls: list[dict[str, object]] = []
+
+    async def send_message(self, **kwargs: object) -> SimpleNamespace:
+        self.send_calls.append(kwargs)
+        return await super().send_message(**kwargs)
+
+
 class BotMustNotSend:
     async def copy_message(self, **kwargs: object) -> None:
         raise AssertionError("blocked delivery reached Telegram copy_message")
@@ -226,6 +235,32 @@ async def test_successful_delivery_persists_telegram_message_id(tmp_path: Path) 
     await worker._deliver(delivery_job())
 
     assert service.delivered_calls == [("delivery-1", "claim-1", 456)]
+
+
+async def test_text_delivery_uses_only_explicit_html_parse_mode(tmp_path: Path) -> None:
+    service = FakeTicketService()
+    bot = RecordingTextBot()
+    worker = delivery_worker(tmp_path, service=service, bot=bot)
+
+    for delivery_id, parse_mode in (("plain", None), ("html", "HTML")):
+        payload: dict[str, object] = {
+            "kind": "send_text",
+            "target_chat_id": 123,
+            "text": "<b>Message</b>",
+        }
+        if parse_mode is not None:
+            payload["parse_mode"] = parse_mode
+        await worker._deliver(
+            DeliveryJob(
+                id=delivery_id,
+                ticket_id="ticket-1",
+                payload=payload,
+                attempt_count=1,
+                claim_token=f"claim-{delivery_id}",
+            )
+        )
+
+    assert [call["parse_mode"] for call in bot.send_calls] == [None, "HTML"]
 
 
 async def test_stale_success_is_not_reported_as_delivered(tmp_path: Path, caplog: Any) -> None:

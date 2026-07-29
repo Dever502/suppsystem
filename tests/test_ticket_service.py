@@ -613,6 +613,7 @@ async def test_operator_close_can_enqueue_user_notification(
         notification_text="Тикет закрыт.",
         notification_target_chat_id=1010,
         notification_idempotency_key="telegram:-100:11:/stop:user-notification",
+        notification_parse_mode="HTML",
     )
     duplicate = await ticket_service.close(
         ticket_id=ticket.id,
@@ -631,6 +632,7 @@ async def test_operator_close_can_enqueue_user_notification(
         "kind": "send_text",
         "target_chat_id": 1010,
         "text": "Тикет закрыт.",
+        "parse_mode": "HTML",
     }
 
 
@@ -722,6 +724,7 @@ async def test_rating_enqueue_targets_general_support_group(
         target_chat_id=-100123,
         text="Оценка: ⭐ 5/5",
         idempotency_key=f"rating:{ticket.id}:1012",
+        parse_mode="HTML",
     )
     duplicate = await ticket_service.enqueue_rating(
         ticket_id=ticket.id,
@@ -741,6 +744,7 @@ async def test_rating_enqueue_targets_general_support_group(
         "kind": "send_text",
         "target_chat_id": -100123,
         "text": "Оценка: ⭐ 5/5",
+        "parse_mode": "HTML",
     }
 
 

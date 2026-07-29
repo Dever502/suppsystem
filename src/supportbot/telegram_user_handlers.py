@@ -58,6 +58,7 @@ class TelegramUserHandlers(TelegramTopicManager):
             target_chat_id=self.settings.support_group_id,
             text=rating_report(ticket, score),
             idempotency_key=(f"rating:{ticket.id}:{close_cycle}:{ticket.telegram_user_id}"),
+            parse_mode="HTML",
         )
         logger.info(
             "Received support rating",

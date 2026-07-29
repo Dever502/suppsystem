@@ -243,8 +243,7 @@ def test_rating_messages_use_card_format() -> None:
         "Оценка: ⭐⭐⭐⭐ <b>4/5</b>\n\n"
         "👤 <b>Клиент</b>\n\n"
         "<b>Ivan &lt;Petrov&gt; · @ivan</b>\n"
-        "Telegram ID: <code>123456789</code>\n"
-        "Тикет: <code>ticket-1</code>"
+        "Telegram ID: <code>123456789</code>"
     )
     keyboard = rating_keyboard("ticket-1", 3)
     assert keyboard.inline_keyboard[0][3].callback_data == "support_rating:ticket-1:3:4"

@@ -622,6 +622,7 @@ class PanelReconciliationService(PanelPersistenceService):
                                 "target_chat_id": self.support_group_id,
                                 "target_thread_id": ticket.topic_id,
                                 "text": text,
+                                "parse_mode": "HTML",
                             },
                             status=(
                                 DeliveryStatus.PENDING

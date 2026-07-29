@@ -258,7 +258,7 @@ class DeliveryWorker:
                 sent_message = await self.bot.send_message(
                     chat_id=_payload_int(payload, "target_chat_id"),
                     text=str(payload["text"]),
-                    parse_mode=None,
+                    parse_mode="HTML" if payload.get("parse_mode") == "HTML" else None,
                     message_thread_id=(
                         _payload_int(payload, "target_thread_id")
                         if target_thread_id is not None

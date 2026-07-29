@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from html import escape
-
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from supportbot.service_types import TicketView
@@ -85,8 +83,7 @@ def rating_report(ticket: TicketView, score: int) -> str:
         f"Оценка: {'⭐' * score} <b>{score}/5</b>\n\n"
         "👤 <b>Клиент</b>\n\n"
         f"<b>{customer_identity(ticket)}</b>\n"
-        f"Telegram ID: <code>{ticket.telegram_user_id}</code>\n"
-        f"Тикет: <code>{escape(ticket.id)}</code>"
+        f"Telegram ID: <code>{ticket.telegram_user_id}</code>"
     )
 
 

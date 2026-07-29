@@ -675,6 +675,7 @@ async def test_gift_reconcile_does_not_claim_concurrent_change(database: Databas
     assert notification is not None
     assert action.id in str(notification.payload["text"])
     assert "/resolvepanel" in str(notification.payload["text"])
+    assert notification.payload["parse_mode"] == "HTML"
     assert (
         await service._reserve_action(
             ticket=ticket_view(),

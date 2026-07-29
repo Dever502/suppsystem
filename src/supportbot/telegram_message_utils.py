@@ -3,6 +3,7 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from supportbot.service_types import TicketView
+from supportbot.telegram_constants import TICKET_CLOSED_SUMMARY_TEXT
 from supportbot.telegram_formatting import customer_identity
 
 RATING_CALLBACK_PREFIX = "support_rating"
@@ -85,6 +86,10 @@ def rating_report(ticket: TicketView, score: int) -> str:
         f"<b>{customer_identity(ticket)}</b>\n"
         f"Telegram ID: <code>{ticket.telegram_user_id}</code>"
     )
+
+
+def rated_ticket_closed_text(score: int) -> str:
+    return f"{TICKET_CLOSED_SUMMARY_TEXT}\n\n⭐ <b>Ваша оценка: {'⭐' * score} {score}/5</b>"
 
 
 def command_key(message: Message, command: str) -> str:

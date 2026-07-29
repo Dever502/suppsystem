@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from aiogram.types import Message
 from pydantic import SecretStr
 
 from supportbot.__main__ import validate_api_settings, validate_support_group
@@ -31,6 +33,7 @@ from supportbot.telegram_formatting import (
 from supportbot.telegram_message_utils import (
     media_metadata,
     message_command,
+    rated_ticket_closed_text,
     rating_keyboard,
     rating_report,
 )
@@ -238,6 +241,12 @@ def test_rating_messages_use_card_format() -> None:
         "⭐ <b>Оцените поддержку</b>\n"
         "Выберите оценку ниже:"
     )
+    assert rated_ticket_closed_text(4) == (
+        "✅ <b>Обращение закрыто</b>\n\n"
+        "Спасибо за обращение. Если вопрос остался, отправьте новое сообщение — "
+        "мы снова откроем тикет.\n\n"
+        "⭐ <b>Ваша оценка: ⭐⭐⭐⭐ 4/5</b>"
+    )
     assert rating_report(ticket, 4) == (  # type: ignore[arg-type]
         "⭐ <b>Оценка поддержки</b>\n\n"
         "Оценка: ⭐⭐⭐⭐ <b>4/5</b>\n\n"
@@ -247,6 +256,53 @@ def test_rating_messages_use_card_format() -> None:
     )
     keyboard = rating_keyboard("ticket-1", 3)
     assert keyboard.inline_keyboard[0][3].callback_data == "support_rating:ticket-1:3:4"
+
+
+async def test_rating_callback_replaces_prompt_with_selected_score() -> None:
+    ticket = SimpleNamespace(
+        id="ticket-1",
+        display_name="Ivan",
+        username="ivan",
+        telegram_user_id=123456789,
+    )
+    enqueue_calls: list[dict[str, object]] = []
+
+    class FakeTicketService:
+        async def get_ticket(self, ticket_id: str) -> SimpleNamespace:
+            assert ticket_id == ticket.id
+            return ticket
+
+        async def enqueue_rating(self, **kwargs: object) -> bool:
+            enqueue_calls.append(kwargs)
+            return True
+
+    callback_message = AsyncMock(spec=Message)
+    callback_message.edit_text = AsyncMock()
+    callback_message.edit_reply_markup = AsyncMock()
+    callback = SimpleNamespace(
+        data="support_rating:ticket-1:3:4",
+        from_user=SimpleNamespace(id=123456789),
+        message=callback_message,
+        answer=AsyncMock(),
+    )
+    adapter = object.__new__(TelegramSupportAdapter)
+    adapter.ticket_service = FakeTicketService()  # type: ignore[assignment]
+    adapter.settings = Settings(
+        support_bot_token=SecretStr("test-token"),
+        support_group_id=-100123,
+    )
+
+    await adapter.handle_rating_callback(callback)  # type: ignore[arg-type]
+
+    assert enqueue_calls[0]["score"] == 4
+    assert enqueue_calls[0]["parse_mode"] == "HTML"
+    callback_message.edit_text.assert_awaited_once_with(
+        rated_ticket_closed_text(4),
+        parse_mode="HTML",
+        reply_markup=None,
+    )
+    callback_message.edit_reply_markup.assert_not_awaited()
+    callback.answer.assert_awaited_once_with("✅ Спасибо за оценку!", show_alert=False)
 
 
 async def test_ticket_lock_pool_releases_unused_entries() -> None:

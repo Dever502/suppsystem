@@ -3,12 +3,13 @@ WELCOME_TEXT = (
     "Опишите проблему одним сообщением. Можно приложить скриншот или файл — "
     "обращение сразу попадёт оператору."
 )
-TICKET_CLOSED_TEXT = (
+TICKET_CLOSED_SUMMARY_TEXT = (
     "✅ <b>Обращение закрыто</b>\n\n"
     "Спасибо за обращение. Если вопрос остался, отправьте новое сообщение — "
-    "мы снова откроем тикет.\n\n"
-    "⭐ <b>Оцените поддержку</b>\n"
-    "Выберите оценку ниже:"
+    "мы снова откроем тикет."
+)
+TICKET_CLOSED_TEXT = (
+    f"{TICKET_CLOSED_SUMMARY_TEXT}\n\n⭐ <b>Оцените поддержку</b>\nВыберите оценку ниже:"
 )
 PANEL_MUTATION_COMMANDS = {"/gift", "/resetkey", "/revokelink", "/resetdevices"}
 SUPPORT_PENDING_TEXT = (

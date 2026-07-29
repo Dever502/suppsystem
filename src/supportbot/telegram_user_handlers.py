@@ -9,7 +9,12 @@ from supportbot.service_types import (
     TicketNotFoundError,
 )
 from supportbot.telegram_constants import SUPPORT_PENDING_TEXT, WELCOME_TEXT
-from supportbot.telegram_message_utils import media_metadata, message_text, rating_report
+from supportbot.telegram_message_utils import (
+    media_metadata,
+    message_text,
+    rated_ticket_closed_text,
+    rating_report,
+)
 from supportbot.telegram_topic_manager import TelegramTopicManager
 
 logger = logging.getLogger(__name__)
@@ -72,12 +77,16 @@ class TelegramUserHandlers(TelegramTopicManager):
         )
         if queued and isinstance(callback.message, Message):
             try:
-                await callback.message.edit_reply_markup(reply_markup=None)
+                await callback.message.edit_text(
+                    rated_ticket_closed_text(score),
+                    parse_mode="HTML",
+                    reply_markup=None,
+                )
             except TelegramAPIError:
                 logger.exception(
-                    "Unable to remove rating keyboard",
+                    "Unable to update closed ticket message with rating",
                     extra={
-                        "event": "rating_keyboard_remove_failed",
+                        "event": "rating_confirmation_edit_failed",
                         "ticket_id": ticket.id,
                         "telegram_user_id": ticket.telegram_user_id,
                         "rating": score,

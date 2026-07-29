@@ -322,6 +322,8 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
         queued = result.changed
         if result.ticket is not None:
             ticket = result.ticket
+        if result.reopened:
+            await self._send_ticket_reopened_notice(ticket, by_operator=True)
         logger.info(
             "Queued operator reply for delivery" if queued else "Duplicate operator reply ignored",
             extra={

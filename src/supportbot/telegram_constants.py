@@ -11,6 +11,12 @@ TICKET_CLOSED_SUMMARY_TEXT = (
 TICKET_CLOSED_TEXT = (
     f"{TICKET_CLOSED_SUMMARY_TEXT}\n\n⭐ <b>Оцените поддержку</b>\nВыберите оценку ниже:"
 )
+TICKET_REOPENED_BY_CUSTOMER_TEXT = (
+    "🔴 <b>Тикет снова открыт</b>\n\nКлиент отправил новое сообщение."
+)
+TICKET_REOPENED_BY_OPERATOR_TEXT = (
+    "🔴 <b>Тикет снова открыт</b>\n\nОператор отправил сообщение клиенту."
+)
 PANEL_MUTATION_COMMANDS = {"/gift", "/resetkey", "/revokelink", "/resetdevices"}
 SUPPORT_PENDING_TEXT = (
     "⚠️ <b>Обращение пока не отправлено</b>\n\n"

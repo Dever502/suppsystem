@@ -23,6 +23,10 @@ from supportbot.telegram_adapter import (
     TelegramSupportAdapter,
     TicketLockPool,
 )
+from supportbot.telegram_constants import (
+    TICKET_REOPENED_BY_CUSTOMER_TEXT,
+    TICKET_REOPENED_BY_OPERATOR_TEXT,
+)
 from supportbot.telegram_errors import is_missing_topic_error
 from supportbot.telegram_formatting import (
     internal_notes_text,
@@ -634,7 +638,7 @@ async def test_reopened_ticket_customer_card_is_best_effort() -> None:
         topic_id=777,
     )
     adapter = object.__new__(TelegramSupportAdapter)
-    calls = {"sync": 0, "card": 0}
+    calls = {"sync": 0, "notice": 0, "card": 0}
 
     async def sync_ticket_topic(ticket_arg: object) -> bool:
         calls["sync"] += 1
@@ -644,12 +648,116 @@ async def test_reopened_ticket_customer_card_is_best_effort() -> None:
         calls["card"] += 1
         raise RuntimeError("card failed")
 
+    async def send_reopened_notice(ticket_arg: object, *, by_operator: bool) -> None:
+        assert by_operator is False
+        calls["notice"] += 1
+
     adapter._sync_ticket_topic = sync_ticket_topic  # type: ignore[method-assign]
+    adapter._send_ticket_reopened_notice = send_reopened_notice  # type: ignore[method-assign]
     adapter._send_customer_card = send_customer_card  # type: ignore[method-assign]
 
     await adapter._refresh_reopened_ticket_context(ticket)  # type: ignore[arg-type]
 
-    assert calls == {"sync": 1, "card": 1}
+    assert calls == {"sync": 1, "notice": 1, "card": 1}
+
+
+async def test_ticket_reopened_notice_uses_actor_specific_text() -> None:
+    class FakeLimiter:
+        def __init__(self) -> None:
+            self.wait_count = 0
+
+        async def wait(self) -> None:
+            self.wait_count += 1
+
+    class FakeBot:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, object]] = []
+
+        async def send_message(self, **kwargs: object) -> None:
+            self.messages.append(kwargs)
+
+    ticket = SimpleNamespace(id="ticket-1", topic_id=777)
+    bot = FakeBot()
+    limiter = FakeLimiter()
+    adapter = object.__new__(TelegramSupportAdapter)
+    adapter.bot = bot  # type: ignore[assignment]
+    adapter.limiter = limiter  # type: ignore[assignment]
+    adapter.settings = Settings(
+        support_bot_token=SecretStr("test-token"),
+        support_group_id=-100123,
+    )
+
+    await adapter._send_ticket_reopened_notice(ticket, by_operator=False)  # type: ignore[arg-type]
+    await adapter._send_ticket_reopened_notice(ticket, by_operator=True)  # type: ignore[arg-type]
+
+    assert limiter.wait_count == 2
+    assert bot.messages == [
+        {
+            "chat_id": -100123,
+            "message_thread_id": 777,
+            "text": TICKET_REOPENED_BY_CUSTOMER_TEXT,
+        },
+        {
+            "chat_id": -100123,
+            "message_thread_id": 777,
+            "text": TICKET_REOPENED_BY_OPERATOR_TEXT,
+        },
+    ]
+
+
+async def test_operator_reply_reopen_sends_operator_notice() -> None:
+    ticket = SimpleNamespace(
+        id="ticket-1",
+        telegram_user_id=123,
+        topic_id=777,
+    )
+
+    class FakeTicketService:
+        async def get_by_topic(self, topic_id: int) -> SimpleNamespace:
+            assert topic_id == 777
+            return ticket
+
+        async def accept_operator_reply(self, **kwargs: object) -> SimpleNamespace:
+            assert kwargs["ticket_id"] == "ticket-1"
+            return SimpleNamespace(
+                changed=True,
+                blocked=False,
+                reopened=True,
+                ticket=ticket,
+            )
+
+    class FakeMessage:
+        forum_topic_edited = None
+        from_user = SimpleNamespace(id=2, is_bot=False)
+        message_thread_id = 777
+        chat = SimpleNamespace(id=-100123)
+        message_id = 52
+        text = "Ответ клиенту"
+        caption = None
+        content_type = "text"
+
+        async def reply(self, text: str) -> None:
+            raise AssertionError(f"unexpected reply: {text}")
+
+    notices: list[tuple[object, bool]] = []
+
+    async def send_reopened_notice(ticket_arg: object, *, by_operator: bool) -> None:
+        notices.append((ticket_arg, by_operator))
+
+    adapter = object.__new__(TelegramSupportAdapter)
+    adapter.authorization = AuthorizationService(
+        Settings(
+            support_bot_token=SecretStr("test-token"),
+            support_group_id=-100123,
+            operator_telegram_ids={2},
+        )
+    )
+    adapter.ticket_service = FakeTicketService()  # type: ignore[assignment]
+    adapter._send_ticket_reopened_notice = send_reopened_notice  # type: ignore[method-assign]
+
+    await adapter.handle_group_message(FakeMessage())  # type: ignore[arg-type]
+
+    assert notices == [(ticket, True)]
 
 
 async def test_private_message_is_persisted_before_topic_provisioning() -> None:

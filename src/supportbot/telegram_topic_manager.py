@@ -14,6 +14,10 @@ from supportbot.service_types import (
     TopicProvisioningConflictError,
 )
 from supportbot.services import TicketService
+from supportbot.telegram_constants import (
+    TICKET_REOPENED_BY_CUSTOMER_TEXT,
+    TICKET_REOPENED_BY_OPERATOR_TEXT,
+)
 from supportbot.telegram_errors import is_missing_topic_error
 from supportbot.telegram_formatting import (
     customer_identity,
@@ -36,6 +40,7 @@ class TelegramTopicManager:
 
     async def _refresh_reopened_ticket_context(self, ticket: TicketView) -> None:
         await self._sync_ticket_topic(ticket)
+        await self._send_ticket_reopened_notice(ticket, by_operator=False)
         try:
             await self._send_customer_card(ticket, event="ticket_reopened_customer_card_sent")
         except TelegramAPIError:
@@ -55,6 +60,55 @@ class TelegramTopicManager:
                     "event": "ticket_reopened_customer_card_unexpected_error",
                     "ticket_id": ticket.id,
                     "telegram_user_id": ticket.telegram_user_id,
+                    "topic_id": ticket.topic_id,
+                },
+            )
+
+    async def _send_ticket_reopened_notice(self, ticket: TicketView, *, by_operator: bool) -> None:
+        if ticket.topic_id is None:
+            logger.info(
+                "Skipped ticket reopened notice because ticket has no topic",
+                extra={"event": "ticket_reopened_notice_skipped", "ticket_id": ticket.id},
+            )
+            return
+        text = TICKET_REOPENED_BY_OPERATOR_TEXT if by_operator else TICKET_REOPENED_BY_CUSTOMER_TEXT
+        event = (
+            "ticket_reopened_by_operator_notice_sent"
+            if by_operator
+            else "ticket_reopened_by_customer_notice_sent"
+        )
+        try:
+            await self.limiter.wait()
+            await self.bot.send_message(
+                chat_id=self.settings.support_group_id,
+                message_thread_id=ticket.topic_id,
+                text=text,
+            )
+        except TelegramAPIError:
+            logger.warning(
+                "Unable to send ticket reopened notice",
+                exc_info=True,
+                extra={
+                    "event": f"{event}_failed",
+                    "ticket_id": ticket.id,
+                    "topic_id": ticket.topic_id,
+                },
+            )
+        except Exception:
+            logger.exception(
+                "Unexpected ticket reopened notice failure",
+                extra={
+                    "event": f"{event}_unexpected_error",
+                    "ticket_id": ticket.id,
+                    "topic_id": ticket.topic_id,
+                },
+            )
+        else:
+            logger.info(
+                "Sent ticket reopened notice",
+                extra={
+                    "event": event,
+                    "ticket_id": ticket.id,
                     "topic_id": ticket.topic_id,
                 },
             )

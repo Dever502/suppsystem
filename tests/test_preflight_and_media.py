@@ -9,7 +9,11 @@ import pytest
 from aiogram.types import Message
 from pydantic import SecretStr
 
-from supportbot.__main__ import validate_api_settings, validate_support_group
+from supportbot.__main__ import (
+    validate_api_settings,
+    validate_operator_access,
+    validate_support_group,
+)
 from supportbot.authorization import AuthorizationService
 from supportbot.config import Settings
 from supportbot.models import TicketStatus
@@ -631,6 +635,29 @@ def test_api_settings_allow_unsafe_auth_disable_on_loopback() -> None:
 def test_api_settings_reject_unsafe_auth_disable_on_remote_bind() -> None:
     with pytest.raises(RuntimeError, match="loopback"):
         validate_api_settings(_api_settings(api_host="0.0.0.0", api_unsafe_disable_auth=True))
+
+
+def test_operator_access_requires_telegram_admins_when_api_is_disabled() -> None:
+    settings = Settings(
+        support_bot_token=SecretStr("test-token"),
+        support_group_id=-100123,
+    )
+
+    with pytest.raises(RuntimeError, match="ADMIN_TELEGRAM_IDS"):
+        validate_operator_access(settings)
+
+
+def test_operator_access_accepts_telegram_or_api_only_operation() -> None:
+    telegram_settings = Settings(
+        support_bot_token=SecretStr("test-token"),
+        support_group_id=-100123,
+        admin_telegram_ids={123},
+    )
+
+    validate_operator_access(telegram_settings)
+    validate_operator_access(
+        _api_settings(api_admin_token=SecretStr("0123456789abcdef0123456789abcdef"))
+    )
 
 
 async def test_reopened_ticket_customer_card_is_best_effort() -> None:

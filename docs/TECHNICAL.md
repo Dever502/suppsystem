@@ -91,7 +91,8 @@ least-privilege роли, `postgres-migrate` применяет Alembic, а пр
 ## Авторизация и Operator API
 
 `ADMIN_TELEGRAM_IDS` содержит администраторов с доступом ко всем Telegram-командам, включая
-`/resolvepanel`. Права в самой группе доступа к приложению не дают.
+`/resolvepanel`. Права в самой группе доступа к приложению не дают. Пустой список разрешён только
+при включённом Operator API и означает API-only работу операторов.
 
 Operator API включается отдельно. Все endpoints, включая `/docs` и `/openapi.json`, защищены
 `X-API-Token`; мутации дополнительно требуют `X-Idempotency-Key`.

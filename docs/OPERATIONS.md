@@ -73,7 +73,7 @@ POSTGRES_RUNTIME_PASSWORD=replace-with-random-password-3
 | --- | --- | --- |
 | `SUPPORT_BOT_TOKEN` | обязательна | токен Telegram-бота |
 | `SUPPORT_GROUP_ID` | обязательна | ID закрытой Forum-группы |
-| `ADMIN_TELEGRAM_IDS` | пусто | ID администраторов через запятую; доступ ко всем командам |
+| `ADMIN_TELEGRAM_IDS` | обязательна без API | ID администраторов через запятую; доступ ко всем командам |
 | `DATA_DIR` | `./data` | SQLite и heartbeat-файлы |
 | `DATABASE_URL` | SQLite в `DATA_DIR` | async SQLAlchemy URL |
 | `MIGRATION_DATABASE_URL` | `DATABASE_URL` | отдельный URL для миграций |
@@ -97,7 +97,9 @@ POSTGRES_RUNTIME_PASSWORD=replace-with-random-password-3
 | `API_ADMIN_TOKEN` | пусто | `X-API-Token`, минимум 32 символа |
 | `API_TRUSTED_PROXY_IPS` | пусто | доверенные proxy IP/CIDR |
 
-Оставляйте публикацию на loopback и используйте HTTPS reverse proxy. Каждая мутация требует
+Пустой `ADMIN_TELEGRAM_IDS` допустим только при `API_ENABLED=true`: в этом случае работа
+операторов идёт только через API. Оставляйте публикацию на loopback и используйте HTTPS reverse
+proxy. Каждая мутация требует
 `X-Idempotency-Key`: точный повтор возвращает сохранённый ответ, другой payload с тем же ключом —
 `409 Conflict`. Rate limit и защита токена process-local и сбрасываются при рестарте.
 

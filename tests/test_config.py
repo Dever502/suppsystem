@@ -96,7 +96,7 @@ def test_configuration_error_formatter_is_operator_readable() -> None:
 
     assert message.startswith("Configuration error:\n")
     assert "DELIVERY_POLL_INTERVAL_SECONDS" in message
-    assert "/opt/suppsystem/.env" in message
+    assert "/opt/supportbot/.env" in message
     assert "Traceback" not in message
     assert "pydantic_core" not in message
     assert "errors.pydantic.dev" not in message

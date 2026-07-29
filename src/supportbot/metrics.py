@@ -32,6 +32,8 @@ class MetricsRegistry:
         key = (component, outcome)
         self._latency_count[key] += 1
         self._latency_sum[key] += duration_seconds
+        if outcome in {"http_5xx", "request_error"}:
+            self.event(component, outcome)
 
     async def render(self, database: Database, runtime_health: RuntimeHealth) -> str:
         now = datetime.now(UTC)
@@ -91,9 +93,10 @@ class MetricsRegistry:
             "# TYPE support_failed_jobs gauge",
             f'support_failed_jobs{{queue="delivery"}} {int(delivery_failed or 0)}',
             f'support_failed_jobs{{queue="notification"}} {int(notification_failed or 0)}',
-            "# TYPE support_job_attempts_total counter",
-            f'support_job_attempts_total{{queue="delivery"}} {int(delivery_attempts or 0)}',
-            f'support_job_attempts_total{{queue="notification"}} {int(notification_attempts or 0)}',
+            "# TYPE support_retained_job_attempts gauge",
+            f'support_retained_job_attempts{{queue="delivery"}} {int(delivery_attempts or 0)}',
+            f'support_retained_job_attempts{{queue="notification"}} '
+            f"{int(notification_attempts or 0)}",
             "# TYPE support_panel_unknown gauge",
             f"support_panel_unknown {int(panel_unknown or 0)}",
             "# TYPE support_events_total counter",

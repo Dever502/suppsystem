@@ -100,16 +100,8 @@ class RuntimeHealth:
             if component.progress_at is not None
         }
 
-    def has_fresh_progress(self, *, now: float | None = None) -> bool:
-        current_time = time.monotonic() if now is None else now
-        return any(
-            component.progress_at is not None
-            and (
-                component.progress_timeout_seconds is None
-                or current_time - component.progress_at <= component.progress_timeout_seconds
-            )
-            for component in self._components.values()
-        )
+    def is_ready(self, *, now: float | None = None) -> bool:
+        return self.snapshot(now=now).ready
 
     def _configured_component(self, name: str) -> _Component:
         try:

@@ -14,6 +14,7 @@ from sqlalchemy import func, select, text
 from supportbot.api import API_TICKET_CLOSED_TEXT, create_app
 from supportbot.config import Settings
 from supportbot.database import Database
+from supportbot.metrics import MetricsRegistry
 from supportbot.models import (
     DeliveryOutbox,
     Direction,
@@ -564,6 +565,25 @@ async def test_metrics_exposes_queue_and_runtime_metrics_without_pii(
     assert "support_heartbeat_age_seconds" in response.text
     assert "must not appear" not in response.text
     assert str(ticket.telegram_user_id) not in response.text
+
+
+async def test_metrics_use_retained_attempt_gauge_and_record_remnawave_failures(
+    api_context: tuple[Any, Database, TicketService, TicketView],
+) -> None:
+    _app, database, _ticket_service, _ticket = api_context
+    metrics = MetricsRegistry()
+    metrics.observe_request("remnawave", "http_5xx", 0.25)
+    metrics.observe_request("remnawave", "request_error", 0.5)
+    health = RuntimeHealth()
+    health.register("database")
+    health.ready("database")
+
+    rendered = await metrics.render(database, health)
+
+    assert "# TYPE support_retained_job_attempts gauge" in rendered
+    assert "support_job_attempts_total" not in rendered
+    assert 'support_events_total{component="remnawave",outcome="http_5xx"} 1' in rendered
+    assert 'support_events_total{component="remnawave",outcome="request_error"} 1' in rendered
 
 
 async def test_ready_reports_runtime_components(

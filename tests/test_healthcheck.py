@@ -90,6 +90,20 @@ def test_runtime_health_recovers_after_new_progress() -> None:
     assert health.snapshot(now=21).ready is True
 
 
+def test_runtime_readiness_requires_every_required_worker() -> None:
+    health = RuntimeHealth()
+    for component in ("telegram_ingress", "reconciliation", "delivery_worker"):
+        health.register(component, progress_timeout_seconds=45)
+        health.progress(component, now=100)
+
+    assert health.is_ready(now=145) is True
+
+    health.progress("delivery_worker", now=146)
+
+    assert health.is_ready(now=146) is False
+    assert health.snapshot(now=146).components["telegram_ingress"] is ComponentStatus.DEGRADED
+
+
 async def test_main_heartbeat_requires_runtime_progress(tmp_path: Path) -> None:
     progressing = False
     heartbeat = Heartbeat(

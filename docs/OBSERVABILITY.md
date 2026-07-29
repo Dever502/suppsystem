@@ -21,9 +21,10 @@ Start with these panels:
 | Oldest delivery age | `support_queue_oldest_age_seconds{queue="delivery"}` |
 | Oldest notification age | `support_queue_oldest_age_seconds{queue="notification"}` |
 | Failed jobs | `support_failed_jobs` |
+| Attempts in retained jobs | `support_retained_job_attempts` |
 | Worker heartbeat age | `support_heartbeat_age_seconds` |
 | Remnawave unknown outcomes | `support_panel_unknown` |
-| External failures by component | `increase(support_events_total{outcome=~"failed|retry|unknown|unexpected_response"}[15m])` |
+| External failures by component | `increase(support_events_total{outcome=~"failed|retry|unknown|unexpected_response|http_5xx|request_error"}[15m])` |
 | External request latency average | `rate(support_external_request_duration_seconds_sum[5m]) / rate(support_external_request_duration_seconds_count[5m])` |
 
 High age with low depth usually means a stuck job; high depth with low age means a traffic spike or

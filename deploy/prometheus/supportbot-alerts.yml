@@ -56,7 +56,7 @@ groups:
           description: "{{ $value }} Remnawave actions have unknown outcome. Do not repeat mutations before manual reconciliation."
 
       - alert: SupportbotExternalRequestFailures
-        expr: increase(support_events_total{outcome=~"failed|retry|unknown|unexpected_response"}[15m]) > 0
+        expr: increase(support_events_total{outcome=~"failed|retry|unknown|unexpected_response|http_5xx|request_error"}[15m]) > 0
         for: 5m
         labels:
           severity: warning

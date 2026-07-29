@@ -45,18 +45,24 @@ def test_ci_build_scan_sbom_and_evidence_share_one_immutable_image() -> None:
     ci, text = _ci()
     steps = ci["jobs"]["build_image"]["steps"]
     rendered_steps = "\n".join(str(step) for step in steps)
+    step_names = [step["name"] for step in steps]
+    build = next(step for step in steps if step["name"] == "Build candidate image")
 
-    assert any("docker/build-push-action@" in step.get("uses", "") for step in steps)
+    assert "docker/build-push-action@" in build["uses"]
+    assert build["with"]["load"] is True
+    assert build["with"]["push"] is False
+    assert step_names.index("Enforce HIGH and CRITICAL vulnerability gate") < step_names.index(
+        "Publish verified image"
+    )
     assert "ghcr.io/dever502/suppsystem" in text
     assert "IMAGE_REFERENCE=%s" in text
+    assert "supportbot-image.tar" in text
     assert "HIGH,CRITICAL" in rendered_steps
     assert "--ignore-unfixed" not in text
     assert "aquasec/trivy:0.70.0@sha256:" in text
     assert "anchore/syft:v1.44.0-debug@sha256:" in text
-    assert "SYFT_REGISTRY_AUTH_AUTHORITY: ghcr.io" in text
-    assert "SYFT_REGISTRY_AUTH_PASSWORD: ${{ secrets.GITHUB_TOKEN }}" in text
-    assert "--env SYFT_REGISTRY_AUTH_PASSWORD" in text
-    assert '"$IMAGE_REFERENCE" --from registry -o cyclonedx-json > sbom.cdx.json' in text
+    assert "docker-archive:/work/supportbot-image.tar" in text
+    assert "SYFT_REGISTRY_AUTH_PASSWORD" not in text
     assert "supportbot.migrations" in rendered_steps
     license_digest = sha256((ROOT / "LICENSE").read_bytes()).hexdigest()
     assert "/app/LICENSE" in text and license_digest in text
@@ -126,3 +132,25 @@ def test_public_documentation_is_curated() -> None:
     )
     for private_phrase in ("docs/RELEASE.md", "GitLab", "code freeze", "release gate", "15 июля"):
         assert private_phrase not in public_markdown
+
+
+def test_alerts_cover_recorded_remnawave_failure_outcomes() -> None:
+    alerts = yaml.safe_load(
+        (ROOT / "deploy/prometheus/supportbot-alerts.yml").read_text(encoding="utf-8")
+    )
+    rules = alerts["groups"][0]["rules"]
+    external_failures = next(
+        rule for rule in rules if rule["alert"] == "SupportbotExternalRequestFailures"
+    )
+
+    assert "http_5xx" in external_failures["expr"]
+    assert "request_error" in external_failures["expr"]
+
+
+def test_verification_enforces_coverage_threshold() -> None:
+    verify = (ROOT / "scripts/verify.sh").read_text(encoding="utf-8")
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert "pytest-cov" in pyproject
+    assert "--cov=supportbot" in verify
+    assert "--cov-fail-under=" in verify

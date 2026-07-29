@@ -76,6 +76,14 @@ def validate_api_settings(settings: Settings) -> None:
         raise RuntimeError("API_ADMIN_TOKEN is required when API_ENABLED=true")
 
 
+def validate_operator_access(settings: Settings) -> None:
+    if settings.admin_telegram_ids or settings.api_enabled:
+        return
+    raise RuntimeError(
+        "ADMIN_TELEGRAM_IDS must contain at least one administrator when API_ENABLED=false"
+    )
+
+
 async def validate_support_group(bot: Bot, support_group_id: int) -> None:
     try:
         chat = await bot.get_chat(support_group_id)
@@ -135,6 +143,7 @@ async def run() -> None:
     _ensure_sqlite_directory(settings.database_url)
     _ensure_sqlite_directory(settings.migration_database_url)
     validate_api_settings(settings)
+    validate_operator_access(settings)
     if settings.migrations_at_startup:
         await upgrade_database(settings.migration_database_url)
 
@@ -274,9 +283,7 @@ async def run() -> None:
         notification_worker_task = asyncio.create_task(
             notification_worker.run(), name="notification-webhook-worker"
         )
-    heartbeat = Heartbeat(
-        settings.data_dir / "heartbeat", progress_probe=runtime_health.has_fresh_progress
-    )
+    heartbeat = Heartbeat(settings.data_dir / "heartbeat", progress_probe=runtime_health.is_ready)
     ingress_worker_task = asyncio.create_task(ingress_worker.run(), name="telegram-ingress-worker")
     reconciliation_worker_task = asyncio.create_task(
         reconciliation_worker.run(), name="reconciliation-worker"
@@ -332,7 +339,7 @@ def format_configuration_error(error: ValidationError) -> str:
             message = f"{_settings_location(location[-1])}: {message}"
         lines.append(f"- {message}")
     lines.append("Fix the environment file and restart the service.")
-    lines.append("Production env file: /opt/suppsystem/.env")
+    lines.append("Production env file: /opt/supportbot/.env")
     return "\n".join(lines)
 
 

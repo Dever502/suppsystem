@@ -4,7 +4,7 @@ set -eu
 uv run --frozen ruff format --check .
 uv run --frozen ruff check .
 uv run --frozen mypy src
-uv run --frozen pytest
+uv run --frozen pytest --cov=supportbot --cov-report=term-missing --cov-fail-under=75
 uv run --frozen python scripts/check_migrations.py
 uv run --frozen python scripts/check_licenses.py
 uv run --frozen python scripts/check_publication.py

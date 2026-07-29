@@ -112,7 +112,7 @@ jobs:
             fi
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-      - name: Build and push image
+      - name: Build candidate image
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -122,29 +122,24 @@ jobs:
           context: .
           labels: |
             org.opencontainers.image.source=https://github.com/Dever502/suppsystem
-          provenance: true
-          push: true
+          load: true
+          provenance: false
+          push: false
           tags: ${{ steps.metadata.outputs.tags }}
-      - name: Record immutable image reference
-        id: image
-        shell: bash
+      - name: Export candidate for socketless scanners
         env:
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
           IMAGE_TAG: ${{ steps.metadata.outputs.image_tag }}
         run: |
           set -euo pipefail
-          image_reference="$IMAGE_NAME@$IMAGE_DIGEST"
-          printf 'IMAGE_DIGEST=%s\nIMAGE_REFERENCE=%s\nIMAGE_TAG=%s\n' \
-            "$IMAGE_DIGEST" "$image_reference" "$IMAGE_TAG" > image.env
-          echo "reference=$image_reference" >> "$GITHUB_OUTPUT"
-      - name: Smoke-test published image
+          docker image save --output supportbot-image.tar "$IMAGE_TAG"
+      - name: Smoke-test candidate image
         env:
-          IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
+          IMAGE_TAG: ${{ steps.metadata.outputs.image_tag }}
         run: |
           docker run --rm \
             --env MIGRATION_DATABASE_URL=sqlite+aiosqlite:////tmp/supportbot-smoke.db \
             --entrypoint sh \
-            "$IMAGE_REFERENCE" \
+            "$IMAGE_TAG" \
             -c 'set -eu
               cd /app
               test "$(python -c "import supportbot; print(supportbot.__version__)")" = "1.0.0"
@@ -154,28 +149,58 @@ jobs:
               python -m supportbot.migrations
               python -c "import sqlite3; connection = sqlite3.connect(\"/tmp/supportbot-smoke.db\"); assert connection.execute(\"SELECT version_num FROM alembic_version\").fetchone() == (\"0011_durable_ingress_reconciliation\",)"'
       - name: Create Trivy report
-        env:
-          IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
         run: |
           docker run --rm \
-            --volume "$HOME/.docker:/root/.docker:ro" \
             --volume "$PWD:/work" \
             --workdir /work \
             aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e \
-            image --format json --output trivy.json "$IMAGE_REFERENCE"
+            image --input supportbot-image.tar --format json --output trivy.json
       - name: Create CycloneDX SBOM
-        env:
-          IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
-          SYFT_REGISTRY_AUTH_AUTHORITY: ghcr.io
-          SYFT_REGISTRY_AUTH_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-          SYFT_REGISTRY_AUTH_USERNAME: ${{ github.actor }}
         run: |
           docker run --rm \
-            --env SYFT_REGISTRY_AUTH_AUTHORITY \
-            --env SYFT_REGISTRY_AUTH_PASSWORD \
-            --env SYFT_REGISTRY_AUTH_USERNAME \
+            --volume "$PWD:/work:ro" \
+            --workdir /work \
             anchore/syft:v1.44.0-debug@sha256:6dd8fb28e1b799e7cadaff6be2ec6d555757c4eeec0c0e48162f20b042ffa1ff \
-            "$IMAGE_REFERENCE" --from registry -o cyclonedx-json > sbom.cdx.json
+            "docker-archive:/work/supportbot-image.tar" -o cyclonedx-json > sbom.cdx.json
+      - name: Enforce HIGH and CRITICAL vulnerability gate
+        run: |
+          docker run --rm \
+            --volume "$PWD:/work:ro" \
+            --workdir /work \
+            aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e \
+            image --input supportbot-image.tar --exit-code 1 --severity HIGH,CRITICAL
+      - name: Publish verified image
+        id: publish
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ steps.metadata.outputs.image_tag }}
+          IMAGE_TAGS: ${{ steps.metadata.outputs.tags }}
+        run: |
+          set -euo pipefail
+          push_output="$(docker push "$IMAGE_TAG" 2>&1)"
+          printf '%s\n' "$push_output"
+          image_digest="$(printf '%s\n' "$push_output" \
+            | sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' \
+            | tail -n 1)"
+          test -n "$image_digest"
+          while IFS= read -r tag; do
+            if [ -n "$tag" ] && [ "$tag" != "$IMAGE_TAG" ]; then
+              docker push "$tag"
+            fi
+          done < <(printf '%s\n' "$IMAGE_TAGS")
+          echo "digest=$image_digest" >> "$GITHUB_OUTPUT"
+      - name: Record immutable image reference
+        id: image
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+          IMAGE_TAG: ${{ steps.metadata.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          image_reference="$IMAGE_NAME@$IMAGE_DIGEST"
+          printf 'IMAGE_DIGEST=%s\nIMAGE_REFERENCE=%s\nIMAGE_TAG=%s\n' \
+            "$IMAGE_DIGEST" "$image_reference" "$IMAGE_TAG" > image.env
+          echo "reference=$image_reference" >> "$GITHUB_OUTPUT"
       - name: Create release evidence
         run: |
           sha256sum sbom.cdx.json trivy.json > artifact-checksums.txt
@@ -184,20 +209,12 @@ jobs:
             sed -n 's/^IMAGE_TAG=/image_tag=/p; s/^IMAGE_REFERENCE=/image_reference=/p' image.env
             cat artifact-checksums.txt
           } > release-evidence.txt
-      - name: Enforce HIGH and CRITICAL vulnerability gate
-        env:
-          IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
-        run: |
-          docker run --rm \
-            --volume "$HOME/.docker:/root/.docker:ro" \
-            aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e \
-            image --exit-code 1 --severity HIGH,CRITICAL "$IMAGE_REFERENCE"
       - name: Attest published image
         if: github.event.repository.visibility == 'public'
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
           subject-name: ${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
           push-to-registry: true
       - name: Upload release evidence
         if: always()

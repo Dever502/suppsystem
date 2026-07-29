@@ -705,7 +705,7 @@ async def test_ticket_reopened_notice_uses_actor_specific_text() -> None:
     ]
 
 
-async def test_operator_reply_reopen_sends_operator_notice() -> None:
+async def test_operator_reply_reopen_sends_operator_notice_and_customer_card() -> None:
     ticket = SimpleNamespace(
         id="ticket-1",
         telegram_user_id=123,
@@ -740,9 +740,13 @@ async def test_operator_reply_reopen_sends_operator_notice() -> None:
             raise AssertionError(f"unexpected reply: {text}")
 
     notices: list[tuple[object, bool]] = []
+    cards: list[object] = []
 
     async def send_reopened_notice(ticket_arg: object, *, by_operator: bool) -> None:
         notices.append((ticket_arg, by_operator))
+
+    async def send_customer_card(ticket_arg: object) -> None:
+        cards.append(ticket_arg)
 
     adapter = object.__new__(TelegramSupportAdapter)
     adapter.authorization = AuthorizationService(
@@ -754,10 +758,66 @@ async def test_operator_reply_reopen_sends_operator_notice() -> None:
     )
     adapter.ticket_service = FakeTicketService()  # type: ignore[assignment]
     adapter._send_ticket_reopened_notice = send_reopened_notice  # type: ignore[method-assign]
+    adapter._send_reopened_ticket_customer_card = send_customer_card  # type: ignore[method-assign]
 
     await adapter.handle_group_message(FakeMessage())  # type: ignore[arg-type]
 
     assert notices == [(ticket, True)]
+    assert cards == [ticket]
+
+
+async def test_stop_builds_rating_keyboard_from_committed_close_cycle() -> None:
+    ticket = SimpleNamespace(
+        id="ticket-1",
+        telegram_user_id=123,
+        topic_id=777,
+        status=TicketStatus.OPEN,
+        close_cycle=41,
+    )
+    close_calls: list[dict[str, object]] = []
+
+    class FakeTicketService:
+        async def get_by_topic(self, topic_id: int) -> SimpleNamespace:
+            assert topic_id == 777
+            return ticket
+
+        async def close(self, **kwargs: object) -> bool:
+            close_calls.append(kwargs)
+            return True
+
+    class FakeMessage:
+        forum_topic_edited = None
+        from_user = SimpleNamespace(id=2, is_bot=False)
+        message_thread_id = 777
+        chat = SimpleNamespace(id=-100123)
+        message_id = 53
+        text = "/stop"
+        caption = None
+
+        def __init__(self) -> None:
+            self.replies: list[str] = []
+
+        async def reply(self, text: str) -> None:
+            self.replies.append(text)
+
+    adapter = object.__new__(TelegramSupportAdapter)
+    adapter.authorization = AuthorizationService(
+        Settings(
+            support_bot_token=SecretStr("test-token"),
+            support_group_id=-100123,
+            operator_telegram_ids={2},
+        )
+    )
+    adapter.ticket_service = FakeTicketService()  # type: ignore[assignment]
+    message = FakeMessage()
+
+    await adapter.handle_group_message(message)  # type: ignore[arg-type]
+
+    builder = close_calls[0]["notification_reply_markup_builder"]
+    assert callable(builder)
+    keyboard = builder(73)
+    assert keyboard["inline_keyboard"][0][4]["callback_data"] == "support_rating:ticket-1:73:5"
+    assert message.replies == ["✅ <b>Тикет закрыт</b>\n\nПользователь получит уведомление."]
 
 
 async def test_private_message_is_persisted_before_topic_provisioning() -> None:

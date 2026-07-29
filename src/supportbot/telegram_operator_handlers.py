@@ -242,6 +242,7 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
                 await message.reply("ℹ️ Тикет уже закрыт.")
                 return
             notify_user = command == "/stop"
+            rating_ticket_id = ticket.id
             changed = await self.ticket_service.close(
                 ticket_id=ticket.id,
                 operator_telegram_id=message.from_user.id,
@@ -250,9 +251,11 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
                 notification_target_chat_id=ticket.telegram_user_id if notify_user else None,
                 notification_idempotency_key=f"{command_key}:user-notification",
                 notification_parse_mode="HTML" if notify_user else None,
-                notification_reply_markup=(
-                    rating_keyboard(ticket.id, ticket.close_cycle + 1).model_dump(
-                        mode="json", exclude_none=True
+                notification_reply_markup_builder=(
+                    (
+                        lambda close_cycle: rating_keyboard(
+                            rating_ticket_id, close_cycle
+                        ).model_dump(mode="json", exclude_none=True)
                     )
                     if notify_user
                     else None
@@ -324,6 +327,7 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
             ticket = result.ticket
         if result.reopened:
             await self._send_ticket_reopened_notice(ticket, by_operator=True)
+            await self._send_reopened_ticket_customer_card(ticket)
         logger.info(
             "Queued operator reply for delivery" if queued else "Duplicate operator reply ignored",
             extra={

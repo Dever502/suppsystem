@@ -702,6 +702,50 @@ async def test_operator_close_notification_can_include_rating_keyboard(
     }
 
 
+async def test_close_notification_builder_uses_committed_close_cycle(
+    ticket_service: TicketService,
+) -> None:
+    ticket = await ticket_service.open_or_reopen(
+        telegram_user_id=1016, display_name="Rating Builder", username=None
+    )
+    await attach_claimed_topic(ticket_service, ticket.id, 789)
+    await ticket_service.close(
+        ticket_id=ticket.id,
+        operator_telegram_id=42,
+        idempotency_key="rating-builder-close-1",
+    )
+    await ticket_service.reopen(
+        ticket_id=ticket.id,
+        operator_telegram_id=42,
+        idempotency_key="rating-builder-reopen",
+    )
+    built_cycles: list[int] = []
+
+    def build_keyboard(close_cycle: int) -> dict[str, object]:
+        built_cycles.append(close_cycle)
+        return {
+            "inline_keyboard": [
+                [{"text": "⭐ 5", "callback_data": f"support_rating:{ticket.id}:{close_cycle}:5"}]
+            ]
+        }
+
+    await ticket_service.close(
+        ticket_id=ticket.id,
+        operator_telegram_id=42,
+        idempotency_key="rating-builder-close-2",
+        notification_text="Оцените поддержку.",
+        notification_target_chat_id=ticket.telegram_user_id,
+        notification_idempotency_key="rating-builder-notification-2",
+        notification_reply_markup_builder=build_keyboard,
+    )
+    jobs = await ticket_service.outbox.claim_due_deliveries()
+
+    assert built_cycles == [2]
+    assert jobs[0].payload["reply_markup"] == {
+        "inline_keyboard": [[{"text": "⭐ 5", "callback_data": f"support_rating:{ticket.id}:2:5"}]]
+    }
+
+
 async def test_rating_enqueue_targets_general_support_group(
     ticket_service: TicketService,
 ) -> None:
@@ -832,7 +876,65 @@ async def test_each_close_cycle_accepts_one_current_rating(
     assert [rating.rating_cycle for rating in ratings] == [1, 2]
 
 
-async def test_rating_and_reopen_use_one_serialized_ticket_state(
+async def test_each_unrated_close_cycle_remains_independently_rateable(
+    ticket_service: TicketService,
+) -> None:
+    ticket = await ticket_service.open_or_reopen(
+        telegram_user_id=1017, display_name="Independent Ratings", username=None
+    )
+    await attach_claimed_topic(ticket_service, ticket.id, 790)
+    await ticket_service.close(
+        ticket_id=ticket.id,
+        operator_telegram_id=42,
+        idempotency_key="independent-rating-close-1",
+    )
+    first_closed = await ticket_service.get_ticket(ticket.id)
+    await ticket_service.reopen(
+        ticket_id=ticket.id,
+        operator_telegram_id=42,
+        idempotency_key="independent-rating-reopen",
+    )
+    await ticket_service.close(
+        ticket_id=ticket.id,
+        operator_telegram_id=42,
+        idempotency_key="independent-rating-close-2",
+    )
+    second_closed = await ticket_service.get_ticket(ticket.id)
+
+    first = await ticket_service.enqueue_rating(
+        ticket_id=ticket.id,
+        source_chat_id=ticket.telegram_user_id,
+        score=4,
+        close_cycle=first_closed.close_cycle,
+        target_chat_id=-100123,
+        text="First cycle: 4/5",
+        idempotency_key="independent-rating-cycle-1",
+    )
+    second = await ticket_service.enqueue_rating(
+        ticket_id=ticket.id,
+        source_chat_id=ticket.telegram_user_id,
+        score=5,
+        close_cycle=second_closed.close_cycle,
+        target_chat_id=-100123,
+        text="Second cycle: 5/5",
+        idempotency_key="independent-rating-cycle-2",
+    )
+    duplicate_first = await ticket_service.enqueue_rating(
+        ticket_id=ticket.id,
+        source_chat_id=ticket.telegram_user_id,
+        score=3,
+        close_cycle=first_closed.close_cycle,
+        target_chat_id=-100123,
+        text="Duplicate first cycle",
+        idempotency_key="independent-rating-cycle-1-duplicate",
+    )
+
+    assert first is True
+    assert second is True
+    assert duplicate_first is False
+
+
+async def test_rating_remains_valid_during_reopen(
     ticket_service: TicketService,
 ) -> None:
     ticket = await ticket_service.open_or_reopen(
@@ -877,9 +979,10 @@ async def test_rating_and_reopen_use_one_serialized_ticket_state(
         )
 
     assert reopened is True
+    assert rating_accepted is True
     assert current.status is TicketStatus.OPEN
     assert current.closed_at is None
-    assert len(ratings) == int(rating_accepted)
+    assert len(ratings) == 1
 
 
 async def test_api_text_reply_uses_durable_outbox(ticket_service: TicketService) -> None:

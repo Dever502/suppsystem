@@ -41,6 +41,9 @@ class TelegramTopicManager:
     async def _refresh_reopened_ticket_context(self, ticket: TicketView) -> None:
         await self._sync_ticket_topic(ticket)
         await self._send_ticket_reopened_notice(ticket, by_operator=False)
+        await self._send_reopened_ticket_customer_card(ticket)
+
+    async def _send_reopened_ticket_customer_card(self, ticket: TicketView) -> None:
         try:
             await self._send_customer_card(ticket, event="ticket_reopened_customer_card_sent")
         except TelegramAPIError:

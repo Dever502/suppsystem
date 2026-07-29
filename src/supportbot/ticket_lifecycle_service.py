@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from typing import cast
 
 from sqlalchemy import case, select, update
@@ -50,6 +51,7 @@ class TicketLifecycleService(TicketTopicService):
         notification_target_chat_id: int | None = None,
         notification_idempotency_key: str | None = None,
         notification_reply_markup: dict[str, object] | None = None,
+        notification_reply_markup_builder: Callable[[int], dict[str, object]] | None = None,
         notification_parse_mode: str | None = None,
         api_idempotency: ApiIdempotencyCommand | None = None,
     ) -> bool:
@@ -59,6 +61,8 @@ class TicketLifecycleService(TicketTopicService):
         notification_chat_id = notification_target_chat_id
         if notification_text is not None and notification_chat_id is None:
             raise ValueError("notification_target_chat_id is required for close notification")
+        if notification_reply_markup is not None and notification_reply_markup_builder is not None:
+            raise ValueError("notification reply markup inputs are mutually exclusive")
 
         async with self.database.session() as session:
             replay = await load_api_replay(session, api_idempotency)
@@ -70,7 +74,7 @@ class TicketLifecycleService(TicketTopicService):
             if ticket is None:
                 raise TicketNotFoundError(ticket_id)
             transition_at = utcnow()
-            close_result = await session.execute(
+            close_cycle = await session.scalar(
                 update(Ticket)
                 .where(
                     Ticket.id == ticket_id,
@@ -84,8 +88,9 @@ class TicketLifecycleService(TicketTopicService):
                     topic_provisioning_started_at=None,
                 )
                 .values(close_cycle=Ticket.close_cycle + 1)
+                .returning(Ticket.close_cycle)
             )
-            if cast(CursorResult[object], close_result).rowcount != 1:
+            if close_cycle is None:
                 if api_idempotency is not None:
                     session.add(
                         OperatorAction(
@@ -124,6 +129,11 @@ class TicketLifecycleService(TicketTopicService):
                 assert notification_chat_id is not None
                 if not await self._is_blocked_in_session(session, notification_chat_id):
                     delivery_key = notification_idempotency_key or f"{action_key}:notification"
+                    reply_markup = (
+                        notification_reply_markup_builder(close_cycle)
+                        if notification_reply_markup_builder is not None
+                        else notification_reply_markup
+                    )
                     session.add(
                         TicketMessage(
                             ticket_id=ticket.id,
@@ -149,8 +159,8 @@ class TicketLifecycleService(TicketTopicService):
                                     else {}
                                 ),
                                 **(
-                                    {"reply_markup": notification_reply_markup}
-                                    if notification_reply_markup is not None
+                                    {"reply_markup": reply_markup}
+                                    if reply_markup is not None
                                     else {}
                                 ),
                             },
@@ -193,23 +203,25 @@ class TicketLifecycleService(TicketTopicService):
         async with self.database.session() as session:
             if await self._delivery_exists(session, idempotency_key):
                 return False
-            rating_guard = await session.execute(
-                update(Ticket)
-                .where(
-                    Ticket.id == ticket_id,
-                    Ticket.status == TicketStatus.CLOSED,
-                    Ticket.close_cycle == close_cycle,
-                )
-                .values(last_activity_at=utcnow())
+            ticket = await session.scalar(
+                select(Ticket).where(Ticket.id == ticket_id).with_for_update()
             )
-            if cast(CursorResult[object], rating_guard).rowcount != 1:
-                ticket_exists = await session.scalar(
-                    select(Ticket.id).where(Ticket.id == ticket_id)
-                )
+            if ticket is None:
+                raise TicketNotFoundError(ticket_id)
+            if close_cycle < 1 or close_cycle > ticket.close_cycle:
                 await session.rollback()
-                if ticket_exists is None:
-                    raise TicketNotFoundError(ticket_id)
                 return False
+            duplicate_rating = await session.scalar(
+                select(TicketMessage.id).where(
+                    TicketMessage.ticket_id == ticket_id,
+                    TicketMessage.channel == "rating",
+                    TicketMessage.rating_cycle == close_cycle,
+                )
+            )
+            if duplicate_rating is not None:
+                await session.rollback()
+                return False
+            ticket.last_activity_at = utcnow()
             session.add(
                 TicketMessage(
                     ticket_id=ticket_id,

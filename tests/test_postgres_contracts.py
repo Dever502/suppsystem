@@ -304,7 +304,7 @@ async def test_postgres_closed_topic_recovery_claim_is_exclusive(
         assert jobs[0].payload["target_thread_id"] == 51_022
 
 
-async def test_postgres_rating_and_reopen_share_one_serialized_state(
+async def test_postgres_rating_remains_valid_during_reopen(
     postgres_database_url: str,
 ) -> None:
     async with migrated_service(postgres_database_url) as (database, service):
@@ -364,10 +364,11 @@ async def test_postgres_rating_and_reopen_share_one_serialized_state(
         current = await service.get_ticket(ticket.id)
 
         assert reopened is True
+        assert rating_accepted is True
         assert current.status is TicketStatus.OPEN
         assert current.closed_at is None
-        assert rating_messages == int(rating_accepted)
-        assert rating_deliveries == int(rating_accepted)
+        assert rating_messages == 1
+        assert rating_deliveries == 1
         assert reopen_actions == 1
 
 

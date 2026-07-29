@@ -153,6 +153,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     delivery_poll_interval_seconds: float = 1.0
     telegram_min_request_interval_seconds: float = 0.05
+    telegram_inbound_rate_limit_per_minute: int = 30
+    telegram_inbound_rate_limit_per_hour: int = 150
     delivery_max_attempts: int = 8
     api_enabled: bool = False
     api_host: str = "0.0.0.0"
@@ -248,6 +250,13 @@ class Settings(BaseSettings):
             raise ValueError("DELIVERY_POLL_INTERVAL_SECONDS must be positive")
         if self.telegram_min_request_interval_seconds <= 0:
             raise ValueError("TELEGRAM_MIN_REQUEST_INTERVAL_SECONDS must be positive")
+        if self.telegram_inbound_rate_limit_per_minute <= 0:
+            raise ValueError("TELEGRAM_INBOUND_RATE_LIMIT_PER_MINUTE must be positive")
+        if self.telegram_inbound_rate_limit_per_hour < self.telegram_inbound_rate_limit_per_minute:
+            raise ValueError(
+                "TELEGRAM_INBOUND_RATE_LIMIT_PER_HOUR must be greater than or equal to "
+                "TELEGRAM_INBOUND_RATE_LIMIT_PER_MINUTE"
+            )
         if self.delivery_max_attempts <= 0:
             raise ValueError("DELIVERY_MAX_ATTEMPTS must be positive")
         if self.api_rate_limit_requests <= 0 or self.api_rate_limit_window_seconds <= 0:

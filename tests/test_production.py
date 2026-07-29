@@ -8,7 +8,7 @@ from supportbot.production import is_immutable_image_reference, validate_product
 
 
 def production_config() -> dict[str, object]:
-    image = "registry.example/supportbot:0123456789abcdef0123456789abcdef01234567"
+    image = "registry.example/supportbot@sha256:" + "a" * 64
     return {
         "services": {
             "supportbot": {
@@ -71,7 +71,6 @@ def production_config() -> dict[str, object]:
     "image",
     [
         "registry.example/supportbot@sha256:" + "a" * 64,
-        "registry.example/supportbot:" + "b" * 40,
     ],
 )
 def test_immutable_image_references_are_accepted(image: str) -> None:
@@ -80,7 +79,12 @@ def test_immutable_image_references_are_accepted(image: str) -> None:
 
 @pytest.mark.parametrize(
     "image",
-    ["supportbot:latest", "supportbot:1.0.0", "supportbot@sha256:not-a-digest"],
+    [
+        "supportbot:latest",
+        "supportbot:1.0.0",
+        "registry.example/supportbot:" + "b" * 40,
+        "supportbot@sha256:not-a-digest",
+    ],
 )
 def test_mutable_image_references_are_rejected(image: str) -> None:
     assert not is_immutable_image_reference(image)

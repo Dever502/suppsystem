@@ -73,6 +73,13 @@ def test_revoke_link_telegram_notification_is_enabled_by_default_and_can_be_disa
     )
 
 
+def test_inbound_telegram_rate_limits_are_gentle_by_default() -> None:
+    configured = settings()
+
+    assert configured.telegram_inbound_rate_limit_per_minute == 30
+    assert configured.telegram_inbound_rate_limit_per_hour == 150
+
+
 def test_admin_ids_accept_comma_separated_values() -> None:
     configured = settings(admin_telegram_ids="8387907909, 7")
 
@@ -228,6 +235,12 @@ def test_secret_validation_error_does_not_contain_the_secret() -> None:
     (
         {"delivery_poll_interval_seconds": 0},
         {"telegram_min_request_interval_seconds": 0},
+        {"telegram_inbound_rate_limit_per_minute": 0},
+        {"telegram_inbound_rate_limit_per_hour": 0},
+        {
+            "telegram_inbound_rate_limit_per_minute": 31,
+            "telegram_inbound_rate_limit_per_hour": 30,
+        },
         {"delivery_max_attempts": 0},
     ),
 )

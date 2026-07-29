@@ -6,14 +6,18 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import cast
 
-from sqlalchemy import case, or_, select, update
+from sqlalchemy import and_, case, delete, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from supportbot.database import Database
 from supportbot.models import (
+    DeliveryOutbox,
+    DeliveryStatus,
     InboundUpdate,
+    NotificationOutbox,
+    NotificationStatus,
     OperatorAction,
     ReconciliationOutbox,
     WorkStatus,
@@ -40,6 +44,23 @@ class ReconciliationJob:
     payload: dict[str, object]
     attempt_count: int
     claim_token: str
+
+
+@dataclass(frozen=True)
+class RetentionCleanupResult:
+    inbound_updates: int
+    delivery_outbox: int
+    notification_outbox: int
+    reconciliation_outbox: int
+
+    @property
+    def total(self) -> int:
+        return (
+            self.inbound_updates
+            + self.delivery_outbox
+            + self.notification_outbox
+            + self.reconciliation_outbox
+        )
 
 
 async def enqueue_topic_reconciliation(
@@ -204,6 +225,7 @@ class DurableWorkRepository:
                     InboundUpdate.claim_token == job.claim_token,
                 )
                 .values(
+                    payload={},
                     status=WorkStatus.DELIVERED,
                     processed_at=utcnow(),
                     claimed_at=None,
@@ -253,6 +275,67 @@ class DurableWorkRepository:
             )
             await session.commit()
             return cast(CursorResult[object], result).rowcount
+
+    async def purge_expired_terminal_work(
+        self,
+        *,
+        now: datetime | None = None,
+        inbound_retention: timedelta = timedelta(days=7),
+        outbox_retention: timedelta = timedelta(days=30),
+    ) -> RetentionCleanupResult:
+        if inbound_retention <= timedelta(0) or outbox_retention <= timedelta(0):
+            raise ValueError("retention periods must be positive")
+        current_time = utcnow() if now is None else now
+        inbound_before = current_time - inbound_retention
+        outbox_before = current_time - outbox_retention
+        async with self.database.session() as session:
+            inbound = await session.execute(
+                delete(InboundUpdate).where(
+                    InboundUpdate.status == WorkStatus.DELIVERED,
+                    InboundUpdate.processed_at < inbound_before,
+                )
+            )
+            deliveries = await session.execute(
+                delete(DeliveryOutbox).where(
+                    or_(
+                        and_(
+                            DeliveryOutbox.status == DeliveryStatus.DELIVERED,
+                            DeliveryOutbox.delivered_at < outbox_before,
+                        ),
+                        and_(
+                            DeliveryOutbox.status == DeliveryStatus.CANCELLED,
+                            DeliveryOutbox.created_at < outbox_before,
+                        ),
+                    )
+                )
+            )
+            notifications = await session.execute(
+                delete(NotificationOutbox).where(
+                    or_(
+                        and_(
+                            NotificationOutbox.status == NotificationStatus.DELIVERED,
+                            NotificationOutbox.delivered_at < outbox_before,
+                        ),
+                        and_(
+                            NotificationOutbox.status == NotificationStatus.CANCELLED,
+                            NotificationOutbox.created_at < outbox_before,
+                        ),
+                    )
+                )
+            )
+            reconciliations = await session.execute(
+                delete(ReconciliationOutbox).where(
+                    ReconciliationOutbox.status == WorkStatus.DELIVERED,
+                    ReconciliationOutbox.delivered_at < outbox_before,
+                )
+            )
+            await session.commit()
+        return RetentionCleanupResult(
+            inbound_updates=cast(CursorResult[object], inbound).rowcount,
+            delivery_outbox=cast(CursorResult[object], deliveries).rowcount,
+            notification_outbox=cast(CursorResult[object], notifications).rowcount,
+            reconciliation_outbox=cast(CursorResult[object], reconciliations).rowcount,
+        )
 
     async def claim_reconciliation(self) -> ReconciliationJob | None:
         now = utcnow()

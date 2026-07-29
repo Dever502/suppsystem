@@ -20,8 +20,9 @@ from supportbot.runtime_supervision import (
     stop_polling_task,
     supervise_ingress,
 )
-from supportbot.telegram_ingress import DurableTelegramIngressMiddleware
+from supportbot.telegram_ingress import DurableTelegramIngressMiddleware, TelegramIngressWorker
 from supportbot.telegram_lifecycle import create_polling_task
+from supportbot.telegram_limits import TelegramInboundRateLimiter, TelegramRateLimiter
 
 
 def _settings() -> Settings:
@@ -236,6 +237,9 @@ async def test_durable_ingress_commits_without_running_handler_then_replays() ->
     middleware = DurableTelegramIngressMiddleware(
         repository,
         wake,  # type: ignore[arg-type]
+        bot=AsyncMock(),
+        inbound_limiter=TelegramInboundRateLimiter(),
+        outbound_limiter=TelegramRateLimiter(0.001),
     )
     update = Update.model_validate({"update_id": 501})
     handled: list[int] = []
@@ -256,3 +260,26 @@ async def test_durable_ingress_commits_without_running_handler_then_replays() ->
     )
     assert result == "handled"
     assert handled == [501]
+
+
+async def test_retention_cleanup_failure_does_not_stop_ingress(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository = AsyncMock()
+    repository.purge_expired_terminal_work.side_effect = RuntimeError("cleanup unavailable")
+    worker = TelegramIngressWorker(
+        bot=AsyncMock(),
+        dispatcher=Dispatcher(),
+        repository=repository,
+        cleanup_interval_seconds=3600,
+    )
+
+    with caplog.at_level(logging.ERROR):
+        await worker._purge_expired_if_due()
+
+    repository.purge_expired_terminal_work.assert_awaited_once()
+    assert worker._next_cleanup_at > 0
+    assert any(
+        getattr(record, "event", None) == "durable_work_retention_cleanup_failed"
+        for record in caplog.records
+    )

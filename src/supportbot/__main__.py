@@ -33,7 +33,7 @@ from supportbot.services import TicketService
 from supportbot.telegram_adapter import TelegramSupportAdapter
 from supportbot.telegram_ingress import DurableTelegramIngressMiddleware, TelegramIngressWorker
 from supportbot.telegram_lifecycle import create_polling_task
-from supportbot.telegram_limits import TelegramRateLimiter
+from supportbot.telegram_limits import TelegramInboundRateLimiter, TelegramRateLimiter
 from supportbot.trace import TraceMiddleware
 
 logger = logging.getLogger(__name__)
@@ -210,7 +210,16 @@ async def run() -> None:
     )
     dispatcher.update.outer_middleware(TraceMiddleware())
     dispatcher.update.outer_middleware(
-        DurableTelegramIngressMiddleware(durable_work, ingress_worker.wake)
+        DurableTelegramIngressMiddleware(
+            durable_work,
+            ingress_worker.wake,
+            bot=bot,
+            inbound_limiter=TelegramInboundRateLimiter(
+                per_minute=settings.telegram_inbound_rate_limit_per_minute,
+                per_hour=settings.telegram_inbound_rate_limit_per_hour,
+            ),
+            outbound_limiter=limiter,
+        )
     )
     adapter = TelegramSupportAdapter(
         bot=bot,

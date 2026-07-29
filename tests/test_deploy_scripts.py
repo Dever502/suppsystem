@@ -4,11 +4,17 @@ import os
 import subprocess
 from pathlib import Path
 
-BASELINE_IMAGE = "registry.example/supportbot:" + "a" * 40
+BASELINE_IMAGE = "registry.example/supportbot@sha256:" + "a" * 64
 CANDIDATE_IMAGE = "registry.example/supportbot:" + "b" * 40
+CANDIDATE_DIGEST = "registry.example/supportbot@sha256:" + "b" * 64
 
 
-def deploy_environment(tmp_path: Path, *, fail_up: bool = False) -> tuple[dict[str, str], Path]:
+def deploy_environment(
+    tmp_path: Path,
+    *,
+    fail_up: bool = False,
+    resolved_image: str = CANDIDATE_DIGEST,
+) -> tuple[dict[str, str], Path]:
     deploy_dir = tmp_path / "deploy"
     deploy_dir.mkdir()
     (deploy_dir / ".env").write_text("SUPPORT_BOT_TOKEN=test\n", encoding="utf-8")
@@ -23,6 +29,8 @@ def deploy_environment(tmp_path: Path, *, fail_up: bool = False) -> tuple[dict[s
     docker.write_text(
         "#!/bin/sh\n"
         'printf \'%s\\n\' "$*" >> "$FAKE_DOCKER_LOG"\n'
+        'if [ "$1" = image ] && [ "$2" = inspect ]; then '
+        "printf '%s\\n' \"$FAKE_RESOLVED_IMAGE\"; exit 0; fi\n"
         'case "$*" in\n'
         "  *' config --format json'*) printf '{\"services\":{}}\\n'; exit 0 ;;\n"
         "  *' up --detach --wait'*) "
@@ -37,6 +45,7 @@ def deploy_environment(tmp_path: Path, *, fail_up: bool = False) -> tuple[dict[s
         **os.environ,
         "PATH": f"{binary_dir}:{os.environ['PATH']}",
         "FAKE_DOCKER_LOG": str(log_path),
+        "FAKE_RESOLVED_IMAGE": resolved_image,
         "DEPLOY_DIR": str(deploy_dir),
         **({"FAKE_UP_FAIL": "yes"} if fail_up else {}),
     }
@@ -62,7 +71,7 @@ def test_deploy_records_current_and_rollback_images_after_health(tmp_path: Path)
     log = (tmp_path / "docker.log").read_text(encoding="utf-8")
 
     assert result.returncode == 0
-    assert f"APP_IMAGE={CANDIDATE_IMAGE}" in (deploy_dir / "deployment.env").read_text()
+    assert f"APP_IMAGE={CANDIDATE_DIGEST}" in (deploy_dir / "deployment.env").read_text()
     assert f"APP_IMAGE={BASELINE_IMAGE}" in (deploy_dir / "rollback.env").read_text()
     assert "compose.production.sqlite.yaml" not in log
     assert "compose.production.postgres.yaml" in log
@@ -78,7 +87,7 @@ def test_failed_deploy_does_not_replace_last_healthy_state(tmp_path: Path) -> No
     assert result.returncode != 0
     state = (deploy_dir / "deployment.env").read_text(encoding="utf-8")
     assert f"APP_IMAGE={BASELINE_IMAGE}" in state
-    assert CANDIDATE_IMAGE not in state
+    assert CANDIDATE_DIGEST not in state
 
 
 def test_rollback_swaps_current_and_previous_healthy_images(tmp_path: Path) -> None:
@@ -98,7 +107,7 @@ def test_rollback_swaps_current_and_previous_healthy_images(tmp_path: Path) -> N
 
     assert rolled_back.returncode == 0
     assert f"APP_IMAGE={BASELINE_IMAGE}" in (deploy_dir / "deployment.env").read_text()
-    assert f"APP_IMAGE={CANDIDATE_IMAGE}" in (deploy_dir / "rollback.env").read_text()
+    assert f"APP_IMAGE={CANDIDATE_DIGEST}" in (deploy_dir / "rollback.env").read_text()
 
 
 def test_deploy_refuses_an_existing_operation_lock_without_removing_it(tmp_path: Path) -> None:
@@ -112,3 +121,18 @@ def test_deploy_refuses_an_existing_operation_lock_without_removing_it(tmp_path:
     assert result.returncode != 0
     assert lock.is_dir()
     assert "Another deployment operation is active" in result.stderr
+
+
+def test_deploy_refuses_reference_without_registry_digest(tmp_path: Path) -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    environment, deploy_dir = deploy_environment(
+        tmp_path,
+        resolved_image="registry.example/supportbot:mutable",
+    )
+
+    result = run_deploy(project_root, environment)
+
+    assert result.returncode != 0
+    assert "did not resolve to an immutable digest" in result.stderr
+    assert (deploy_dir / "deployment.env").read_text() == f"APP_IMAGE={BASELINE_IMAGE}\n"
+    assert not (deploy_dir / "rollback.env").exists()

@@ -9,11 +9,10 @@ from typing import Any
 from sqlalchemy import make_url
 
 IMMUTABLE_DIGEST_PATTERN = re.compile(r"@sha256:[0-9a-f]{64}$")
-IMMUTABLE_TAG_PATTERN = re.compile(r":[0-9a-f]{40,64}$")
 
 
 def is_immutable_image_reference(image: str) -> bool:
-    return bool(IMMUTABLE_DIGEST_PATTERN.search(image) or IMMUTABLE_TAG_PATTERN.search(image))
+    return bool(IMMUTABLE_DIGEST_PATTERN.search(image))
 
 
 def _mapping(value: object, *, name: str) -> Mapping[str, Any]:
@@ -79,7 +78,7 @@ def validate_production_compose(config: Mapping[str, Any]) -> None:
     if any(service.get("build") is not None for service in (supportbot, provision, migrate)):
         raise ValueError("Production services must use published images, not local builds")
     if not isinstance(supportbot_image, str) or not is_immutable_image_reference(supportbot_image):
-        raise ValueError("Production supportbot image must use an immutable SHA tag or digest")
+        raise ValueError("Production supportbot image must use an immutable digest")
     if provision_image != supportbot_image or migrate_image != supportbot_image:
         raise ValueError("supportbot and PostgreSQL one-shot services must use the same image")
 

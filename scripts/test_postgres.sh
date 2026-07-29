@@ -59,5 +59,6 @@ unset DATABASE_URL
 uv run --frozen pytest -m postgres \
     tests/test_postgres_migrations.py \
     tests/test_postgres_contracts.py \
+    tests/test_retention.py \
     tests/test_postgres_roles.py \
     "$@"

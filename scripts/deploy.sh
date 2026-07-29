@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-    echo "Usage: $0 preflight | deploy IMMUTABLE_IMAGE | rollback" >&2
+    echo "Usage: $0 preflight | deploy IMAGE_REFERENCE | rollback" >&2
     exit 2
 }
 
@@ -111,16 +111,26 @@ case "$1" in
         ;;
     deploy)
         [ "$#" -eq 2 ] || usage
+        requested_image=$2
+        docker pull "$requested_image"
+        resolved_image=$(docker image inspect --format '{{index .RepoDigests 0}}' "$requested_image")
+        case "$resolved_image" in
+            *@sha256:*) ;;
+            *)
+                echo "Registry image did not resolve to an immutable digest: $requested_image" >&2
+                exit 1
+                ;;
+        esac
         candidate=$(mktemp "${deploy_dir}/deployment.XXXXXX")
         temporary_state=$candidate
-        write_state "$candidate" "$2"
+        write_state "$candidate" "$resolved_image"
         if [ -s "$state_file" ]; then
             cp -p "$state_file" "$rollback_file"
         fi
         activate "$candidate"
         mv "$candidate" "$state_file"
         temporary_state=
-        echo "Deployment completed with immutable image $2"
+        echo "Deployment completed with immutable image $resolved_image"
         ;;
     rollback)
         [ "$#" -eq 1 ] || usage

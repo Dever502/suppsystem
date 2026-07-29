@@ -1,35 +1,26 @@
 # Эксплуатация
 
-Установка, настройка, обновление и восстановление. Архитектура описана в
-[техническом документе](TECHNICAL.md).
+Краткое руководство по установке, обновлению и восстановлению. Архитектура описана в
+[TECHNICAL.md](TECHNICAL.md), наблюдаемость — в [OBSERVABILITY.md](OBSERVABILITY.md).
 
-## Требования
+## Требования и Telegram
 
-- Linux-сервер с Docker Engine и Docker Compose v2;
-- Telegram-бот;
-- закрытая Telegram supergroup с включёнными Topics;
-- Telegram ID администраторов;
-- HTTPS reverse proxy, если operator API доступен извне.
+- Linux, Docker Engine и Docker Compose v2;
+- Telegram-бот и закрытая supergroup с включёнными Topics;
+- числовые Telegram ID администраторов;
+- HTTPS reverse proxy, если Operator API доступен извне.
 
-Для разработки нужны Python 3.12+ и `uv`.
+Добавьте бота администратором Forum-группы с правом управления темами. При старте preflight
+проверяет токен, тип группы, Topics и права бота; `SUPPORT_GROUP_ID` supergroup обычно начинается
+с `-100`.
 
-## Подготовка Telegram
+## Быстрый запуск
 
-1. Создайте бота через `@BotFather`.
-2. Создайте приватную supergroup и включите Topics.
-3. Добавьте бота администратором с правом управления темами.
-4. Определите числовой ID группы и Telegram ID администраторов.
-
-`SUPPORT_GROUP_ID` у supergroup обычно начинается с `-100`. При старте приложение проверяет
-тип группы, режим форума и права бота. Ошибка preflight останавливает запуск.
-
-## Запуск с SQLite
+Скопируйте конфигурацию и заполните обязательные значения:
 
 ```bash
 cp .env.example .env
 ```
-
-Минимальная конфигурация:
 
 ```dotenv
 SUPPORT_BOT_TOKEN=replace-with-bot-token
@@ -38,63 +29,62 @@ ADMIN_TELEGRAM_IDS=replace-with-admin-id
 DATA_DIR=./data
 ```
 
+### SQLite
+
 ```bash
 ./scripts/start.sh sqlite
 ```
 
-Скрипт скачивает release image, разрешает tag в immutable digest, проверяет Compose и запускает
-сервисы через `up --detach --wait`. Другой registry image можно передать вторым аргументом.
+SQLite и heartbeat хранятся в volume `support_data`. Удаление контейнера данные не удаляет;
+удаление volume — удаляет.
 
-SQLite и heartbeat хранятся в volume `support_data` по пути `DATA_DIR`. Удаление контейнера
-сохраняет данные, удаление volume — нет.
+### PostgreSQL
 
-## Запуск с PostgreSQL
+Добавьте три разных URL-safe пароля длиной не менее 16 символов:
 
 ```dotenv
 POSTGRES_DB=supportbot
 POSTGRES_ADMIN_USER=postgres
-POSTGRES_ADMIN_PASSWORD=первый-url-safe-случайный-пароль
+POSTGRES_ADMIN_PASSWORD=replace-with-random-password-1
 POSTGRES_MIGRATION_USER=supportbot_migrator
-POSTGRES_MIGRATION_PASSWORD=второй-url-safe-случайный-пароль
+POSTGRES_MIGRATION_PASSWORD=replace-with-random-password-2
 POSTGRES_RUNTIME_USER=supportbot_runtime
-POSTGRES_RUNTIME_PASSWORD=третий-url-safe-случайный-пароль
+POSTGRES_RUNTIME_PASSWORD=replace-with-random-password-3
 ```
 
 ```bash
 ./scripts/start.sh postgres
 ```
 
-Используйте три разных значения длиной не менее 16 символов, например из `openssl rand -hex 24`.
-`postgres-provision` выдаёт минимальные полномочия, затем `postgres-migrate` применяет Alembic;
-только после этого запускается приложение без migration credential. Поддерживается один экземпляр.
+`postgres-provision` создаёт least-privilege роли, `postgres-migrate` применяет Alembic, затем
+запускается приложение без migration credential. Поддерживается один экземпляр приложения.
 
-Для старого volume с `POSTGRES_USER=supportbot` задайте `POSTGRES_ADMIN_USER=supportbot` и прежний
-пароль в `POSTGRES_ADMIN_PASSWORD`. После перехода приложение эту legacy-роль не использует.
+Для старого volume с `POSTGRES_USER=supportbot` используйте прежние имя и пароль в
+`POSTGRES_ADMIN_USER` и `POSTGRES_ADMIN_PASSWORD`.
+
+`start.sh` скачивает release image, закрепляет его digest, проверяет Compose и ждёт healthcheck.
+Другой image можно передать вторым аргументом.
 
 ## Конфигурация
 
-### Telegram и база
+Полный шаблон находится в [`.env.example`](../.env.example). Основные переменные:
 
 | Переменная | По умолчанию | Назначение |
 | --- | --- | --- |
 | `SUPPORT_BOT_TOKEN` | обязательна | токен Telegram-бота |
 | `SUPPORT_GROUP_ID` | обязательна | ID закрытой Forum-группы |
-| `ADMIN_TELEGRAM_IDS` | пусто | числовые ID администраторов через запятую; доступ ко всем командам |
-| `DATA_DIR` | `./data` | каталог runtime-данных: SQLite и heartbeat-файлы |
-| `DATABASE_URL` | SQLite в `DATA_DIR/support.db` | optional SQLAlchemy async URL override |
-| `MIGRATION_DATABASE_URL` | значение `DATABASE_URL` | отдельный migration target; production Compose задаёт migration role |
-| `MIGRATIONS_AT_STARTUP` | `true` | production PostgreSQL Compose ставит `false` и использует one-shot migration service |
+| `ADMIN_TELEGRAM_IDS` | пусто | ID администраторов через запятую; доступ ко всем командам |
+| `DATA_DIR` | `./data` | SQLite и heartbeat-файлы |
+| `DATABASE_URL` | SQLite в `DATA_DIR` | async SQLAlchemy URL |
+| `MIGRATION_DATABASE_URL` | `DATABASE_URL` | отдельный URL для миграций |
+| `MIGRATIONS_AT_STARTUP` | `true` | PostgreSQL Compose меняет на `false` |
 | `LOG_LEVEL` | `INFO` | уровень логирования |
+| `TELEGRAM_INBOUND_RATE_LIMIT_PER_MINUTE` | `30` | burst-лимит личных сообщений |
+| `TELEGRAM_INBOUND_RATE_LIMIT_PER_HOUR` | `150` | длительный лимит на пользователя |
 
-### Доставка
-
-| Переменная | По умолчанию | Назначение |
-| --- | --- | --- |
-| `DELIVERY_POLL_INTERVAL_SECONDS` | `1` | интервал чтения очереди |
-| `DELIVERY_MAX_ATTEMPTS` | `8` | предел попыток доставки |
-| `TELEGRAM_MIN_REQUEST_INTERVAL_SECONDS` | `0.05` | интервал Telegram-запросов |
-
-Не уменьшайте интервалы без измерений: это повышает риск rate limit и конкуренции SQLite.
+Лимит действует только на личные сообщения клиентов, не сокращает текст и сбрасывается при рестарте.
+Интервалы доставки и предел повторов уже имеют безопасные значения. Не уменьшайте их без
+измерений: это повышает риск Telegram rate limit и конкуренции SQLite.
 
 ### Operator API
 
@@ -102,147 +92,84 @@ POSTGRES_RUNTIME_PASSWORD=третий-url-safe-случайный-пароль
 | --- | --- | --- |
 | `API_ENABLED` | `false` | включает API |
 | `API_HOST` | `0.0.0.0` | bind внутри контейнера |
-| `API_PUBLISH_HOST` | `127.0.0.1` | адрес публикации Docker-порта |
+| `API_PUBLISH_HOST` | `127.0.0.1` | публикация Docker-порта на host |
 | `API_PORT` | `8080` | порт |
-| `API_ADMIN_TOKEN` | пусто | токен заголовка `X-API-Token`, минимум 32 символа |
-| `API_UNSAFE_DISABLE_AUTH` | `false` | отключает auth только при loopback bind |
-| `API_OPERATOR_TELEGRAM_ID` | `0` | технический actor ID аудита API |
-| `API_RATE_LIMIT_REQUESTS` | `120` | запросов на IP за окно |
-| `API_RATE_LIMIT_WINDOW_SECONDS` | `60` | окно rate limit |
-| `API_AUTH_FAILURE_LIMIT` | `10` | неудачных авторизаций на IP |
-| `API_AUTH_FAILURE_WINDOW_SECONDS` | `60` | окно защиты авторизации |
-| `API_TRUSTED_PROXY_IPS` | пусто | доверенные proxy IP/CIDR для `X-Forwarded-For` и `X-Real-IP` |
+| `API_ADMIN_TOKEN` | пусто | `X-API-Token`, минимум 32 символа |
+| `API_TRUSTED_PROXY_IPS` | пусто | доверенные proxy IP/CIDR |
 
-```dotenv
-API_ENABLED=true
-API_PUBLISH_HOST=127.0.0.1
-API_PORT=8080
-API_ADMIN_TOKEN=случайный-секрет-длиной-не-менее-32-символов
-# Если API стоит за reverse proxy, укажите IP/CIDR proxy для корректного rate limit.
-# API_TRUSTED_PROXY_IPS=127.0.0.1
-```
+Оставляйте публикацию на loopback и используйте HTTPS reverse proxy. Каждая мутация требует
+`X-Idempotency-Key`: точный повтор возвращает сохранённый ответ, другой payload с тем же ключом —
+`409 Conflict`. Rate limit и защита токена process-local и сбрасываются при рестарте.
 
-Не публикуйте порт напрямую. Оставьте loopback и используйте HTTPS reverse proxy. Клиент передаёт
-`X-API-Token: <token>`; Swagger UI доступен на `/docs`.
+Пример reverse proxy: [`deploy/nginx/supportbot-api.conf.example`](../deploy/nginx/supportbot-api.conf.example).
 
-Rate limit и защита токена хранятся в памяти и сбрасываются при рестарте. Статический токен даёт
-полный административный доступ без scopes и срока действия; для rotation замените
-`API_ADMIN_TOKEN` и перезапустите приложение.
+### Remnawave и webhook
 
-Каждая мутация требует `X-Idempotency-Key`. Точный повтор возвращает сохранённый ответ; другой
-payload с тем же ключом получает `409 Conflict`. Используйте новый случайный ключ для новой
-команды и прежний — только для её retry.
-
-Пример TLS proxy: [`deploy/nginx/supportbot-api.conf.example`](../deploy/nginx/supportbot-api.conf.example).
-Замените домен и пути сертификатов, сохранив приложение на loopback. Forwarded headers принимаются
-только от `API_TRUSTED_PROXY_IPS`; некорректная цепочка игнорируется.
-
-Uvicorn и Telegram polling входят в один failure domain: сбой API завершает процесс для внешнего
-перезапуска. При штатной остановке ingress закрывается, workers дренируются, затем закрываются
-sessions.
-
-### Remnawave
-
-Поддерживается контракт Remnawave 2.8.x. Интеграция опциональна и выключена по умолчанию.
+Поддерживается Remnawave 2.8.x. Обе интеграции опциональны.
 
 | Переменная | По умолчанию | Назначение |
 | --- | --- | --- |
-| `REMNAWAVE_ENABLED` | `false` | включает интеграцию |
+| `REMNAWAVE_ENABLED` | `false` | включает Remnawave |
 | `REMNAWAVE_BASE_URL` | пусто | HTTPS origin панели без `/api` |
-| `REMNAWAVE_API_TOKEN` | пусто | token, минимум 32 символа |
-| `REMNAWAVE_TIMEOUT_SECONDS` | `5` | HTTP timeout |
-| `REMNAWAVE_RECONCILE_DELAY_SECONDS` | `10` | задержка перед сверкой результата |
-| `REMNAWAVE_REVOKE_LINK_TELEGRAM_NOTIFICATION` | `true` | дополнительно отправлять новую ссылку клиенту в Telegram |
-
-`/revokelink` всегда создаёт webhook-событие. Этот флаг управляет только прямым сообщением
-клиенту; отправка события требует `NOTIFICATION_WEBHOOK_ENABLED=true`.
-
-Включение требует URL и token. Не задавайте reconcile delay равным нулю вне тестов. При
-`unknown outcome` не повторяйте команду: durable worker сверит состояние без повторной мутации.
-Если результат останется неоднозначным, действие сохранится как `inconclusive` и потребует
-явного решения администратора.
-
-### Notification webhook
-
-Интеграция опциональна и выключена по умолчанию. Доставка имеет семантику at-least-once.
-
-| Переменная | По умолчанию | Назначение |
-| --- | --- | --- |
-| `NOTIFICATION_WEBHOOK_ENABLED` | `false` | включает отправку событий |
+| `REMNAWAVE_API_TOKEN` | пусто | API token, минимум 32 символа |
+| `REMNAWAVE_RECONCILE_DELAY_SECONDS` | `10` | задержка перед сверкой timeout |
+| `REMNAWAVE_REVOKE_LINK_TELEGRAM_NOTIFICATION` | `true` | отправлять новую ссылку клиенту |
+| `NOTIFICATION_WEBHOOK_ENABLED` | `false` | включает webhook-доставку |
 | `NOTIFICATION_WEBHOOK_URL` | пусто | HTTPS endpoint |
 | `NOTIFICATION_WEBHOOK_SECRET` | пусто | HMAC secret, минимум 32 символа |
-| `NOTIFICATION_WEBHOOK_TIMEOUT_SECONDS` | `5` | HTTP timeout |
-| `NOTIFICATION_WEBHOOK_MAX_ATTEMPTS` | `8` | предел повторов |
-| `NOTIFICATION_WEBHOOK_POLL_INTERVAL_SECONDS` | `1` | интервал чтения очереди |
 
-Внешние URL требуют HTTPS; HTTP разрешён только для loopback. URL с credentials или fragments
-запрещены. Получатель проверяет HMAC-SHA256 и дедуплицирует эффект по `event_id`.
+`/revokelink` всегда создаёт webhook-событие; флаг управляет только сообщением в Telegram.
+Фактическая webhook-доставка требует `NOTIFICATION_WEBHOOK_ENABLED=true`. Получатель проверяет
+HMAC-SHA256 и дедуплицирует эффект по `event_id`.
 
 ## Команды администраторов
 
-Команды выполняются внутри связанной Forum-темы.
+Команды выполняются в связанной Forum-теме. Неизвестные команды клиенту не пересылаются.
 
-| Команда | Доступ | Действие |
-| --- | --- | --- |
-| `/info` | admin | локальная информация о тикете |
-| `/subinfo` | admin | свежие данные подписки Remnawave |
-| `/notes` | admin | последние внутренние заметки |
-| `/note текст` | admin | внутренняя заметка |
-| `/stop` | admin | закрыть и уведомить клиента |
-| `/hidestop` | admin | закрыть без уведомления |
-| `/gift N` | admin | продлить подписку на 1–9999 дней |
-| `/resetkey` | admin | заменить protocol credentials |
-| `/revokelink` | admin | заменить subscription URL и уведомить клиента |
-| `/resetdevices` | admin | удалить HWID-устройства |
-| `/resolvepanel UUID applied\|not_applied` | admin | разрешить проверенный `inconclusive` |
-| `/block` | admin | заблокировать клиента |
-| `/unblock` | admin | снять блокировку |
-| `/closeall` | admin | закрыть все открытые тикеты |
-| `/synctopics` | admin | синхронизировать Forum-темы |
+| Команда | Действие |
+| --- | --- |
+| `/info` | локальная информация о тикете |
+| `/subinfo` | свежие данные подписки Remnawave |
+| `/notes` | последние внутренние заметки |
+| `/note текст` | добавить заметку |
+| `/stop` | закрыть тикет и уведомить клиента |
+| `/hidestop` | закрыть без уведомления |
+| `/gift N` | продлить подписку на 1–9999 дней и уведомить клиента |
+| `/resetkey` | заменить protocol credentials |
+| `/revokelink` | заменить subscription URL и уведомить по настройкам |
+| `/resetdevices` | удалить HWID-устройства |
+| `/resolvepanel UUID applied\|not_applied` | разрешить проверенный `inconclusive` |
+| `/block`, `/unblock` | изменить блокировку клиента |
+| `/closeall` | закрыть все открытые тикеты |
+| `/synctopics` | синхронизировать Forum-темы |
 
-Ответ в теме уходит клиенту и при необходимости открывает тикет снова. Неизвестные команды не
-пересылаются.
+Обычный ответ в теме отправляется клиенту и при необходимости заново открывает тикет.
 
-## Production layout
+## Production
 
-Рекомендуемый single-host layout:
+Рекомендуемая схема: конфигурация в `/opt/supportbot`, PostgreSQL и heartbeat в Docker volumes,
+Operator API на loopback. `.env` хранит секреты с правами `0600`; `deployment.env` и
+`rollback.env` содержат текущий и предыдущий immutable image.
 
-```text
-/opt/supportbot/.env            # Compose/runtime configuration and secrets, mode 0600
-/opt/supportbot/deployment.env  # current immutable APP_IMAGE, managed by deploy.sh
-/opt/supportbot/rollback.env    # previous healthy immutable APP_IMAGE
-Repository checkout                 # versioned Compose manifests and operation scripts
-Docker volume                       # suppsystem_postgres_data with PostgreSQL data
-Docker volume                       # suppsystem_support_data with heartbeat files
-```
+### Deploy и rollback
 
-Контейнер непривилегированный, с read-only root filesystem и volume только для runtime data.
-PostgreSQL хранится в `suppsystem_postgres_data`, heartbeat — в `support_data`. Bootstrap password
-не передаётся приложению. Operator API оставляйте на `API_PUBLISH_HOST=127.0.0.1` и публикуйте
-через HTTPS reverse proxy.
-
-Deploy проверяет итоговый PostgreSQL Compose и immutable image. Текущий и предыдущий успешные
-image сохраняются в `deployment.env` и `rollback.env`.
-
-Первый и последующие deploy:
+Значения `registry.example/...` ниже — placeholders. Deploy принимает tag или digest,
+но сохраняет и запускает только фактически полученный RepoDigest.
 
 ```bash
 DEPLOY_DIR=/opt/supportbot \
-  sh scripts/deploy.sh deploy registry.example/supportbot:<40-символьный-commit-sha>
+  sh scripts/deploy.sh deploy registry.example/supportbot:v1.0.0
 DEPLOY_DIR=/opt/supportbot sh scripts/production-compose.sh ps
-curl -H "X-API-Token: $API_ADMIN_TOKEN" http://127.0.0.1:8080/ready
 ```
-
-Rollback разрешён только на ранее успешно запущенный immutable image:
 
 ```bash
 DEPLOY_DIR=/opt/supportbot sh scripts/deploy.sh rollback
 ```
 
-Перед rollback убедитесь, что миграции candidate совместимы со старым image. Скрипт не обещает
-автоматический downgrade схемы и не подменяет операторское решение о совместимости.
+Rollback разрешён только на ранее успешно запущенный image. Скрипт не выполняет downgrade схемы:
+сначала подтвердите совместимость миграций со старой версией.
 
-## Повседневные команды
+Повседневные команды:
 
 ```bash
 DEPLOY_DIR=/opt/supportbot sh scripts/production-compose.sh ps
@@ -250,84 +177,41 @@ DEPLOY_DIR=/opt/supportbot sh scripts/production-compose.sh logs -f --tail=200 s
 DEPLOY_DIR=/opt/supportbot sh scripts/production-compose.sh restart supportbot
 ```
 
-## GitHub Actions и release artifacts
+GitHub Actions выполняет verify и PostgreSQL matrix. Push в `main` или release tag публикует GHCR
+image, Trivy report, CycloneDX SBOM, checksums и release evidence. Workflow не имеет доступа к
+production host; deploy остаётся ручной операцией.
 
-Workflow выполняет verify и PostgreSQL matrix. Push в `main` или release tag также собирает image,
-публикует его в GHCR, запускает smoke/Trivy gate и создаёт CycloneDX SBOM. Actions закреплены SHA.
-
-Workflow не использует self-hosted runners, production secrets, Docker socket mount или deploy
-команды. Production deployment остаётся явной операторской операцией через `scripts/deploy.sh` и
-принимает только проверенный GHCR reference с immutable digest.
-
-`image.env` и `release-evidence.txt` фиксируют image по digest; release tag добавляет version tag.
-Trivy JSON, SBOM, checksums и evidence сохраняются одним artifact, а для публичного репозитория
-публикуется attestation.
-
-Перед deploy скачайте artifact одного workflow run и проверьте:
-
-```bash
-sha256sum --check artifact-checksums.txt
-grep '^image_reference=.*@sha256:' release-evidence.txt
-```
-
-Workflow только проверяет и публикует artifact; доступа к production host у него нет.
-
-## Health, readiness и метрики
+### Health и логи
 
 ```bash
 sh scripts/production-compose.sh ps
-docker inspect --format '{{json .State.Health}}' "$(sh scripts/production-compose.sh ps -q supportbot)"
-```
-
-При включённом API:
-
-```bash
 curl -H "X-API-Token: $API_ADMIN_TOKEN" http://127.0.0.1:8080/health
 curl -H "X-API-Token: $API_ADMIN_TOKEN" http://127.0.0.1:8080/ready
 curl -H "X-API-Token: $API_ADMIN_TOKEN" http://127.0.0.1:8080/metrics
 ```
 
-- `/health` подтверждает работу HTTP-процесса;
-- `/ready` возвращает 503, если база или настроенный компонент не готовы;
-- `/metrics` предназначен для Prometheus. Стартовые dashboard-панели, alerts и runbook описаны
-  в [OBSERVABILITY.md](OBSERVABILITY.md).
-
-Логи — структурированный JSON. Для поиска полезны `event`, `trace_id`, `ticket_id`,
-`delivery_id` и `operator_action_id`.
-
-## Обновление
-
-Перед обновлением создайте backup. Compose применит миграции отдельной ролью и запустит приложение
-с runtime-полномочиями.
-
-```bash
-PRODUCTION_DEPLOYMENT=yes DEPLOY_DIR=/opt/supportbot \
-  sh scripts/backup.sh postgres /srv/backups/support-before-update.dump
-DEPLOY_DIR=/opt/supportbot \
-  sh scripts/deploy.sh deploy registry.example/supportbot:<immutable-sha-or-digest>
-```
-
-Не запускайте старую версию поверх обновлённой схемы без явно поддерживаемого downgrade.
+HTTP endpoints доступны при включённом API. `/health` проверяет процесс, `/ready` — базу и
+настроенные компоненты, `/metrics` отдаёт Prometheus-метрики. Логи — JSON; основные поля:
+`event`, `trace_id`, `ticket_id`, `delivery_id`, `operator_action_id`.
 
 ## Backup и восстановление
 
-Храните копии вне Docker volumes, шифруйте и регулярно проверяйте восстановлением. Backup содержит
-пользовательские данные.
+Храните зашифрованные копии вне Docker volumes и регулярно проверяйте restore на отдельном
+стенде. Backup содержит пользовательские данные.
 
 ### SQLite
 
-Перед командами экспортируйте `APP_IMAGE` и `SUPPORTBOT_ENV_FILE` так же, как при запуске SQLite.
+Перед запуском экспортируйте `APP_IMAGE` и `SUPPORTBOT_ENV_FILE` так же, как для Compose.
 
 ```bash
-COMPOSE_FILE=compose.production.sqlite.yaml ./scripts/backup.sh sqlite /srv/backups/support-$(date +%F-%H%M).db
-CONFIRM_RESTORE=yes COMPOSE_FILE=compose.production.sqlite.yaml ./scripts/restore.sh sqlite /srv/backups/support-backup.db
+COMPOSE_FILE=compose.production.sqlite.yaml \
+  ./scripts/backup.sh sqlite /srv/backups/support-$(date +%F-%H%M).db
+CONFIRM_RESTORE=yes COMPOSE_FILE=compose.production.sqlite.yaml \
+  ./scripts/restore.sh sqlite /srv/backups/support-backup.db
 ```
 
-Backup создаётся без остановки. Фактический путь берётся из `DATABASE_URL`, а не предполагается
-равным `DATA_DIR/support.db`. Для сохранности volume файл обязан находиться внутри `DATA_DIR`.
-Restore сначала проверяет `PRAGMA integrity_check`, затем останавливает приложение, создаёт
-проверенную копию рядом с целевым файлом и атомарно заменяет базу. При любой ошибке после остановки
-приложение остаётся остановленным.
+Backup не останавливает приложение. Restore проверяет `PRAGMA integrity_check`, останавливает
+приложение и атомарно заменяет БД; после ошибки приложение остаётся остановленным.
 
 ### PostgreSQL
 
@@ -338,93 +222,54 @@ CONFIRM_RESTORE=yes PRODUCTION_DEPLOYMENT=yes DEPLOY_DIR=/opt/supportbot \
   sh scripts/restore.sh postgres /srv/backups/support-backup.dump
 ```
 
-Archive проверяется до остановки. Restore выполняется migration role, повторно применяет миграции
-и ждёт healthcheck. После ошибки приложение не запускается автоматически: проверьте БД и выполните
-`scripts/production-compose.sh up --detach --wait supportbot`.
+Archive проверяется до остановки. Restore работает через migration role, повторно применяет
+миграции и ждёт healthcheck. После ошибки проверьте БД и запускайте приложение вручную.
 
-### Production data path drill
+Перед обновлением всегда создавайте backup. Не запускайте старый image поверх новой схемы без
+явно поддерживаемого downgrade.
 
-Drill запускается только на отдельном стенде. Каталог должен содержать
-`.supportbot-drill-environment` со строкой `isolated`; сценарий проверяет deploy, upgrade,
-rollback, backup и оба исхода restore.
-
-```bash
-CONFIRM_PRODUCTION_DATA_PATH_DRILL=isolated \
-CONFIRM_SCHEMA_COMPATIBLE_ROLLBACK=yes \
-DEPLOY_DIR=/opt/suppsystem-drill \
-  sh scripts/drill_production_data_path.sh \
-  registry.example/supportbot:<baseline-sha> \
-  registry.example/supportbot:<candidate-sha> \
-  /srv/drill-reports/data-path-$(date +%F-%H%M).log
-```
-
-Храните report и `.postgres.dump` закрыто: они могут раскрывать объёмы данных. Drill разрушителен
-и запрещён на боевой инсталляции.
+`scripts/drill_production_data_path.sh` проверяет deploy, rollback, backup и restore только на
+изолированном стенде. Его отчёты и дампы могут содержать чувствительные данные.
 
 ## Разработка
 
 ```bash
-make install       # locked dependencies
-make run           # запуск
-make migrate       # миграции
-make test          # тесты
-make verify        # все проверки качества
-make test-postgres # PostgreSQL migration/concurrency matrix
+make install
+make verify
+make test-postgres
 ```
 
 Изменение ORM требует новой Alembic-миграции и проверки fresh install и upgrade. Применённые
-миграции задним числом не редактируются.
+миграции не редактируются задним числом.
 
 ## Диагностика
 
-### Приложение не запускается
+| Проблема | Что проверить |
+| --- | --- |
+| приложение не запускается | `scripts/production-compose.sh logs`, `.env`, Telegram и БД |
+| Telegram preflight | supergroup, Topics, присутствие и права бота, соответствие токена |
+| сообщения не доставляются | health workers, delivery events и задания со статусом `failed` |
+| `/ready` возвращает 503 | компонент из ответа: database, panel, delivery или notification worker |
 
-Проверьте логи через `scripts/production-compose.sh`, обязательные переменные, секреты,
-Telegram и базу.
-
-При `Configuration error` исправьте `/opt/supportbot/.env` и перезапустите сервис.
-
-### Не проходит Telegram preflight
-
-Группа должна быть supergroup с Topics. Бот должен находиться в ней, иметь право управления
-темами, а токен должен принадлежать именно добавленному боту.
-
-### Сообщения не доставляются
-
-Проверьте health workers и delivery events. Временные ошибки повторяются. `failed` означает
-исчерпание попыток или постоянную ошибку. После удаления темы приложение пытается восстановить её
-и перенаправить незавершённые сообщения.
-
-### Remnawave вернул unknown outcome
+### Remnawave: `unknown outcome`
 
 Не повторяйте мутацию. Найдите `operator_action_id` и дождитесь `completed`, `not_applied` или
-`inconclusive`; до этого новые мутации тикета заблокированы.
-
-При `inconclusive` уведомление содержит UUID действия. Full admin должен независимо установить
-судьбу именно исходного вызова и выполнить в той же теме одну из команд:
+`inconclusive`; до этого новые мутации тикета заблокированы. Для `inconclusive` независимо
+установите результат исходного вызова и выполните в той же теме:
 
 ```text
 /resolvepanel <operator_action_uuid> applied
 /resolvepanel <operator_action_uuid> not_applied
 ```
 
-Выбирайте результат только при независимом доказательстве судьбы исходного вызова; текущего
-состояния Remnawave недостаточно. Без доказательства оставьте действие заблокированным. Команда
-не повторяет мутацию и сохраняется в аудите; `/revokelink ... applied` дополнительно читает новую
-ссылку для уведомления.
-
-### `/ready` возвращает 503
-
-Ответ показывает проблемный компонент. Проверьте database, API, panel, delivery worker и
-notification worker. Успешный `/health` подтверждает только живой HTTP-процесс.
+Текущего состояния Remnawave недостаточно: без независимого доказательства оставьте действие
+заблокированным. Команда не повторяет мутацию и сохраняет решение в аудите.
 
 ## Production checklist
 
-- `.env` защищён и не хранится в Git;
-- секреты уникальны и длиннее 32 символов;
-- PostgreSQL использует три разных стойких пароля;
+- `.env` имеет права `0600` и не хранится в Git;
+- секреты уникальны, PostgreSQL использует три разных пароля;
 - API опубликован только через HTTPS reverse proxy;
-- настроены сбор логов, Prometheus и оповещения;
-- backup уходит во внешнее защищённое хранилище;
-- восстановление регулярно проверяется;
-- после обновления проверяются readiness, логи и тестовый тикет.
+- настроены логи, метрики и alerts;
+- backup хранится отдельно и restore регулярно проверяется;
+- после обновления проверены readiness, логи и тестовый тикет.

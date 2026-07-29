@@ -1173,6 +1173,7 @@ async def test_inbound_update_claim_fencing_survives_reclaim(
         update = await session.get(InboundUpdate, 7001)
     assert update is not None
     assert WorkStatus(update.status) is WorkStatus.DELIVERED
+    assert update.payload == {}
 
 
 async def test_notification_claim_fencing_rejects_late_worker(

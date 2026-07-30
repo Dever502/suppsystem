@@ -157,7 +157,7 @@ Operator API на loopback. `.env` хранит секреты с правами
 
 ```bash
 DEPLOY_DIR=/opt/suppsystem \
-  sh scripts/deploy.sh deploy registry.example/suppsystem:v1.0.0
+  sh scripts/deploy.sh deploy registry.example/suppsystem:v2.0.0
 DEPLOY_DIR=/opt/suppsystem sh scripts/production-compose.sh ps
 ```
 

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from html import escape
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from supportbot.models import TicketStatus
 from supportbot.panel import (
@@ -16,6 +17,16 @@ from supportbot.service_types import InternalNoteView, TicketView
 INTERNAL_NOTE_PREVIEW_LENGTH = 300
 
 COMMAND_ALREADY_HANDLED_TEXT = "ℹ️ Команда уже обработана."
+
+
+def _moscow_timezone() -> tzinfo:
+    try:
+        return ZoneInfo("Europe/Moscow")
+    except ZoneInfoNotFoundError:
+        return timezone(timedelta(hours=3))
+
+
+MOSCOW_TIMEZONE = _moscow_timezone()
 
 
 def panel_status_text(status: PanelLookupStatus | PanelActionStatus) -> str:
@@ -77,7 +88,9 @@ def ticket_status_text(status: TicketStatus) -> str:
 def date_text(value: object | None) -> str:
     if not isinstance(value, datetime):
         return "—"
-    return value.strftime("%d.%m.%Y, %H:%M %Z").rstrip()
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(MOSCOW_TIMEZONE).strftime("%d.%m.%Y, %H:%M")
 
 
 def customer_identity(ticket: TicketView) -> str:

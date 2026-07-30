@@ -33,6 +33,7 @@ from supportbot.telegram_constants import (
 )
 from supportbot.telegram_errors import is_missing_topic_error
 from supportbot.telegram_formatting import (
+    date_text,
     internal_notes_text,
     operator_ticket_info,
     panel_action_reply,
@@ -147,7 +148,7 @@ def test_internal_notes_text_is_readable_and_escapes_content() -> None:
     assert internal_notes_text([]) == "📝 <b>Заметки</b>\n\nЗаметок пока нет."
     assert internal_notes_text([note]) == (
         "📝 <b>Заметки</b>\n\n"
-        "<code>02.07.2026, 14:30 UTC</code> · Alice &lt;Operator&gt;\n"
+        "<code>02.07.2026, 17:30</code> · Alice &lt;Operator&gt;\n"
         "«Проверить &lt;оплату&gt;»"
     )
 
@@ -171,10 +172,20 @@ def test_internal_notes_author_uses_name_username_then_telegram_id(
         operator_username=username,
     )
 
-    assert (
-        f"<code>02.07.2026, 14:30 UTC</code> · {expected_author}\n«Заметка»"
-        in internal_notes_text([note])
+    assert f"<code>02.07.2026, 17:30</code> · {expected_author}\n«Заметка»" in internal_notes_text(
+        [note]
     )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        datetime(2026, 7, 30, 13, 56, tzinfo=UTC),
+        datetime(2026, 7, 30, 13, 56),
+    ],
+)
+def test_date_text_displays_moscow_time(value: datetime) -> None:
+    assert date_text(value) == "30.07.2026, 16:56"
 
 
 def test_topic_name_uses_operator_friendly_identity_without_ticket_id() -> None:
@@ -229,8 +240,8 @@ def test_operator_ticket_info_is_readable() -> None:
         "<b>Ivan Petrov · @ivan</b>\n"
         "Telegram ID: <code>123456789</code>\n\n"
         "🕒 <b>История</b>\n\n"
-        "Создан: <code>02.07.2026, 12:40 UTC</code>\n"
-        "Обновлён: <code>02.07.2026, 14:30 UTC</code>\n"
+        "Создан: <code>02.07.2026, 15:40</code>\n"
+        "Обновлён: <code>02.07.2026, 17:30</code>\n"
         "Закрыт: <code>—</code>"
     )
 

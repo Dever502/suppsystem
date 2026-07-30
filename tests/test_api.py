@@ -256,6 +256,47 @@ async def test_api_message_rejects_same_key_with_different_payload(
     assert await _api_message_counts(database, ticket.id) == (1, 1, 1, 0)
 
 
+async def test_api_message_duplicate_guard_rechecks_payload_fingerprint(
+    api_context: tuple[Any, Database, TicketService, TicketView],
+) -> None:
+    app, _database, ticket_service, ticket = api_context
+    headers = {
+        "X-API-Token": "admin-token",
+        "X-Idempotency-Key": "stale-replay-conflict",
+    }
+    async with _client(app) as client:
+        first = await client.post(
+            f"/api/v1/tickets/{ticket.id}/messages",
+            headers=headers,
+            json={"text": "original payload"},
+        )
+
+        original_replay = ticket_service._operator_message_replay
+        replay_calls = 0
+
+        async def stale_initial_replays(session: Any, command: Any) -> Any:
+            nonlocal replay_calls
+            replay_calls += 1
+            if replay_calls <= 2:
+                return None
+            return await original_replay(session, command)
+
+        ticket_service._operator_message_replay = stale_initial_replays  # type: ignore[method-assign]
+        try:
+            conflict = await client.post(
+                f"/api/v1/tickets/{ticket.id}/messages",
+                headers=headers,
+                json={"text": "different payload"},
+            )
+        finally:
+            ticket_service._operator_message_replay = original_replay  # type: ignore[method-assign]
+
+    assert first.status_code == 200
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "idempotency_conflict"
+    assert replay_calls == 3
+
+
 async def test_api_close_rejects_same_key_with_different_notification_payload(
     api_context: tuple[Any, Database, TicketService, TicketView],
 ) -> None:

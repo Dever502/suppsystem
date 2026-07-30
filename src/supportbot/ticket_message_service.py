@@ -112,6 +112,14 @@ class TicketMessageService(TicketServiceBase):
             ticket=ticket_view,
         )
 
+    async def _operator_message_duplicate(
+        self, session: AsyncSession, command: ApiIdempotencyCommand | None
+    ) -> OperatorMessageResult:
+        replay = await self._operator_message_replay(session, command)
+        if replay is not None:
+            return replay
+        return OperatorMessageResult(changed=False)
+
     async def add_internal_note(
         self,
         *,
@@ -365,13 +373,13 @@ class TicketMessageService(TicketServiceBase):
                         return replay
                 return OperatorMessageResult(changed=False)
             if await self._delivery_exists(session, idempotency_key):
-                return OperatorMessageResult(changed=False)
+                return await self._operator_message_duplicate(session, api_idempotency)
 
             was_closed = TicketStatus(ticket.status) is TicketStatus.CLOSED
             if was_closed and await self._operator_action_exists(session, reopen_idempotency_key):
-                return OperatorMessageResult(changed=False)
+                return await self._operator_message_duplicate(session, api_idempotency)
             if await self._operator_action_exists(session, idempotency_key):
-                return OperatorMessageResult(changed=False)
+                return await self._operator_message_duplicate(session, api_idempotency)
 
             transition_at = utcnow()
             reopened = False

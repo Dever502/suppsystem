@@ -342,6 +342,25 @@ def test_telegram_adapter_formats_subscription_lookup() -> None:
     )
 
 
+def test_subscription_lookup_uses_compact_telegram_search_label() -> None:
+    from supportbot.panel import PanelSubscriptionLookup
+
+    text = format_subscription_lookup(
+        PanelSubscriptionLookup(
+            status="not_found",
+            identity_provider="telegram",
+            identity_value="802720292",
+            subscription=None,
+        )
+    )
+
+    assert text == (
+        "💳 <b>Подписка Remnawave</b>\n\n"
+        "Поиск: TG:<code>802720292</code>\n"
+        "Статус: пользователь не найден"
+    )
+
+
 @pytest.mark.parametrize(
     ("expire_at", "expected"),
     [

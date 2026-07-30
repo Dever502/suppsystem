@@ -1027,6 +1027,59 @@ async def test_reopening_ticket_reports_transition(ticket_service: TicketService
     assert reopened.reopened is True
 
 
+async def test_reopened_customer_delivery_requires_context_first(
+    ticket_service: TicketService,
+) -> None:
+    first = await ticket_service.accept_customer_message(
+        telegram_user_id=10071,
+        display_name="Frank",
+        username=None,
+        source_chat_id=10071,
+        source_message_id=1,
+        target_chat_id=-100123,
+        content="First message",
+        media=None,
+    )
+    assert first.ticket is not None
+    await attach_claimed_topic(ticket_service, first.ticket.id, 1781)
+    first_delivery = (await ticket_service.outbox.claim_due_deliveries())[0]
+    assert await ticket_service.outbox.mark_delivery_delivered(
+        first_delivery.id,
+        claim_token=first_delivery.claim_token,
+    )
+    await ticket_service.close(ticket_id=first.ticket.id, operator_telegram_id=42)
+
+    reopened = await ticket_service.accept_customer_message(
+        telegram_user_id=10071,
+        display_name="Frank",
+        username=None,
+        source_chat_id=10071,
+        source_message_id=2,
+        target_chat_id=-100123,
+        content="Second message",
+        media=None,
+    )
+
+    delivery = (await ticket_service.outbox.claim_due_deliveries())[0]
+    assert reopened.reopened is True
+    assert delivery.payload["prepare_reopened_context"] is True
+    assert await ticket_service.outbox.mark_reopened_context_prepared(
+        delivery.id,
+        claim_token=delivery.claim_token,
+    )
+    assert await ticket_service.outbox.mark_delivery_retry(
+        delivery.id,
+        claim_token=delivery.claim_token,
+        error="temporary Telegram failure",
+        retry_after_seconds=0,
+        max_attempts=8,
+    )
+
+    retried = (await ticket_service.outbox.claim_due_deliveries())[0]
+
+    assert "prepare_reopened_context" not in retried.payload
+
+
 async def test_topic_provisioning_retry_requires_explicit_reset(
     ticket_service: TicketService,
 ) -> None:

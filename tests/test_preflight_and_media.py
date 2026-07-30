@@ -45,6 +45,7 @@ from supportbot.telegram_message_utils import (
     rating_keyboard,
     rating_report,
 )
+from supportbot.telegram_panel_handler import TelegramPanelCommandHandler
 
 
 class FakeBot:
@@ -577,6 +578,31 @@ def test_panel_action_reply_formats_mutation_results() -> None:
         )
         == "ℹ️ Команда уже обработана."
     )
+
+
+async def test_panel_handler_omits_notification_queue_details() -> None:
+    result = PanelActionResult(
+        action="revoke_subscription_link",
+        status="completed",
+        changed=True,
+        identity_provider="telegram",
+        identity_value="123",
+    )
+    panel_service = SimpleNamespace(
+        revoke_subscription_link_for_ticket=AsyncMock(return_value=result)
+    )
+    message = SimpleNamespace(from_user=SimpleNamespace(id=7), reply=AsyncMock())
+    handler = TelegramPanelCommandHandler(panel_service)  # type: ignore[arg-type]
+
+    await handler.handle(
+        message,  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
+        "/revokelink",
+        "telegram:-100:1:/revokelink",
+        "",
+    )
+
+    message.reply.assert_awaited_once_with("✅ Ссылка подписки перевыпущена.")
 
 
 def test_topic_command_allowlist_contains_close_variants() -> None:

@@ -47,6 +47,7 @@ class DeliveryWorker:
         limiter: TelegramRateLimiter,
         heartbeat_path: Path,
         recover_missing_topic: Callable[[str, int], Awaitable[int | None]],
+        prepare_reopened_customer_topic: Callable[[str], Awaitable[None]] | None = None,
         runtime_health: RuntimeHealth | None = None,
         stale_recovery_interval_seconds: float = 60.0,
         stale_delivery_after_seconds: int = 300,
@@ -63,6 +64,7 @@ class DeliveryWorker:
         self.limiter = limiter
         self.heartbeat_path = heartbeat_path
         self.recover_missing_topic = recover_missing_topic
+        self.prepare_reopened_customer_topic = prepare_reopened_customer_topic
         self.runtime_health = runtime_health
         self.stale_recovery_interval_seconds = stale_recovery_interval_seconds
         self.stale_delivery_after_seconds = stale_delivery_after_seconds
@@ -247,6 +249,22 @@ class DeliveryWorker:
             target_thread_id = payload.get("target_thread_id")
             if await self._recipient_is_blocked(job, payload):
                 return
+            if payload.get("prepare_reopened_context") is True:
+                if self.prepare_reopened_customer_topic is None:
+                    raise RuntimeError("reopened customer delivery requires topic preparation")
+                await self.prepare_reopened_customer_topic(job.ticket_id)
+                prepared = await self.outbox.mark_reopened_context_prepared(
+                    job.id,
+                    claim_token=job.claim_token,
+                )
+                if not self._claim_transition_applied(
+                    job,
+                    payload,
+                    transition="reopened_context_prepared",
+                    applied=prepared,
+                ):
+                    return
+                payload.pop("prepare_reopened_context", None)
             await self.limiter.wait()
             if payload.get("kind", "copy") == "send_text":
                 reply_markup_payload = payload.get("reply_markup")

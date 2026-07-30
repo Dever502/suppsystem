@@ -43,6 +43,12 @@ class TelegramTopicManager:
         await self._send_ticket_reopened_notice(ticket, by_operator=False)
         await self._send_reopened_ticket_customer_card(ticket)
 
+    async def prepare_reopened_customer_topic(self, ticket_id: str) -> None:
+        ticket = await self.ticket_service.get_ticket(ticket_id)
+        async with self._ticket_locks.hold(ticket.telegram_user_id):
+            ticket = await self.ticket_service.get_ticket(ticket_id)
+            await self._refresh_reopened_ticket_context(ticket)
+
     async def _send_reopened_ticket_customer_card(self, ticket: TicketView) -> None:
         try:
             await self._send_customer_card(ticket, event="ticket_reopened_customer_card_sent")

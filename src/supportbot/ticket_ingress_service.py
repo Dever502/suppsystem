@@ -134,18 +134,21 @@ class TicketIngressService(TicketServiceBase):
                     media=media,
                 )
             )
+            delivery_payload: dict[str, object] = {
+                "kind": "copy",
+                "source_chat_id": source_chat_id,
+                "source_message_id": source_message_id,
+                "target_chat_id": target_chat_id,
+                "target_thread_id": ticket.topic_id,
+            }
+            if reopened:
+                delivery_payload["prepare_reopened_context"] = True
             session.add(
                 DeliveryOutbox(
                     ticket_id=ticket.id,
                     direction=Direction.USER_TO_OPERATOR,
                     idempotency_key=key,
-                    payload={
-                        "kind": "copy",
-                        "source_chat_id": source_chat_id,
-                        "source_message_id": source_message_id,
-                        "target_chat_id": target_chat_id,
-                        "target_thread_id": ticket.topic_id,
-                    },
+                    payload=delivery_payload,
                     status=(
                         DeliveryStatus.PENDING
                         if ticket.topic_id is not None

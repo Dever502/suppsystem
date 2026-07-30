@@ -186,7 +186,10 @@ def traffic_text(value: int | None) -> str:
 
 
 def format_subscription_lookup(lookup: PanelSubscriptionLookup) -> str:
-    identity = f"{escape(lookup.identity_provider)}:<code>{escape(lookup.identity_value)}</code>"
+    identity_provider = (
+        "TG" if lookup.identity_provider == "telegram" else escape(lookup.identity_provider)
+    )
+    identity = f"{identity_provider}:<code>{escape(lookup.identity_value)}</code>"
     if lookup.subscription is None:
         return (
             "💳 <b>Подписка Remnawave</b>\n\n"

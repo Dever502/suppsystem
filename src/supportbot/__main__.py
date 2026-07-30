@@ -267,6 +267,7 @@ async def run() -> None:
         limiter=limiter,
         heartbeat_path=settings.data_dir / "delivery-worker-heartbeat",
         recover_missing_topic=adapter.recover_missing_topic,
+        prepare_reopened_customer_topic=adapter.prepare_reopened_customer_topic,
         runtime_health=runtime_health,
     )
     notification_worker: NotificationWebhookWorker | None = None

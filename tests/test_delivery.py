@@ -70,6 +70,7 @@ class FakeTicketService:
         self.delivered_calls: list[tuple[str, str, int | None]] = []
         self.cancelled_calls: list[tuple[str, str, str]] = []
         self.released_claims: list[tuple[str, str]] = []
+        self.prepared_contexts: list[tuple[str, str]] = []
         self.retargeted = retargeted
         self.blocked_user_ids = blocked_user_ids or set()
         self.transitions_applied = transitions_applied
@@ -99,6 +100,10 @@ class FakeTicketService:
         delivered_message_id: int | None = None,
     ) -> bool:
         self.delivered_calls.append((delivery_id, claim_token, delivered_message_id))
+        return self.transitions_applied
+
+    async def mark_reopened_context_prepared(self, delivery_id: str, *, claim_token: str) -> bool:
+        self.prepared_contexts.append((delivery_id, claim_token))
         return self.transitions_applied
 
     async def release_delivery_claims(self, claims: list[tuple[str, str]]) -> int:
@@ -234,6 +239,35 @@ async def test_successful_delivery_persists_telegram_message_id(tmp_path: Path) 
 
     await worker._deliver(delivery_job())
 
+    assert service.delivered_calls == [("delivery-1", "claim-1", 456)]
+
+
+async def test_reopened_customer_context_is_prepared_before_message_copy(tmp_path: Path) -> None:
+    order: list[str] = []
+
+    class OrderedBot(SuccessfulBot):
+        async def copy_message(self, **kwargs: object) -> SimpleNamespace:
+            order.append("message")
+            return await super().copy_message(**kwargs)
+
+    async def prepare_context(ticket_id: str) -> None:
+        assert ticket_id == "ticket-1"
+        order.extend(("notice", "card"))
+
+    service = FakeTicketService()
+    worker = delivery_worker(
+        tmp_path,
+        service=service,
+        bot=OrderedBot(),
+        prepare_reopened_customer_topic=prepare_context,
+    )
+    job = delivery_job()
+    job.payload["prepare_reopened_context"] = True
+
+    await worker._deliver(job)
+
+    assert order == ["notice", "card", "message"]
+    assert service.prepared_contexts == [("delivery-1", "claim-1")]
     assert service.delivered_calls == [("delivery-1", "claim-1", 456)]
 
 

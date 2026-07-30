@@ -164,8 +164,6 @@ class TelegramUserHandlers(TelegramTopicManager):
             )
             try:
                 ticket = await self._ensure_topic(ticket)
-                if result.reopened:
-                    await self._refresh_reopened_ticket_context(ticket)
             except TelegramAPIError:
                 await message.answer(SUPPORT_PENDING_TEXT)
                 return

@@ -269,6 +269,25 @@ class OutboxRepository:
             },
         )
 
+    async def mark_reopened_context_prepared(self, delivery_id: str, *, claim_token: str) -> bool:
+        async with self.database.session() as session:
+            delivery = await session.scalar(
+                select(DeliveryOutbox)
+                .where(
+                    DeliveryOutbox.id == delivery_id,
+                    DeliveryOutbox.status == DeliveryStatus.PROCESSING,
+                    DeliveryOutbox.claim_token == claim_token,
+                )
+                .with_for_update()
+            )
+            if delivery is None:
+                return False
+            payload = dict(delivery.payload)
+            payload.pop("prepare_reopened_context", None)
+            delivery.payload = payload
+            await session.commit()
+            return True
+
     async def _transition_delivery(
         self,
         delivery_id: str,

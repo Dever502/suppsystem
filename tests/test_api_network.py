@@ -7,13 +7,13 @@ from pathlib import Path
 import httpx
 from pydantic import SecretStr
 
-from supportbot.api import create_app
-from supportbot.api_server import ApiServer
-from supportbot.config import Settings
-from supportbot.database import Database
-from supportbot.runtime_health import RuntimeHealth
-from supportbot.services import TicketService
-from supportbot.version import PROJECT_VERSION
+from suppsystem.api import create_app
+from suppsystem.api_server import ApiServer
+from suppsystem.config import Settings
+from suppsystem.database import Database
+from suppsystem.runtime_health import RuntimeHealth
+from suppsystem.services import TicketService
+from suppsystem.version import PROJECT_VERSION
 
 
 def _unused_loopback_port() -> int:

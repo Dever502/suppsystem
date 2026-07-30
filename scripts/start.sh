@@ -21,7 +21,7 @@ case "$mode" in
 esac
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-env_file=${SUPPORTBOT_ENV_FILE:-${root}/.env}
+env_file=${SUPPSYSTEM_ENV_FILE:-${root}/.env}
 [ -s "$env_file" ] || {
     echo "Configuration file is missing or empty: $env_file" >&2
     echo "Create it with: cp .env.example .env" >&2
@@ -52,8 +52,8 @@ case "$resolved_image" in
 esac
 
 APP_IMAGE=$resolved_image
-SUPPORTBOT_ENV_FILE=$env_file
-export APP_IMAGE SUPPORTBOT_ENV_FILE
+SUPPSYSTEM_ENV_FILE=$env_file
+export APP_IMAGE SUPPSYSTEM_ENV_FILE
 
 compose() {
     docker compose \
@@ -78,7 +78,7 @@ if [ "$mode" = postgres ]; then
     umask 077
     rendered=$(mktemp "${TMPDIR:-/tmp}/suppsystem-compose.XXXXXX.json")
     compose config --format json > "$rendered"
-    docker run --rm -i "$APP_IMAGE" python -m supportbot.production < "$rendered"
+    docker run --rm -i "$APP_IMAGE" python -m suppsystem.production < "$rendered"
 else
     compose config --quiet
 fi

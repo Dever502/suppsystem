@@ -1391,7 +1391,7 @@ wheels = [
 ]
 
 [[package]]
-name = "telegram-support-platform"
+name = "suppsystem"
 version = "1.0.0"
 source = { editable = "." }
 dependencies = [

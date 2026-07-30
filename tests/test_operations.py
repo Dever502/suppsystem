@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from supportbot.operations import (
+from suppsystem.operations import (
     create_sqlite_backup,
     resolve_sqlite_database_path,
     restore_sqlite_backup,

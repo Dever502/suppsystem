@@ -10,13 +10,13 @@ from aiogram.methods import CopyMessage
 from pydantic import SecretStr
 from sqlalchemy import select
 
-from supportbot.config import Settings
-from supportbot.database import Database
-from supportbot.delivery import DeliveryWorker
-from supportbot.models import DeliveryOutbox, DeliveryStatus, Direction, TicketStatus
-from supportbot.services import TicketService
-from supportbot.telegram_adapter import TelegramSupportAdapter, TicketLockPool
-from supportbot.telegram_formatting import topic_name
+from suppsystem.config import Settings
+from suppsystem.database import Database
+from suppsystem.delivery import DeliveryWorker
+from suppsystem.models import DeliveryOutbox, DeliveryStatus, Direction, TicketStatus
+from suppsystem.services import TicketService
+from suppsystem.telegram_adapter import TelegramSupportAdapter, TicketLockPool
+from suppsystem.telegram_formatting import topic_name
 
 
 class FakeLimiter:
@@ -127,7 +127,7 @@ async def test_restart_recovers_unclaimed_waiting_delivery_after_partial_success
         )
 
         assert await restarted_service.list_waiting_topic_recovery_ticket_ids() == [ticket.id]
-        with caplog.at_level(logging.INFO, logger="supportbot.telegram_topic_manager"):
+        with caplog.at_level(logging.INFO, logger="suppsystem.telegram_topic_manager"):
             assert await adapter.recover_waiting_topics_after_restart() == 1
         assert await adapter.recover_waiting_topics_after_restart() == 0
 

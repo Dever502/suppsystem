@@ -4,19 +4,19 @@ from copy import deepcopy
 
 import pytest
 
-from supportbot.production import is_immutable_image_reference, validate_production_compose
+from suppsystem.production import is_immutable_image_reference, validate_production_compose
 
 
 def production_config() -> dict[str, object]:
-    image = "registry.example/supportbot@sha256:" + "a" * 64
+    image = "registry.example/suppsystem@sha256:" + "a" * 64
     return {
         "services": {
-            "supportbot": {
+            "suppsystem": {
                 "image": image,
                 "environment": {
                     "DATABASE_URL": (
-                        "postgresql+asyncpg://supportbot_runtime:runtime-password-123"
-                        "@postgres:5432/supportbot"
+                        "postgresql+asyncpg://suppsystem_runtime:runtime-password-123"
+                        "@postgres:5432/suppsystem"
                     ),
                     "MIGRATION_DATABASE_URL": (""),
                     "MIGRATIONS_AT_STARTUP": "false",
@@ -29,10 +29,10 @@ def production_config() -> dict[str, object]:
             },
             "postgres": {
                 "environment": {
-                    "POSTGRES_DB": "supportbot",
+                    "POSTGRES_DB": "suppsystem",
                     "POSTGRES_USER": "postgres",
-                    "POSTGRES_MIGRATION_USER": "supportbot_migrator",
-                    "POSTGRES_RUNTIME_USER": "supportbot_runtime",
+                    "POSTGRES_MIGRATION_USER": "suppsystem_migrator",
+                    "POSTGRES_RUNTIME_USER": "suppsystem_runtime",
                 },
                 "volumes": [
                     {
@@ -45,18 +45,18 @@ def production_config() -> dict[str, object]:
             "postgres-provision": {
                 "image": image,
                 "environment": {
-                    "POSTGRES_DB": "supportbot",
+                    "POSTGRES_DB": "suppsystem",
                     "POSTGRES_ADMIN_USER": "postgres",
-                    "POSTGRES_MIGRATION_USER": "supportbot_migrator",
-                    "POSTGRES_RUNTIME_USER": "supportbot_runtime",
+                    "POSTGRES_MIGRATION_USER": "suppsystem_migrator",
+                    "POSTGRES_RUNTIME_USER": "suppsystem_runtime",
                 },
             },
             "postgres-migrate": {
                 "image": image,
                 "environment": {
                     "MIGRATION_DATABASE_URL": (
-                        "postgresql+asyncpg://supportbot_migrator:migration-password-123"
-                        "@postgres:5432/supportbot"
+                        "postgresql+asyncpg://suppsystem_migrator:migration-password-123"
+                        "@postgres:5432/suppsystem"
                     )
                 },
                 "depends_on": {
@@ -70,7 +70,7 @@ def production_config() -> dict[str, object]:
 @pytest.mark.parametrize(
     "image",
     [
-        "registry.example/supportbot@sha256:" + "a" * 64,
+        "registry.example/suppsystem@sha256:" + "a" * 64,
     ],
 )
 def test_immutable_image_references_are_accepted(image: str) -> None:
@@ -80,10 +80,10 @@ def test_immutable_image_references_are_accepted(image: str) -> None:
 @pytest.mark.parametrize(
     "image",
     [
-        "supportbot:latest",
-        "supportbot:1.0.0",
-        "registry.example/supportbot:" + "b" * 40,
-        "supportbot@sha256:not-a-digest",
+        "suppsystem:latest",
+        "suppsystem:1.0.0",
+        "registry.example/suppsystem:" + "b" * 40,
+        "suppsystem@sha256:not-a-digest",
     ],
 )
 def test_mutable_image_references_are_rejected(image: str) -> None:
@@ -102,42 +102,42 @@ def test_production_compose_accepts_safe_postgres_service_set() -> None:
             "missing required services",
         ),
         (
-            lambda config: config["services"]["supportbot"].update({"image": "supportbot:latest"}),
+            lambda config: config["services"]["suppsystem"].update({"image": "suppsystem:latest"}),
             "immutable",
         ),
         (
-            lambda config: config["services"]["supportbot"].update({"build": "."}),
+            lambda config: config["services"]["suppsystem"].update({"build": "."}),
             "published images",
         ),
         (
-            lambda config: config["services"]["supportbot"]["environment"].update(
+            lambda config: config["services"]["suppsystem"]["environment"].update(
                 {"DATABASE_URL": "sqlite+aiosqlite:////app/data/support.db"}
             ),
             r"postgresql\+asyncpg",
         ),
         (
-            lambda config: config["services"]["supportbot"]["environment"].update(
+            lambda config: config["services"]["suppsystem"]["environment"].update(
                 {
                     "DATABASE_URL": (
                         "postgresql+asyncpg://postgres:runtime-password-123"
-                        "@postgres:5432/supportbot"
+                        "@postgres:5432/suppsystem"
                     )
                 }
             ),
             "unexpected PostgreSQL role",
         ),
         (
-            lambda config: config["services"]["supportbot"]["depends_on"].pop("postgres-provision"),
+            lambda config: config["services"]["suppsystem"]["depends_on"].pop("postgres-provision"),
             "postgres-provision",
         ),
         (
-            lambda config: config["services"]["supportbot"]["environment"].update(
+            lambda config: config["services"]["suppsystem"]["environment"].update(
                 {"POSTGRES_ADMIN_PASSWORD": "bootstrap-secret"}
             ),
             "bootstrap password",
         ),
         (
-            lambda config: config["services"]["supportbot"]["environment"].update(
+            lambda config: config["services"]["suppsystem"]["environment"].update(
                 {"MIGRATION_DATABASE_URL": "postgresql+asyncpg://migrator:secret@postgres/db"}
             ),
             "migration credential",

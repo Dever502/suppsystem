@@ -9,17 +9,17 @@ import pytest
 from aiogram.types import Message
 from pydantic import SecretStr
 
-from supportbot.__main__ import (
+from suppsystem.__main__ import (
     validate_api_settings,
     validate_operator_access,
     validate_support_group,
 )
-from supportbot.authorization import AuthorizationService
-from supportbot.config import Settings
-from supportbot.models import TicketStatus
-from supportbot.panel import PanelActionResult
-from supportbot.service_types import InternalNoteView, TopicProvisioningConflictError
-from supportbot.telegram_adapter import (
+from suppsystem.authorization import AuthorizationService
+from suppsystem.config import Settings
+from suppsystem.models import TicketStatus
+from suppsystem.panel import PanelActionResult
+from suppsystem.service_types import InternalNoteView, TopicProvisioningConflictError
+from suppsystem.telegram_adapter import (
     GIFT_DAYS_ERROR_TEXT,
     SUPPORT_PENDING_TEXT,
     TICKET_CLOSED_TEXT,
@@ -27,26 +27,26 @@ from supportbot.telegram_adapter import (
     TelegramSupportAdapter,
     TicketLockPool,
 )
-from supportbot.telegram_constants import (
+from suppsystem.telegram_constants import (
     TICKET_REOPENED_BY_CUSTOMER_TEXT,
     TICKET_REOPENED_BY_OPERATOR_TEXT,
 )
-from supportbot.telegram_errors import is_missing_topic_error
-from supportbot.telegram_formatting import (
+from suppsystem.telegram_errors import is_missing_topic_error
+from suppsystem.telegram_formatting import (
     date_text,
     internal_notes_text,
     operator_ticket_info,
     panel_action_reply,
     topic_name,
 )
-from supportbot.telegram_message_utils import (
+from suppsystem.telegram_message_utils import (
     media_metadata,
     message_command,
     rated_ticket_closed_text,
     rating_keyboard,
     rating_report,
 )
-from supportbot.telegram_panel_handler import TelegramPanelCommandHandler
+from suppsystem.telegram_panel_handler import TelegramPanelCommandHandler
 
 
 class FakeBot:
@@ -275,7 +275,7 @@ def test_rating_messages_use_card_format() -> None:
         "Telegram ID: <code>123456789</code>"
     )
     keyboard = rating_keyboard("ticket-1", 3)
-    assert keyboard.inline_keyboard[0][3].callback_data == "support_rating:ticket-1:3:4"
+    assert keyboard.inline_keyboard[0][3].callback_data == "suppsystem_rating:ticket-1:3:4"
 
 
 async def test_rating_callback_replaces_prompt_with_selected_score() -> None:
@@ -300,7 +300,7 @@ async def test_rating_callback_replaces_prompt_with_selected_score() -> None:
     callback_message.edit_text = AsyncMock()
     callback_message.edit_reply_markup = AsyncMock()
     callback = SimpleNamespace(
-        data="support_rating:ticket-1:3:4",
+        data="suppsystem_rating:ticket-1:3:4",
         from_user=SimpleNamespace(id=123456789),
         message=callback_message,
         answer=AsyncMock(),
@@ -882,7 +882,7 @@ async def test_stop_builds_rating_keyboard_from_committed_close_cycle() -> None:
     builder = close_calls[0]["notification_reply_markup_builder"]
     assert callable(builder)
     keyboard = builder(73)
-    assert keyboard["inline_keyboard"][0][4]["callback_data"] == "support_rating:ticket-1:73:5"
+    assert keyboard["inline_keyboard"][0][4]["callback_data"] == "suppsystem_rating:ticket-1:73:5"
     assert message.replies == ["✅ <b>Тикет закрыт</b>\n\nПользователь получит уведомление."]
 
 
@@ -1036,7 +1036,7 @@ async def test_admin_can_resolve_inconclusive_panel_action() -> None:
 
 
 def test_migration_url_conversion_supports_async_postgres() -> None:
-    from supportbot.migrations import synchronous_database_url
+    from suppsystem.migrations import synchronous_database_url
 
     assert (
         synchronous_database_url("postgresql+asyncpg://user:pass@postgres:5432/support")

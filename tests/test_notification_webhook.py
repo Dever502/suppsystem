@@ -10,12 +10,12 @@ import pytest
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from supportbot.config import Settings
-from supportbot.database import Database
-from supportbot.models import NotificationOutbox, NotificationStatus
-from supportbot.notification_webhook import NotificationWebhookWorker, parse_retry_after
-from supportbot.outbox_repository import OutboxRepository
-from supportbot.services import NotificationJob, TicketService
+from suppsystem.config import Settings
+from suppsystem.database import Database
+from suppsystem.models import NotificationOutbox, NotificationStatus
+from suppsystem.notification_webhook import NotificationWebhookWorker, parse_retry_after
+from suppsystem.outbox_repository import OutboxRepository
+from suppsystem.services import NotificationJob, TicketService
 
 
 class FakeTicketService:

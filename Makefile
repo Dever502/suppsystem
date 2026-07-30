@@ -7,7 +7,7 @@ lock:
 	uv lock
 
 run:
-	uv run --frozen supportbot
+	uv run --frozen suppsystem
 
 migrate:
 	uv run --frozen alembic upgrade head

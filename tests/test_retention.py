@@ -6,10 +6,10 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
-from supportbot.database import Database
-from supportbot.durable_work import DurableWorkRepository
-from supportbot.migrations import upgrade_database
-from supportbot.models import (
+from suppsystem.database import Database
+from suppsystem.durable_work import DurableWorkRepository
+from suppsystem.migrations import upgrade_database
+from suppsystem.models import (
     DeliveryOutbox,
     DeliveryStatus,
     Direction,
@@ -20,7 +20,7 @@ from supportbot.models import (
     WorkStatus,
     utcnow,
 )
-from supportbot.services import TicketService
+from suppsystem.services import TicketService
 
 
 @pytest.fixture

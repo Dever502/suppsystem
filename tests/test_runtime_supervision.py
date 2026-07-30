@@ -12,17 +12,17 @@ from aiogram.types import Update
 from fastapi import FastAPI
 from pydantic import SecretStr
 
-from supportbot.api_server import ApiServer
-from supportbot.config import Settings
-from supportbot.runtime_health import ComponentStatus, RuntimeHealth
-from supportbot.runtime_supervision import (
+from suppsystem.api_server import ApiServer
+from suppsystem.config import Settings
+from suppsystem.runtime_health import ComponentStatus, RuntimeHealth
+from suppsystem.runtime_supervision import (
     shutdown_runtime,
     stop_polling_task,
     supervise_ingress,
 )
-from supportbot.telegram_ingress import DurableTelegramIngressMiddleware, TelegramIngressWorker
-from supportbot.telegram_lifecycle import create_polling_task
-from supportbot.telegram_limits import TelegramInboundRateLimiter, TelegramRateLimiter
+from suppsystem.telegram_ingress import DurableTelegramIngressMiddleware, TelegramIngressWorker
+from suppsystem.telegram_lifecycle import create_polling_task
+from suppsystem.telegram_limits import TelegramInboundRateLimiter, TelegramRateLimiter
 
 
 def _settings() -> Settings:

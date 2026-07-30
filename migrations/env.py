@@ -6,9 +6,9 @@ from typing import Any
 from alembic import context
 from sqlalchemy import engine_from_config, event, pool
 
-from supportbot.database import configure_sqlite_connection
-from supportbot.migrations import resolve_migration_database_url
-from supportbot.models import Base
+from suppsystem.database import configure_sqlite_connection
+from suppsystem.migrations import resolve_migration_database_url
+from suppsystem.models import Base
 
 config = context.config
 

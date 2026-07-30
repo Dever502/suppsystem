@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
-from supportbot.database import Database
+from suppsystem.database import Database
 
 
 async def test_sqlite_connections_enable_safety_pragmas(tmp_path: Path) -> None:

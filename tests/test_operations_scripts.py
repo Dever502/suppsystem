@@ -43,7 +43,7 @@ def run_postgres_restore(
         **({"FAKE_RESTORE_FAIL": "yes"} if fail_restore else {}),
         **(
             {
-                "SUPPORTBOT_RESTORE_FAILURE_INJECTION": "after_stop",
+                "SUPPSYSTEM_RESTORE_FAILURE_INJECTION": "after_stop",
                 "CONFIRM_RESTORE_FAILURE_INJECTION": "yes",
             }
             if failure_injection
@@ -66,9 +66,9 @@ def test_failed_postgres_restore_leaves_application_stopped(tmp_path: Path) -> N
     log = (tmp_path / "docker.log").read_text(encoding="utf-8")
 
     assert result.returncode != 0
-    assert "compose stop supportbot" in log
-    assert "compose up --detach --wait supportbot" not in log
-    assert "supportbot remains stopped" in result.stderr
+    assert "compose stop suppsystem" in log
+    assert "compose up --detach --wait suppsystem" not in log
+    assert "suppsystem remains stopped" in result.stderr
 
 
 def test_successful_postgres_restore_starts_application_after_restore(tmp_path: Path) -> None:
@@ -77,10 +77,10 @@ def test_successful_postgres_restore_starts_application_after_restore(tmp_path: 
     log = (tmp_path / "docker.log").read_text(encoding="utf-8")
 
     assert result.returncode == 0
-    assert log.index("compose stop supportbot") < log.index("pg_restore --clean")
+    assert log.index("compose stop suppsystem") < log.index("pg_restore --clean")
     assert log.index("pg_restore --clean") < log.index("compose rm --force --stop postgres-migrate")
     assert log.index("compose rm --force --stop postgres-migrate") < log.index(
-        "compose up --detach --wait supportbot"
+        "compose up --detach --wait suppsystem"
     )
 
 
@@ -95,6 +95,6 @@ def test_failure_injection_proves_application_stays_stopped(tmp_path: Path) -> N
     log = (tmp_path / "docker.log").read_text(encoding="utf-8")
 
     assert result.returncode == 97
-    assert "compose stop supportbot" in log
+    assert "compose stop suppsystem" in log
     assert "pg_restore --clean" not in log
-    assert "compose up --detach --wait supportbot" not in log
+    assert "compose up --detach --wait suppsystem" not in log

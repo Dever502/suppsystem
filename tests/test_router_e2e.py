@@ -11,9 +11,9 @@ from aiogram.methods import SendMessage, TelegramMethod
 from aiogram.types import Chat, Message, MessageEntity, Update, User
 from pydantic import SecretStr
 
-from supportbot.config import Settings
-from supportbot.telegram_adapter import WELCOME_TEXT, TelegramSupportAdapter
-from supportbot.telegram_limits import TelegramRateLimiter
+from suppsystem.config import Settings
+from suppsystem.telegram_adapter import WELCOME_TEXT, TelegramSupportAdapter
+from suppsystem.telegram_limits import TelegramRateLimiter
 
 
 class RecordingSession(BaseSession):

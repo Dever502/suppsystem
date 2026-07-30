@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pydantic import SecretStr
 
-from supportbot.authorization import AuthorizationService
-from supportbot.config import Settings
+from suppsystem.authorization import AuthorizationService
+from suppsystem.config import Settings
 
 
 def settings(**overrides: object) -> Settings:

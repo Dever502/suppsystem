@@ -1,4 +1,4 @@
-# Telegram Support Platform
+# Suppsystem
 
 Suppsystem — Telegram-first система технической поддержки. Клиенты пишут боту, а операторы
 обрабатывают обращения в отдельных темах закрытой Forum-группы. Сообщения, состояние тикетов и
@@ -75,7 +75,7 @@ Telegram-чат  <──>  Telegram-бот + база данных  <──>  Fo
 
 ```bash
 export APP_IMAGE='ghcr.io/dever502/suppsystem@sha256:<digest>'
-export SUPPORTBOT_ENV_FILE="$PWD/.env"
+export SUPPSYSTEM_ENV_FILE="$PWD/.env"
 docker compose --env-file .env -f compose.production.sqlite.yaml up --detach --wait
 ```
 

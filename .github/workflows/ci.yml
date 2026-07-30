@@ -44,18 +44,18 @@ jobs:
       postgres:
         image: postgres:16.14-alpine3.22@sha256:786dab398303b8ce7cb76b407bb21ef2e4dfbbbd4c6abcf3d29b3130467ffdbc
         env:
-          POSTGRES_DB: supportbot_test
-          POSTGRES_USER: supportbot_test
-          POSTGRES_PASSWORD: supportbot-test-only-password
+          POSTGRES_DB: suppsystem_test
+          POSTGRES_USER: suppsystem_test
+          POSTGRES_PASSWORD: suppsystem-test-only-password
         options: >-
-          --health-cmd "pg_isready -U supportbot_test -d supportbot_test"
+          --health-cmd "pg_isready -U suppsystem_test -d suppsystem_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
         ports:
           - 5432:5432
     env:
-      TEST_POSTGRES_DATABASE_URL: postgresql+asyncpg://supportbot_test:supportbot-test-only-password@127.0.0.1:5432/supportbot_test
+      TEST_POSTGRES_DATABASE_URL: postgresql+asyncpg://suppsystem_test:suppsystem-test-only-password@127.0.0.1:5432/suppsystem_test
       ALLOW_POSTGRES_TEST_DATABASE_CREATION: "yes"
     steps:
       - name: Check out source
@@ -131,45 +131,45 @@ jobs:
           IMAGE_TAG: ${{ steps.metadata.outputs.image_tag }}
         run: |
           set -euo pipefail
-          docker image save --output supportbot-image.tar "$IMAGE_TAG"
-          chmod 0644 supportbot-image.tar
+          docker image save --output suppsystem-image.tar "$IMAGE_TAG"
+          chmod 0644 suppsystem-image.tar
       - name: Smoke-test candidate image
         env:
           IMAGE_TAG: ${{ steps.metadata.outputs.image_tag }}
         run: |
           docker run --rm \
-            --env MIGRATION_DATABASE_URL=sqlite+aiosqlite:////tmp/supportbot-smoke.db \
+            --env MIGRATION_DATABASE_URL=sqlite+aiosqlite:////tmp/suppsystem-smoke.db \
             --entrypoint sh \
             "$IMAGE_TAG" \
             -c 'set -eu
               cd /app
-              test "$(python -c "import supportbot; print(supportbot.__version__)")" = "1.0.0"
+              test "$(python -c "import suppsystem; print(suppsystem.__version__)")" = "1.0.0"
               test -f /app/alembic.ini
               test -f /app/migrations/env.py
-              python -c "from hashlib import sha256; from pathlib import Path; assert sha256(Path(\"/app/LICENSE\").read_bytes()).hexdigest() == \"c7797128762ac2d810fc51bf05f2457bc666658377cbe3902650e093919074b3\""
-              python -m supportbot.migrations
-              python -c "import sqlite3; connection = sqlite3.connect(\"/tmp/supportbot-smoke.db\"); assert connection.execute(\"SELECT version_num FROM alembic_version\").fetchone() == (\"0011_durable_ingress_reconciliation\",)"'
+              python -c "from hashlib import sha256; from pathlib import Path; assert sha256(Path(\"/app/LICENSE\").read_bytes()).hexdigest() == \"d81f7122bd70d76feebbd3634701488586b0bcc21b8bd90e1e1edf0acc4e8be7\""
+              python -m suppsystem.migrations
+              python -c "import sqlite3; connection = sqlite3.connect(\"/tmp/suppsystem-smoke.db\"); assert connection.execute(\"SELECT version_num FROM alembic_version\").fetchone() == (\"0011_durable_ingress_reconciliation\",)"'
       - name: Create Trivy report
         run: |
           docker run --rm \
             --volume "$PWD:/work" \
             --workdir /work \
             aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e \
-            image --input supportbot-image.tar --format json --output trivy.json
+            image --input suppsystem-image.tar --format json --output trivy.json
       - name: Create CycloneDX SBOM
         run: |
           docker run --rm \
             --volume "$PWD:/work:ro" \
             --workdir /work \
             anchore/syft:v1.44.0-debug@sha256:6dd8fb28e1b799e7cadaff6be2ec6d555757c4eeec0c0e48162f20b042ffa1ff \
-            "docker-archive:/work/supportbot-image.tar" -o cyclonedx-json > sbom.cdx.json
+            "docker-archive:/work/suppsystem-image.tar" -o cyclonedx-json > sbom.cdx.json
       - name: Enforce HIGH and CRITICAL vulnerability gate
         run: |
           docker run --rm \
             --volume "$PWD:/work:ro" \
             --workdir /work \
             aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e \
-            image --input supportbot-image.tar --exit-code 1 --severity HIGH,CRITICAL
+            image --input suppsystem-image.tar --exit-code 1 --severity HIGH,CRITICAL
       - name: Publish verified image
         id: publish
         shell: bash

@@ -10,11 +10,11 @@ from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 from sqlalchemy import event, func, select
 
-from supportbot.api import create_app
-from supportbot.config import Settings
-from supportbot.database import Database
-from supportbot.migrations import upgrade_database
-from supportbot.models import (
+from suppsystem.api import create_app
+from suppsystem.config import Settings
+from suppsystem.database import Database
+from suppsystem.migrations import upgrade_database
+from suppsystem.models import (
     DeliveryOutbox,
     DeliveryStatus,
     Direction,
@@ -24,8 +24,8 @@ from supportbot.models import (
     TicketStatus,
     utcnow,
 )
-from supportbot.service_types import DeliveryJob, TicketView, TopicProvisioningConflictError
-from supportbot.services import TicketService
+from suppsystem.service_types import DeliveryJob, TicketView, TopicProvisioningConflictError
+from suppsystem.services import TicketService
 
 pytestmark = pytest.mark.postgres
 

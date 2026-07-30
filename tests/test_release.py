@@ -56,15 +56,15 @@ def test_ci_build_scan_sbom_and_evidence_share_one_immutable_image() -> None:
     )
     assert "ghcr.io/dever502/suppsystem" in text
     assert "IMAGE_REFERENCE=%s" in text
-    assert "supportbot-image.tar" in text
-    assert "chmod 0644 supportbot-image.tar" in text
+    assert "suppsystem-image.tar" in text
+    assert "chmod 0644 suppsystem-image.tar" in text
     assert "HIGH,CRITICAL" in rendered_steps
     assert "--ignore-unfixed" not in text
     assert "aquasec/trivy:0.70.0@sha256:" in text
     assert "anchore/syft:v1.44.0-debug@sha256:" in text
-    assert "docker-archive:/work/supportbot-image.tar" in text
+    assert "docker-archive:/work/suppsystem-image.tar" in text
     assert "SYFT_REGISTRY_AUTH_PASSWORD" not in text
-    assert "supportbot.migrations" in rendered_steps
+    assert "suppsystem.migrations" in rendered_steps
     license_digest = sha256((ROOT / "LICENSE").read_bytes()).hexdigest()
     assert "/app/LICENSE" in text and license_digest in text
     upload = next(step for step in steps if "actions/upload-artifact@" in step.get("uses", ""))
@@ -97,7 +97,7 @@ def test_public_start_script_is_transparent_and_pins_the_pulled_image() -> None:
     assert "docker pull" in text
     assert "RepoDigests" in text
     assert "config --format json" in text
-    assert "python -m supportbot.production" in text
+    assert "python -m suppsystem.production" in text
     assert "up --detach --wait" in text
     for unsafe in ("sudo ", "curl ", "source ", "eval "):
         assert unsafe not in text
@@ -137,11 +137,11 @@ def test_public_documentation_is_curated() -> None:
 
 def test_alerts_cover_recorded_remnawave_failure_outcomes() -> None:
     alerts = yaml.safe_load(
-        (ROOT / "deploy/prometheus/supportbot-alerts.yml").read_text(encoding="utf-8")
+        (ROOT / "deploy/prometheus/suppsystem-alerts.yml").read_text(encoding="utf-8")
     )
     rules = alerts["groups"][0]["rules"]
     external_failures = next(
-        rule for rule in rules if rule["alert"] == "SupportbotExternalRequestFailures"
+        rule for rule in rules if rule["alert"] == "SuppsystemExternalRequestFailures"
     )
 
     assert "http_5xx" in external_failures["expr"]
@@ -153,5 +153,5 @@ def test_verification_enforces_coverage_threshold() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
     assert "pytest-cov" in pyproject
-    assert "--cov=supportbot" in verify
+    assert "--cov=suppsystem" in verify
     assert "--cov-fail-under=" in verify

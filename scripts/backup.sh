@@ -36,7 +36,7 @@ trap 'exit 143' TERM
 
 case "$backend" in
     sqlite)
-        compose exec -T supportbot python -m supportbot.operations sqlite-backup > "$temporary"
+        compose exec -T suppsystem python -m suppsystem.operations sqlite-backup > "$temporary"
         ;;
     postgres)
         compose exec -T postgres sh -eu -c \

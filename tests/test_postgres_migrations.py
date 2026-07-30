@@ -11,8 +11,8 @@ from alembic import command
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from supportbot.migrations import build_alembic_config, upgrade_database
-from supportbot.models import (
+from suppsystem.migrations import build_alembic_config, upgrade_database
+from suppsystem.models import (
     Base,
     BlocklistEntry,
     DeliveryOutbox,

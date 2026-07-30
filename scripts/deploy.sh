@@ -7,8 +7,8 @@ usage() {
 }
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-deploy_dir=${DEPLOY_DIR:-/opt/supportbot}
-env_file=${SUPPORTBOT_ENV_FILE:-${deploy_dir}/.env}
+deploy_dir=${DEPLOY_DIR:-/opt/suppsystem}
+env_file=${SUPPSYSTEM_ENV_FILE:-${deploy_dir}/.env}
 state_file=${DEPLOYMENT_STATE_FILE:-${deploy_dir}/deployment.env}
 rollback_file=${ROLLBACK_STATE_FILE:-${deploy_dir}/rollback.env}
 temporary_state=
@@ -67,7 +67,7 @@ write_state() {
     umask 077
     {
         printf 'APP_IMAGE=%s\n' "$image"
-        printf 'SUPPORTBOT_ENV_FILE=%s\n' "$env_file"
+        printf 'SUPPSYSTEM_ENV_FILE=%s\n' "$env_file"
     } > "$output"
 }
 
@@ -78,7 +78,7 @@ preflight() {
         echo "Deployment state does not contain APP_IMAGE" >&2
         exit 1
     }
-    rendered=$(mktemp "${TMPDIR:-/tmp}/supportbot-compose.XXXXXX.json")
+    rendered=$(mktemp "${TMPDIR:-/tmp}/suppsystem-compose.XXXXXX.json")
     if ! compose_with_state "$candidate_state" config --format json > "$rendered"; then
         rm -f "$rendered"
         return 1
@@ -87,7 +87,7 @@ preflight() {
         rm -f "$rendered"
         return 1
     fi
-    if ! docker run --rm -i "$image" python -m supportbot.production < "$rendered"; then
+    if ! docker run --rm -i "$image" python -m suppsystem.production < "$rendered"; then
         rm -f "$rendered"
         return 1
     fi

@@ -7,12 +7,12 @@ from tempfile import TemporaryDirectory
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from supportbot.migrations import upgrade_database
-from supportbot.models import Base
+from suppsystem.migrations import upgrade_database
+from suppsystem.models import Base
 
 
 async def check_migrations() -> None:
-    with TemporaryDirectory(prefix="supportbot-migrations-") as directory:
+    with TemporaryDirectory(prefix="suppsystem-migrations-") as directory:
         database_path = Path(directory) / "support.db"
         database_url = f"sqlite+aiosqlite:///{database_path}"
         await upgrade_database(database_url)

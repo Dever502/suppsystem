@@ -11,11 +11,11 @@ from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 from sqlalchemy import func, select, text
 
-from supportbot.api import API_TICKET_CLOSED_TEXT, create_app
-from supportbot.config import Settings
-from supportbot.database import Database
-from supportbot.metrics import MetricsRegistry
-from supportbot.models import (
+from suppsystem.api import API_TICKET_CLOSED_TEXT, create_app
+from suppsystem.config import Settings
+from suppsystem.database import Database
+from suppsystem.metrics import MetricsRegistry
+from suppsystem.models import (
     DeliveryOutbox,
     Direction,
     OperatorAction,
@@ -24,8 +24,8 @@ from supportbot.models import (
     TicketStatus,
     WorkStatus,
 )
-from supportbot.runtime_health import RuntimeHealth
-from supportbot.services import TicketService, TicketView
+from suppsystem.runtime_health import RuntimeHealth
+from suppsystem.services import TicketService, TicketView
 
 
 @pytest.fixture
@@ -601,9 +601,9 @@ async def test_metrics_exposes_queue_and_runtime_metrics_without_pii(
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")
-    assert 'support_queue_depth{queue="delivery"} 1' in response.text
-    assert "support_queue_oldest_age_seconds" in response.text
-    assert "support_heartbeat_age_seconds" in response.text
+    assert 'suppsystem_queue_depth{queue="delivery"} 1' in response.text
+    assert "suppsystem_queue_oldest_age_seconds" in response.text
+    assert "suppsystem_heartbeat_age_seconds" in response.text
     assert "must not appear" not in response.text
     assert str(ticket.telegram_user_id) not in response.text
 
@@ -621,10 +621,10 @@ async def test_metrics_use_retained_attempt_gauge_and_record_remnawave_failures(
 
     rendered = await metrics.render(database, health)
 
-    assert "# TYPE support_retained_job_attempts gauge" in rendered
-    assert "support_job_attempts_total" not in rendered
-    assert 'support_events_total{component="remnawave",outcome="http_5xx"} 1' in rendered
-    assert 'support_events_total{component="remnawave",outcome="request_error"} 1' in rendered
+    assert "# TYPE suppsystem_retained_job_attempts gauge" in rendered
+    assert "suppsystem_job_attempts_total" not in rendered
+    assert 'suppsystem_events_total{component="remnawave",outcome="http_5xx"} 1' in rendered
+    assert 'suppsystem_events_total{component="remnawave",outcome="request_error"} 1' in rendered
 
 
 async def test_ready_reports_runtime_components(
@@ -929,7 +929,7 @@ async def test_api_trusted_proxy_walks_forwarded_chain_from_nearest_hop(
 
 def test_nginx_example_overwrites_untrusted_forwarded_chain() -> None:
     config = (
-        Path(__file__).resolve().parents[1] / "deploy" / "nginx" / "supportbot-api.conf.example"
+        Path(__file__).resolve().parents[1] / "deploy" / "nginx" / "suppsystem-api.conf.example"
     ).read_text(encoding="utf-8")
 
     assert "proxy_set_header X-Forwarded-For $remote_addr;" in config

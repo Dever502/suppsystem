@@ -9,11 +9,11 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import CopyMessage
 from pydantic import SecretStr
 
-from supportbot.config import Settings
-from supportbot.delivery import DeliveryWorker
-from supportbot.models import Direction
-from supportbot.runtime_health import ComponentStatus, RuntimeHealth
-from supportbot.services import DeliveryJob
+from suppsystem.config import Settings
+from suppsystem.delivery import DeliveryWorker
+from suppsystem.models import Direction
+from suppsystem.runtime_health import ComponentStatus, RuntimeHealth
+from suppsystem.services import DeliveryJob
 
 
 class MissingTopicBot:
@@ -301,7 +301,7 @@ async def test_stale_success_is_not_reported_as_delivered(tmp_path: Path, caplog
     service = FakeTicketService(transitions_applied=False)
     worker = delivery_worker(tmp_path, service=service, bot=SuccessfulBot())
 
-    with caplog.at_level(logging.INFO, logger="supportbot.delivery"):
+    with caplog.at_level(logging.INFO, logger="suppsystem.delivery"):
         await worker._deliver(delivery_job())
 
     events = [getattr(record, "event", None) for record in caplog.records]

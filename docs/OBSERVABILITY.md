@@ -16,23 +16,23 @@ Start with these panels:
 
 | Panel | PromQL |
 | --- | --- |
-| Delivery queue depth | `support_queue_depth{queue="delivery"}` |
-| Notification queue depth | `support_queue_depth{queue="notification"}` |
-| Oldest delivery age | `support_queue_oldest_age_seconds{queue="delivery"}` |
-| Oldest notification age | `support_queue_oldest_age_seconds{queue="notification"}` |
-| Failed jobs | `support_failed_jobs` |
-| Attempts in retained jobs | `support_retained_job_attempts` |
-| Worker heartbeat age | `support_heartbeat_age_seconds` |
-| Remnawave unknown outcomes | `support_panel_unknown` |
-| External failures by component | `increase(support_events_total{outcome=~"failed|retry|unknown|unexpected_response|http_5xx|request_error"}[15m])` |
-| External request latency average | `rate(support_external_request_duration_seconds_sum[5m]) / rate(support_external_request_duration_seconds_count[5m])` |
+| Delivery queue depth | `suppsystem_queue_depth{queue="delivery"}` |
+| Notification queue depth | `suppsystem_queue_depth{queue="notification"}` |
+| Oldest delivery age | `suppsystem_queue_oldest_age_seconds{queue="delivery"}` |
+| Oldest notification age | `suppsystem_queue_oldest_age_seconds{queue="notification"}` |
+| Failed jobs | `suppsystem_failed_jobs` |
+| Attempts in retained jobs | `suppsystem_retained_job_attempts` |
+| Worker heartbeat age | `suppsystem_heartbeat_age_seconds` |
+| Remnawave unknown outcomes | `suppsystem_panel_unknown` |
+| External failures by component | `increase(suppsystem_events_total{outcome=~"failed|retry|unknown|unexpected_response|http_5xx|request_error"}[15m])` |
+| External request latency average | `rate(suppsystem_external_request_duration_seconds_sum[5m]) / rate(suppsystem_external_request_duration_seconds_count[5m])` |
 
 High age with low depth usually means a stuck job; high depth with low age means a traffic spike or
 slow downstream.
 
 ## Alert rules
 
-A starter Prometheus rule file is available at `deploy/prometheus/supportbot-alerts.yml`.
+A starter Prometheus rule file is available at `deploy/prometheus/suppsystem-alerts.yml`.
 
 Tune thresholds to traffic. Failed jobs and unknown Remnawave outcomes are usually immediately actionable.
 

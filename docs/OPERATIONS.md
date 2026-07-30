@@ -35,7 +35,7 @@ DATA_DIR=./data
 ./scripts/start.sh sqlite
 ```
 
-SQLite и heartbeat хранятся в volume `support_data`. Удаление контейнера данные не удаляет;
+SQLite и heartbeat хранятся в volume `suppsystem_data`. Удаление контейнера данные не удаляет;
 удаление volume — удаляет.
 
 ### PostgreSQL
@@ -43,12 +43,12 @@ SQLite и heartbeat хранятся в volume `support_data`. Удаление 
 Добавьте три разных URL-safe пароля длиной не менее 16 символов:
 
 ```dotenv
-POSTGRES_DB=supportbot
+POSTGRES_DB=suppsystem
 POSTGRES_ADMIN_USER=postgres
 POSTGRES_ADMIN_PASSWORD=replace-with-random-password-1
-POSTGRES_MIGRATION_USER=supportbot_migrator
+POSTGRES_MIGRATION_USER=suppsystem_migrator
 POSTGRES_MIGRATION_PASSWORD=replace-with-random-password-2
-POSTGRES_RUNTIME_USER=supportbot_runtime
+POSTGRES_RUNTIME_USER=suppsystem_runtime
 POSTGRES_RUNTIME_PASSWORD=replace-with-random-password-3
 ```
 
@@ -58,9 +58,6 @@ POSTGRES_RUNTIME_PASSWORD=replace-with-random-password-3
 
 `postgres-provision` создаёт least-privilege роли, `postgres-migrate` применяет Alembic, затем
 запускается приложение без migration credential. Поддерживается один экземпляр приложения.
-
-Для старого volume с `POSTGRES_USER=supportbot` используйте прежние имя и пароль в
-`POSTGRES_ADMIN_USER` и `POSTGRES_ADMIN_PASSWORD`.
 
 `start.sh` скачивает release image, закрепляет его digest, проверяет Compose и ждёт healthcheck.
 Другой image можно передать вторым аргументом.
@@ -103,7 +100,7 @@ proxy. Каждая мутация требует
 `X-Idempotency-Key`: точный повтор возвращает сохранённый ответ, другой payload с тем же ключом —
 `409 Conflict`. Rate limit и защита токена process-local и сбрасываются при рестарте.
 
-Пример reverse proxy: [`deploy/nginx/supportbot-api.conf.example`](../deploy/nginx/supportbot-api.conf.example).
+Пример reverse proxy: [`deploy/nginx/suppsystem-api.conf.example`](../deploy/nginx/suppsystem-api.conf.example).
 
 ### Remnawave и webhook
 
@@ -149,7 +146,7 @@ HMAC-SHA256 и дедуплицирует эффект по `event_id`.
 
 ## Production
 
-Рекомендуемая схема: конфигурация в `/opt/supportbot`, PostgreSQL и heartbeat в Docker volumes,
+Рекомендуемая схема: конфигурация в `/opt/suppsystem`, PostgreSQL и heartbeat в Docker volumes,
 Operator API на loopback. `.env` хранит секреты с правами `0600`; `deployment.env` и
 `rollback.env` содержат текущий и предыдущий immutable image.
 
@@ -159,13 +156,13 @@ Operator API на loopback. `.env` хранит секреты с правами
 но сохраняет и запускает только фактически полученный RepoDigest.
 
 ```bash
-DEPLOY_DIR=/opt/supportbot \
-  sh scripts/deploy.sh deploy registry.example/supportbot:v1.0.0
-DEPLOY_DIR=/opt/supportbot sh scripts/production-compose.sh ps
+DEPLOY_DIR=/opt/suppsystem \
+  sh scripts/deploy.sh deploy registry.example/suppsystem:v1.0.0
+DEPLOY_DIR=/opt/suppsystem sh scripts/production-compose.sh ps
 ```
 
 ```bash
-DEPLOY_DIR=/opt/supportbot sh scripts/deploy.sh rollback
+DEPLOY_DIR=/opt/suppsystem sh scripts/deploy.sh rollback
 ```
 
 Rollback разрешён только на ранее успешно запущенный image. Скрипт не выполняет downgrade схемы:
@@ -174,9 +171,9 @@ Rollback разрешён только на ранее успешно запущ
 Повседневные команды:
 
 ```bash
-DEPLOY_DIR=/opt/supportbot sh scripts/production-compose.sh ps
-DEPLOY_DIR=/opt/supportbot sh scripts/production-compose.sh logs -f --tail=200 supportbot
-DEPLOY_DIR=/opt/supportbot sh scripts/production-compose.sh restart supportbot
+DEPLOY_DIR=/opt/suppsystem sh scripts/production-compose.sh ps
+DEPLOY_DIR=/opt/suppsystem sh scripts/production-compose.sh logs -f --tail=200 suppsystem
+DEPLOY_DIR=/opt/suppsystem sh scripts/production-compose.sh restart suppsystem
 ```
 
 GitHub Actions выполняет verify и PostgreSQL matrix. Push в `main` или release tag публикует GHCR
@@ -203,7 +200,7 @@ HTTP endpoints доступны при включённом API. `/health` пр�
 
 ### SQLite
 
-Перед запуском экспортируйте `APP_IMAGE` и `SUPPORTBOT_ENV_FILE` так же, как для Compose.
+Перед запуском экспортируйте `APP_IMAGE` и `SUPPSYSTEM_ENV_FILE` так же, как для Compose.
 
 ```bash
 COMPOSE_FILE=compose.production.sqlite.yaml \
@@ -218,9 +215,9 @@ Backup не останавливает приложение. Restore прове�
 ### PostgreSQL
 
 ```bash
-PRODUCTION_DEPLOYMENT=yes DEPLOY_DIR=/opt/supportbot \
+PRODUCTION_DEPLOYMENT=yes DEPLOY_DIR=/opt/suppsystem \
   sh scripts/backup.sh postgres /srv/backups/support-$(date +%F-%H%M).dump
-CONFIRM_RESTORE=yes PRODUCTION_DEPLOYMENT=yes DEPLOY_DIR=/opt/supportbot \
+CONFIRM_RESTORE=yes PRODUCTION_DEPLOYMENT=yes DEPLOY_DIR=/opt/suppsystem \
   sh scripts/restore.sh postgres /srv/backups/support-backup.dump
 ```
 

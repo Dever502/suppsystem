@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, Mock
 
 from aiogram.types import Update
 
-from supportbot.telegram_ingress import DurableTelegramIngressMiddleware
-from supportbot.telegram_limits import TelegramInboundRateLimiter, TelegramRateLimiter
+from suppsystem.telegram_ingress import DurableTelegramIngressMiddleware
+from suppsystem.telegram_limits import TelegramInboundRateLimiter, TelegramRateLimiter
 
 
 class Clock:

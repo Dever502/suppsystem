@@ -4,7 +4,7 @@ import json
 import logging
 import sys
 
-from supportbot.logging_config import JsonFormatter, redact_text
+from suppsystem.logging_config import JsonFormatter, redact_text
 
 
 def formatted(record: logging.LogRecord) -> dict[str, object]:

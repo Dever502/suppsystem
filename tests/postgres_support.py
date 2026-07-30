@@ -13,8 +13,8 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 POSTGRES_TEST_DATABASE_ENV = "TEST_POSTGRES_DATABASE_URL"
 POSTGRES_TEST_RESET_GUARD_ENV = "ALLOW_POSTGRES_TEST_DATABASE_CREATION"
-POSTGRES_TEST_DATABASE_NAME = "supportbot_test"
-POSTGRES_TEST_USERNAME = "supportbot_test"
+POSTGRES_TEST_DATABASE_NAME = "suppsystem_test"
+POSTGRES_TEST_USERNAME = "suppsystem_test"
 _SAFE_DATABASE_NAME = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 
 

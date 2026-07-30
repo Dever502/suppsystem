@@ -10,9 +10,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.dml import Update
 
-from supportbot.database import Database
-from supportbot.durable_work import MAX_RECONCILIATION_ATTEMPTS, DurableWorkRepository
-from supportbot.models import (
+from suppsystem.database import Database
+from suppsystem.durable_work import MAX_RECONCILIATION_ATTEMPTS, DurableWorkRepository
+from suppsystem.models import (
     DeliveryOutbox,
     NotificationOutbox,
     NotificationStatus,
@@ -24,13 +24,13 @@ from supportbot.models import (
     WorkStatus,
     utcnow,
 )
-from supportbot.panel import PanelService
-from supportbot.panel_notifications import (
+from suppsystem.panel import PanelService
+from suppsystem.panel_notifications import (
     gift_notification_text,
     revoke_link_notification_text,
 )
-from supportbot.reconciliation import ReconciliationWorker
-from supportbot.remnawave import (
+from suppsystem.reconciliation import ReconciliationWorker
+from suppsystem.remnawave import (
     RemnawaveAmbiguousIdentityError,
     RemnawaveBulkActionResult,
     RemnawaveHwidDeviceResetResult,
@@ -40,8 +40,8 @@ from supportbot.remnawave import (
     RemnawaveUnknownOutcomeError,
     RemnawaveUser,
 )
-from supportbot.services import TicketView
-from supportbot.telegram_formatting import (
+from suppsystem.services import TicketView
+from suppsystem.telegram_formatting import (
     expiration_text,
     format_subscription_lookup,
     panel_status_text,
@@ -311,8 +311,8 @@ def test_telegram_adapter_explains_ambiguous_identity() -> None:
 
 
 def test_telegram_adapter_formats_subscription_lookup() -> None:
-    from supportbot.panel import PanelSubscriptionLookup, subscription_info
-    from supportbot.telegram_adapter import TOPIC_COMMANDS
+    from suppsystem.panel import PanelSubscriptionLookup, subscription_info
+    from suppsystem.telegram_adapter import TOPIC_COMMANDS
 
     lookup = PanelSubscriptionLookup(
         status="found",
@@ -343,7 +343,7 @@ def test_telegram_adapter_formats_subscription_lookup() -> None:
 
 
 def test_subscription_lookup_uses_compact_telegram_search_label() -> None:
-    from supportbot.panel import PanelSubscriptionLookup
+    from suppsystem.panel import PanelSubscriptionLookup
 
     text = format_subscription_lookup(
         PanelSubscriptionLookup(

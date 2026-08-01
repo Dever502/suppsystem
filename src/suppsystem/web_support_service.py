@@ -400,7 +400,7 @@ class WebSupportService(TicketServiceBase):
                         "ticket_id": ticket.id,
                         "email": normalized_email,
                         "message_content": content,
-                        "created": created,
+                        "conversation_created": created,
                         "reopened": reopened,
                         "suppressed": suppressed,
                     },

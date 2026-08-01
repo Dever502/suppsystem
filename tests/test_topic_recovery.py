@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.methods import CopyMessage
+from aiogram.methods import CopyMessage, EditForumTopic
 from pydantic import SecretStr
 from sqlalchemy import select
 
@@ -66,6 +66,18 @@ class RecoveryBot:
         return SimpleNamespace(message_id=800 + len(self.copied_messages))
 
 
+class AlreadySynchronizedBot(RecoveryBot):
+    async def edit_forum_topic(self, **kwargs: object) -> None:
+        raise TelegramBadRequest(
+            method=EditForumTopic(
+                chat_id=int(kwargs["chat_id"]),
+                message_thread_id=int(kwargs["message_thread_id"]),
+                name=str(kwargs["name"]),
+            ),
+            message="Bad Request: TOPIC_NOT_MODIFIED",
+        )
+
+
 def recovery_settings(tmp_path: Path) -> Settings:
     return Settings(
         support_bot_token=SecretStr("test-token"),
@@ -91,6 +103,38 @@ async def attach_topic(service: TicketService, ticket_id: str, topic_id: int) ->
     token = await service.claim_topic_provisioning(ticket_id)
     assert token is not None
     await service.attach_topic(ticket_id, topic_id, token=token)
+
+
+async def test_topic_not_modified_completes_reconciliation_without_error(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/topic-already-current.db")
+    await database.create_schema_for_tests()
+    try:
+        service = TicketService(database)
+        ticket = await service.open_or_reopen(
+            telegram_user_id=61_000,
+            display_name="Already synchronized",
+            username=None,
+        )
+        await attach_topic(service, ticket.id, 61_100)
+        bot = AlreadySynchronizedBot(replacement_topic_id=61_101)
+        adapter = recovery_adapter(
+            service=service,
+            bot=bot,
+            settings=recovery_settings(tmp_path),
+        )
+
+        with caplog.at_level(logging.INFO, logger="suppsystem.telegram_topic_manager"):
+            assert await adapter.reconcile_ticket_topic(ticket.id) is True
+
+        events = [getattr(record, "event", None) for record in caplog.records]
+        assert "topic_sync_already_current" in events
+        assert "topic_sync_failed" not in events
+        assert (await service.get_ticket(ticket.id)).topic_id == 61_100
+    finally:
+        await database.dispose()
 
 
 async def test_restart_recovers_unclaimed_waiting_delivery_after_partial_success(

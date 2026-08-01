@@ -31,7 +31,7 @@ from suppsystem.telegram_constants import (
     TICKET_REOPENED_BY_CUSTOMER_TEXT,
     TICKET_REOPENED_BY_OPERATOR_TEXT,
 )
-from suppsystem.telegram_errors import is_missing_topic_error
+from suppsystem.telegram_errors import is_missing_topic_error, is_topic_not_modified_error
 from suppsystem.telegram_formatting import (
     date_text,
     internal_notes_text,
@@ -84,6 +84,21 @@ def test_missing_topic_errors_are_recognized(message: str) -> None:
 
 def test_unrelated_bad_request_is_not_a_missing_topic() -> None:
     assert is_missing_topic_error(RuntimeError("Bad Request: message is too long")) is False
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Bad Request: TOPIC_NOT_MODIFIED",
+        "Bad Request: topic is not modified",
+    ],
+)
+def test_unchanged_topic_errors_are_recognized(message: str) -> None:
+    assert is_topic_not_modified_error(RuntimeError(message)) is True
+
+
+def test_unrelated_bad_request_is_not_an_unchanged_topic() -> None:
+    assert is_topic_not_modified_error(RuntimeError("Bad Request: message is too long")) is False
 
 
 async def test_support_group_preflight_accepts_forum_admin() -> None:

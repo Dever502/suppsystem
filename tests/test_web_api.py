@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -48,9 +49,13 @@ async def _context(tmp_path: Path) -> tuple[httpx.AsyncClient, Database, TicketS
     return client, database, service
 
 
-async def test_web_message_flow_is_channel_aware_and_idempotent(tmp_path: Path) -> None:
+async def test_web_message_flow_is_channel_aware_and_idempotent(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     client, database, service = await _context(tmp_path)
     try:
+        caplog.set_level(logging.INFO, logger="suppsystem.web_support_service")
         headers = {"X-API-Token": WEB_TOKEN, "X-Idempotency-Key": "web-message-0001"}
         payload = {
             "external_user_id": "customer-42",
@@ -67,6 +72,12 @@ async def test_web_message_flow_is_channel_aware_and_idempotent(tmp_path: Path) 
         )
 
         assert first.status_code == 200
+        accepted_record = next(
+            record
+            for record in caplog.records
+            if getattr(record, "event", None) == "web_message_accepted"
+        )
+        assert accepted_record.conversation_created is True
         assert replay.json() == first.json()
         assert conflict.status_code == 409
         body = first.json()

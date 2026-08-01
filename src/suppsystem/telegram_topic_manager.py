@@ -19,7 +19,7 @@ from suppsystem.telegram_constants import (
     TICKET_REOPENED_BY_CUSTOMER_TEXT,
     TICKET_REOPENED_BY_OPERATOR_TEXT,
 )
-from suppsystem.telegram_errors import is_missing_topic_error
+from suppsystem.telegram_errors import is_missing_topic_error, is_topic_not_modified_error
 from suppsystem.telegram_formatting import (
     customer_identity,
     format_subscription_lookup,
@@ -268,6 +268,16 @@ class TelegramTopicManager:
                 name=topic_name(ticket, closed=ticket.status.value == "closed"),
             )
         except TelegramAPIError as error:
+            if is_topic_not_modified_error(error):
+                logger.info(
+                    "Support topic is already synchronized",
+                    extra={
+                        "ticket_id": ticket.id,
+                        "topic_id": ticket.topic_id,
+                        "event": "topic_sync_already_current",
+                    },
+                )
+                return True
             logger.exception(
                 "Unable to synchronize forum topic",
                 exc_info=True,

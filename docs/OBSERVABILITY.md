@@ -1,79 +1,89 @@
-# Observability and incident runbook
+# Наблюдаемость и регламент реагирования на инциденты
 
-Minimal dashboard, alerts and first-response steps for a single-instance deployment.
+Минимальный дашборд, оповещения и порядок первичного реагирования для развёртывания в одном
+экземпляре.
 
-## Signals
+## Сигналы
 
-The application exposes Prometheus-compatible metrics on `/metrics` when the Operator API is enabled. Keep the API bound to loopback and scrape it through the same trusted host or monitoring network.
+При включённом Operator API приложение публикует совместимые с Prometheus метрики на `/metrics`.
+Оставляйте API привязанным к loopback-интерфейсу и собирайте метрики с того же доверенного хоста
+либо из сети мониторинга.
 
-Useful JSON log fields are `event`, `trace_id`, `ticket_id`, `delivery_id`,
-`operator_action_id`, `error_kind` and redacted `error_message`. Common URI credentials, bearer
-tokens and query-string secrets are redacted.
+Полезные поля JSON-логов: `event`, `trace_id`, `ticket_id`, `delivery_id`,
+`operator_action_id`, `error_kind` и замаскированное `error_message`. Учётные данные в URI,
+bearer-токены и секреты в строке запроса маскируются.
 
-## Dashboard starter panels
+## Базовые панели дашборда
 
-Start with these panels:
+Начните со следующих панелей:
 
-| Panel | PromQL |
+| Панель | PromQL |
 | --- | --- |
-| Delivery queue depth | `suppsystem_queue_depth{queue="delivery"}` |
-| Notification queue depth | `suppsystem_queue_depth{queue="notification"}` |
-| Oldest delivery age | `suppsystem_queue_oldest_age_seconds{queue="delivery"}` |
-| Oldest notification age | `suppsystem_queue_oldest_age_seconds{queue="notification"}` |
-| Failed jobs | `suppsystem_failed_jobs` |
-| Attempts in retained jobs | `suppsystem_retained_job_attempts` |
-| Worker heartbeat age | `suppsystem_heartbeat_age_seconds` |
-| Remnawave unknown outcomes | `suppsystem_panel_unknown` |
-| External failures by component | `increase(suppsystem_events_total{outcome=~"failed|retry|unknown|unexpected_response|http_5xx|request_error"}[15m])` |
-| External request latency average | `rate(suppsystem_external_request_duration_seconds_sum[5m]) / rate(suppsystem_external_request_duration_seconds_count[5m])` |
+| Размер очереди доставки | `suppsystem_queue_depth{queue="delivery"}` |
+| Размер очереди уведомлений | `suppsystem_queue_depth{queue="notification"}` |
+| Возраст старейшей доставки | `suppsystem_queue_oldest_age_seconds{queue="delivery"}` |
+| Возраст старейшего уведомления | `suppsystem_queue_oldest_age_seconds{queue="notification"}` |
+| Неудавшиеся задания | `suppsystem_failed_jobs` |
+| Попытки в сохранённых заданиях | `suppsystem_retained_job_attempts` |
+| Давность heartbeat воркеров | `suppsystem_heartbeat_age_seconds` |
+| Неопределённые результаты Remnawave | `suppsystem_panel_unknown` |
+| Внешние ошибки по компонентам | `increase(suppsystem_events_total{outcome=~"failed|retry|unknown|unexpected_response|http_5xx|request_error"}[15m])` |
+| Средняя задержка внешних запросов | `rate(suppsystem_external_request_duration_seconds_sum[5m]) / rate(suppsystem_external_request_duration_seconds_count[5m])` |
 
-High age with low depth usually means a stuck job; high depth with low age means a traffic spike or
-slow downstream.
+Большой возраст при малом размере очереди обычно означает зависшее задание; большой размер при
+малом возрасте — всплеск трафика или замедление внешнего сервиса.
 
-## Alert rules
+## Правила оповещений
 
-A starter Prometheus rule file is available at `deploy/prometheus/suppsystem-alerts.yml`.
+Базовый файл правил Prometheus находится в `deploy/prometheus/suppsystem-alerts.yml`.
 
-Tune thresholds to traffic. Failed jobs and unknown Remnawave outcomes are usually immediately actionable.
+Настройте пороговые значения под свою нагрузку. Неудавшиеся задания и неопределённые результаты
+Remnawave обычно требуют немедленного вмешательства.
 
-## Runbook
+## Порядок действий
 
-### `/ready` is degraded
+### `/ready` сообщает о деградации
 
-1. Identify the degraded component in the response body and logs.
-2. Check Compose/container health and database availability.
-3. For a stale heartbeat, inspect whether the worker is blocked on Telegram, webhook or database I/O.
+1. Определите проблемный компонент по телу ответа и логам.
+2. Проверьте состояние Compose-контейнеров и доступность базы данных.
+3. Если heartbeat устарел, выясните, не заблокирован ли воркер на операциях с Telegram, вебхуком
+   или базой данных.
 
-### Delivery queue is old or failed
+### Очередь доставки устарела или содержит ошибки
 
-1. Check failed jobs, oldest age and logs by `delivery_id`/`ticket_id`.
-2. Look for missing topics, Telegram rate limits or permanent bad requests.
-3. If topic recovery failed, confirm that the Forum topic exists. Do not edit the database directly.
+1. Проверьте неудавшиеся задания, возраст старейшего задания и логи по `delivery_id`/`ticket_id`.
+2. Ищите отсутствующие темы, ограничения частоты и неустранимые ошибки запросов Telegram.
+3. Если восстановить тему не удалось, убедитесь, что Forum-тема существует. Не редактируйте базу
+   данных вручную.
 
-### Notification queue is old or failed
+### Очередь уведомлений устарела или содержит ошибки
 
-1. Check receiver availability, HTTP status, webhook URL and secret.
-2. Respect `Retry-After` unless receiver state changed.
-3. Before manual replay, confirm receiver-side deduplication by notification ID.
+1. Проверьте доступность получателя, HTTP-статус, URL вебхука и секрет.
+2. Соблюдайте `Retry-After`, если состояние получателя не изменилось.
+3. Перед ручным повтором убедитесь, что получатель дедуплицирует уведомления по их ID.
 
-### Remnawave unknown outcome
+### Неопределённый результат Remnawave
 
-1. Do not repeat the operator command while durable reconciliation is pending.
-2. Find the related `operator_action_id` and reconciliation job in logs or database audit rows.
-3. Wait for automatic `completed`, `not_applied` or `inconclusive` classification.
-4. Unavailable or malformed reads retry with backoff and become `inconclusive` after 20 failures.
-5. For `inconclusive`, independently prove the fate of the original call. An administrator may
-   then use `/resolvepanel <operator_action_uuid> applied|not_applied`; otherwise leave the action blocked.
-6. Resolution never repeats a mutation. Confirmed `revokelink applied` performs one read-only lookup
-   so the durable notification contains the current link.
-7. Correlate `panel_action_manually_reconciled` with the actor and action ID in incident notes.
+1. Не повторяйте команду оператора, пока выполняется надёжная сверка результата.
+2. Найдите связанный `operator_action_id` и задание сверки в логах либо строках аудита БД.
+3. Дождитесь автоматической классификации: `completed`, `not_applied` или `inconclusive`.
+4. Недоступные или некорректные ответы читаются повторно с увеличивающейся задержкой. После 20
+   неудач результат переходит в состояние `inconclusive`.
+5. Для `inconclusive` независимо установите результат исходного вызова. После этого администратор
+   может выполнить `/resolvepanel <operator_action_uuid> applied|not_applied`; иначе оставьте
+   действие заблокированным.
+6. Разрешение ситуации никогда не повторяет мутацию. Подтверждённый `revokelink applied` выполняет
+   один запрос только для чтения, чтобы надёжное уведомление содержало актуальную ссылку.
+7. Зафиксируйте в описании инцидента событие `panel_action_manually_reconciled`, исполнителя и ID
+   действия.
 
-### Suspected secret exposure
+### Подозрение на утечку секрета
 
-1. Preserve restricted audit logs and rotate the affected secret immediately.
-2. Check exceptions, URLs, headers and deployment variables for the value.
-3. Add a regression test for the leak shape.
+1. Сохраните защищённые журналы аудита и немедленно замените затронутый секрет.
+2. Проверьте исключения, URL, заголовки и переменные развёртывания на наличие этого значения.
+3. Добавьте регрессионный тест для обнаруженного варианта утечки.
 
-## Incident notes
+## Описание инцидента
 
-Record timing, impact, relevant IDs, remediation, recovery method and follow-up tests or alerts.
+Зафиксируйте время, влияние, связанные ID, выполненные действия, способ восстановления, а также
+последующие тесты и оповещения.

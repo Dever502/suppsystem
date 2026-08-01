@@ -198,13 +198,7 @@ HMAC-SHA256 и дедуплицирует эффект по `event_id`.
 В General topic хранится одно сообщение `📊 Статистика` с периодами сегодня, 7 и 30 дней; callback
 доступен только `ADMIN_TELEGRAM_IDS`.
 
-## Production
-
-Рекомендуемая схема: конфигурация в `/opt/suppsystem`, PostgreSQL и heartbeat в Docker volumes,
-Operator API на loopback. `.env` хранит секреты с правами `0600`; `deployment.env` и
-`rollback.env` содержат текущий и предыдущий immutable image.
-
-### Deploy и rollback
+## Deploy и rollback
 
 Значения `registry.example/...` ниже — placeholders. Deploy принимает tag или digest,
 но сохраняет и запускает только фактически полученный RepoDigest.
@@ -234,7 +228,7 @@ GitHub Actions выполняет verify и PostgreSQL matrix. Push в `main` и
 image, Trivy report, CycloneDX SBOM, checksums и release evidence. Workflow не имеет доступа к
 production host; deploy остаётся ручной операцией.
 
-### Health и логи
+## Health и логи
 
 ```bash
 sh scripts/production-compose.sh ps
@@ -291,40 +285,6 @@ docker compose exec suppsystem python -m suppsystem.media_cleanup --apply
 
 `scripts/drill_production_data_path.sh` проверяет deploy, rollback, backup и restore только на
 изолированном стенде. Его отчёты и дампы могут содержать чувствительные данные.
-
-## Разработка
-
-```bash
-make install
-make verify
-make test-postgres
-```
-
-Изменение ORM требует новой Alembic-миграции и проверки fresh install и upgrade. Применённые
-миграции не редактируются задним числом.
-
-## Диагностика
-
-| Проблема | Что проверить |
-| --- | --- |
-| приложение не запускается | `scripts/production-compose.sh logs`, `.env`, Telegram и БД |
-| Telegram preflight | supergroup, Topics, присутствие и права бота, соответствие токена |
-| сообщения не доставляются | health workers, delivery events и задания со статусом `failed` |
-| `/ready` возвращает 503 | компонент из ответа: database, panel, delivery или notification worker |
-
-### Remnawave: `unknown outcome`
-
-Не повторяйте мутацию. Найдите `operator_action_id` и дождитесь `completed`, `not_applied` или
-`inconclusive`; до этого новые мутации тикета заблокированы. Для `inconclusive` независимо
-установите результат исходного вызова и выполните в той же теме:
-
-```text
-/resolvepanel <operator_action_uuid> applied
-/resolvepanel <operator_action_uuid> not_applied
-```
-
-Текущего состояния Remnawave недостаточно: без независимого доказательства оставьте действие
-заблокированным. Команда не повторяет мутацию и сохраняет решение в аудите.
 
 ## Production checklist
 

@@ -172,6 +172,22 @@ def test_disabled_integrations_do_not_require_urls_or_secrets() -> None:
     assert configured.notification_webhook_url is None
 
 
+def test_web_api_requires_a_distinct_strong_token() -> None:
+    configured = settings(
+        web_api_enabled=True,
+        web_api_token=SecretStr("abcdef0123456789abcdef0123456789"),
+    )
+    assert configured.web_identity_mode == "external_id"
+
+    with pytest.raises(ValidationError, match="must differ"):
+        settings(
+            api_enabled=True,
+            api_admin_token=SecretStr(STRONG_SECRET),
+            web_api_enabled=True,
+            web_api_token=SecretStr(STRONG_SECRET),
+        )
+
+
 def test_empty_optional_environment_values_are_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("REMNAWAVE_BASE_URL", "")
     monkeypatch.setenv("REMNAWAVE_API_TOKEN", "")

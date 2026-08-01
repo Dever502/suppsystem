@@ -29,6 +29,8 @@ from suppsystem.services import TicketService
 
 pytestmark = pytest.mark.postgres
 
+API_TOKEN = "0123456789abcdef0123456789abcdef"
+
 
 class ForcedOutboxInsertError(RuntimeError):
     """Test-only failure injected between the ticket transition and outbox commit."""
@@ -486,12 +488,13 @@ async def test_postgres_api_rejects_concurrent_same_key_different_payload(
         settings = Settings(
             support_bot_token=SecretStr("test-token"),
             support_group_id=-100123,
-            api_admin_token=SecretStr("admin-token"),
+            api_enabled=True,
+            api_admin_token=SecretStr(API_TOKEN),
             api_operator_telegram_id=101,
         )
         app = create_app(database=database, ticket_service=service, settings=settings)
         headers = {
-            "X-API-Token": "admin-token",
+            "X-API-Token": API_TOKEN,
             "X-Idempotency-Key": "postgres-api-payload-conflict",
         }
 

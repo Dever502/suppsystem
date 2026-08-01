@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from suppsystem.models import Direction, TicketStatus
+from suppsystem.models import Direction, TicketChannel, TicketStatus
 
 
 class TicketNotFoundError(Exception):
@@ -22,7 +22,7 @@ class TopicProvisioningConflictError(Exception):
 class TicketView:
     id: str
     user_id: int
-    telegram_user_id: int
+    telegram_user_id: int | None
     display_name: str | None
     username: str | None
     topic_id: int | None
@@ -33,6 +33,15 @@ class TicketView:
     closed_at: datetime | None
     close_cycle: int = 0
     reopened: bool = False
+    channel: TicketChannel = TicketChannel.TELEGRAM
+    email: str | None = None
+    identity_provider: str = "telegram"
+    identity_value: str | None = None
+    remnawave_user_uuid: str | None = None
+
+    @property
+    def lock_key(self) -> str:
+        return self.id
 
 
 @dataclass(frozen=True)

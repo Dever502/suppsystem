@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-    echo "Usage: CONFIRM_RESTORE=yes $0 sqlite|postgres INPUT" >&2
+    echo "Usage: CONFIRM_RESTORE=yes $0 sqlite|postgres DATABASE_INPUT [MEDIA_INPUT]" >&2
     exit 2
 }
 
@@ -16,17 +16,26 @@ compose() {
     fi
 }
 
-[ "$#" -eq 2 ] || usage
+[ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage
 [ "${CONFIRM_RESTORE:-}" = "yes" ] || {
     echo "Restore is destructive; set CONFIRM_RESTORE=yes" >&2
     exit 2
 }
 backend=$1
 input=$2
+media_input=${3:-}
 [ -s "$input" ] || {
     echo "Backup does not exist or is empty: $input" >&2
     exit 1
 }
+if [ -n "$media_input" ]; then
+    [ -s "$media_input" ] || {
+        echo "Media backup does not exist or is empty: $media_input" >&2
+        exit 1
+    }
+    compose run --rm -T --no-deps suppsystem \
+        python -m suppsystem.media_archive validate < "$media_input"
+fi
 
 case "$backend" in
     sqlite)
@@ -78,6 +87,11 @@ case "$backend" in
             < "$input"
         ;;
 esac
+
+if [ -n "$media_input" ]; then
+    compose run --rm -T --no-deps suppsystem \
+        python -m suppsystem.media_archive restore < "$media_input"
+fi
 
 if [ "$backend" = "postgres" ]; then
     # The restored archive may be older than the running image. Remove the successful

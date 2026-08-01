@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from fastapi import FastAPI, Query, status
 from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.openapi.utils import get_openapi
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from sqlalchemy import select, text
 
@@ -35,7 +34,10 @@ async def read_messages(
 ) -> list[MessageResponse]:
     statement = (
         select(TicketMessage)
-        .where(TicketMessage.ticket_id == ticket_id)
+        .where(
+            TicketMessage.ticket_id == ticket_id,
+            TicketMessage.suppressed.is_(False),
+        )
         .order_by(TicketMessage.created_at)
         .offset(offset)
         .limit(limit)
@@ -101,7 +103,7 @@ def register_routes(
 
     @app.get("/openapi.json", include_in_schema=False)
     async def openapi_schema() -> dict[str, object]:
-        return get_openapi(title=app.title, version=app.version, routes=app.routes)
+        return app.openapi()
 
     @app.get("/api/v1/tickets", response_model=list[TicketResponse], tags=["tickets"])
     async def list_tickets(

@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from html import escape
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from suppsystem.models import TicketStatus
+from suppsystem.models import TicketChannel, TicketStatus
 from suppsystem.panel import (
     PanelActionResult,
     PanelActionStatus,
@@ -94,16 +94,24 @@ def date_text(value: object | None) -> str:
 
 
 def customer_identity(ticket: TicketView) -> str:
+    if getattr(ticket, "channel", TicketChannel.TELEGRAM) is TicketChannel.WEB:
+        return escape(ticket.display_name or ticket.email or "Web-клиент")
     parts = []
     if ticket.display_name:
         parts.append(escape(ticket.display_name))
     if ticket.username:
         parts.append(f"@{escape(ticket.username)}")
-    return " · ".join(parts) or "Без имени"
+    return " · ".join(parts) or (
+        f"TG:{ticket.telegram_user_id}" if ticket.telegram_user_id is not None else "Без имени"
+    )
 
 
 def operator_ticket_info(ticket: TicketView) -> str:
     topic_id = ticket.topic_id if ticket.topic_id is not None else "—"
+    if getattr(ticket, "channel", TicketChannel.TELEGRAM) is TicketChannel.WEB:
+        identity = f"Email: <code>{escape(ticket.email or '—')}</code>\nИсточник: <code>Web</code>"
+    else:
+        identity = f"Telegram ID: <code>{ticket.telegram_user_id}</code>"
     return (
         "🎫 <b>Тикет</b>\n\n"
         f"Статус: {ticket_status_text(ticket.status)}\n"
@@ -111,7 +119,7 @@ def operator_ticket_info(ticket: TicketView) -> str:
         f"Тема: <code>{topic_id}</code>\n\n"
         "👤 <b>Клиент</b>\n\n"
         f"<b>{customer_identity(ticket)}</b>\n"
-        f"Telegram ID: <code>{ticket.telegram_user_id}</code>\n\n"
+        f"{identity}\n\n"
         "🕒 <b>История</b>\n\n"
         f"Создан: <code>{date_text(ticket.created_at)}</code>\n"
         f"Обновлён: <code>{date_text(ticket.updated_at)}</code>\n"
@@ -142,6 +150,8 @@ def internal_notes_text(notes: Sequence[InternalNoteView]) -> str:
 
 
 def topic_identity(ticket: TicketView) -> str:
+    if getattr(ticket, "channel", TicketChannel.TELEGRAM) is TicketChannel.WEB:
+        return f"Web · {ticket.display_name or ticket.email or 'Клиент'}"
     if ticket.display_name:
         return ticket.display_name
     if ticket.username:
@@ -199,8 +209,9 @@ def traffic_text(value: int | None) -> str:
 
 
 def format_subscription_lookup(lookup: PanelSubscriptionLookup) -> str:
-    identity_provider = (
-        "TG" if lookup.identity_provider == "telegram" else escape(lookup.identity_provider)
+    provider_labels = {"telegram": "TG", "email": "Email", "uuid": "UUID"}
+    identity_provider = provider_labels.get(
+        lookup.identity_provider, escape(lookup.identity_provider)
     )
     identity = f"{identity_provider}:<code>{escape(lookup.identity_value)}</code>"
     if lookup.subscription is None:

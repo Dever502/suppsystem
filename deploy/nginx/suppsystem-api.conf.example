@@ -1,4 +1,4 @@
-# Example HTTPS reverse proxy for the optional Operator API.
+# Example HTTPS reverse proxy for the optional Operator and Web Support APIs.
 # Replace support.example.invalid and certificate paths before use.
 # Keep the suppsystem API published on loopback:
 #   API_ENABLED=true
@@ -19,7 +19,7 @@ server {
     ssl_certificate /etc/letsencrypt/live/support.example.invalid/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/support.example.invalid/privkey.pem;
 
-    client_max_body_size 1m;
+    client_max_body_size 11m;
 
     location / {
         proxy_pass http://127.0.0.1:8080;

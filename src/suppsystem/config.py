@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import secrets
 from functools import lru_cache
 from pathlib import Path
-from typing import Self
+from typing import Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -167,6 +168,9 @@ class Settings(BaseSettings):
     api_auth_failure_limit: int = 10
     api_auth_failure_window_seconds: float = 60.0
     api_trusted_proxy_ips: frozenset[str] = Field(default_factory=frozenset)
+    web_api_enabled: bool = False
+    web_api_token: SecretStr | None = None
+    web_identity_mode: Literal["external_id", "email"] = "external_id"
     remnawave_enabled: bool = False
     remnawave_base_url: str | None = None
     remnawave_api_token: SecretStr | None = None
@@ -237,6 +241,15 @@ class Settings(BaseSettings):
             if self.api_admin_token is None:
                 raise ValueError("API_ADMIN_TOKEN is required when API is enabled")
             validate_enabled_secret("API_ADMIN_TOKEN", self.api_admin_token)
+        if self.web_api_enabled:
+            if self.web_api_token is None:
+                raise ValueError("WEB_API_TOKEN is required when Web API is enabled")
+            validate_enabled_secret("WEB_API_TOKEN", self.web_api_token)
+            if self.api_admin_token is not None and secrets.compare_digest(
+                self.web_api_token.get_secret_value(),
+                self.api_admin_token.get_secret_value(),
+            ):
+                raise ValueError("WEB_API_TOKEN must differ from API_ADMIN_TOKEN")
         if self.remnawave_enabled and (not self.remnawave_base_url or not self.remnawave_api_token):
             raise ValueError(
                 "REMNAWAVE_BASE_URL and REMNAWAVE_API_TOKEN are required when Remnawave is enabled"

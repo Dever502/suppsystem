@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -64,12 +65,18 @@ class Direction(enum.StrEnum):
     OPERATOR_TO_USER = "operator_to_user"
 
 
+class TicketChannel(enum.StrEnum):
+    TELEGRAM = "telegram"
+    WEB = "web"
+
+
 class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     display_name: Mapped[str | None] = mapped_column(String(255))
     username: Mapped[str | None] = mapped_column(String(255))
+    email: Mapped[str | None] = mapped_column(String(320))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
@@ -78,7 +85,7 @@ class User(Base):
     identities: Mapped[list[UserIdentity]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
-    ticket: Mapped[Ticket | None] = relationship(back_populates="user", uselist=False)
+    tickets: Mapped[list[Ticket]] = relationship(back_populates="user")
 
 
 class UserIdentity(Base):
@@ -101,12 +108,17 @@ class Ticket(Base):
     __table_args__ = (
         Index("ix_tickets_status_updated", "status", "updated_at"),
         Index("ix_tickets_status_last_activity", "status", "last_activity_at"),
+        UniqueConstraint("user_id", "channel", name="uq_ticket_user_channel"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="RESTRICT"), unique=True, nullable=False
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )
+    channel: Mapped[TicketChannel] = mapped_column(
+        String(32), default=TicketChannel.TELEGRAM, nullable=False
+    )
+    remnawave_user_uuid: Mapped[str | None] = mapped_column(String(36))
     topic_id: Mapped[int | None] = mapped_column(BigInteger, unique=True)
     status: Mapped[TicketStatus] = mapped_column(
         String(32), default=TicketStatus.PROVISIONING, nullable=False
@@ -123,7 +135,7 @@ class Ticket(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     close_cycle: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
-    user: Mapped[User] = relationship(back_populates="ticket")
+    user: Mapped[User] = relationship(back_populates="tickets")
     messages: Mapped[list[TicketMessage]] = relationship(
         back_populates="ticket", cascade="all, delete-orphan"
     )
@@ -142,6 +154,12 @@ class TicketMessage(Base):
             name="uq_ticket_message_rating_cycle",
         ),
         Index("ix_ticket_messages_ticket_created", "ticket_id", "created_at"),
+        Index(
+            "ix_ticket_messages_direction_channel_created",
+            "direction",
+            "channel",
+            "created_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -152,6 +170,9 @@ class TicketMessage(Base):
     channel: Mapped[str] = mapped_column(String(32), default="telegram", nullable=False)
     content: Mapped[str | None] = mapped_column(Text)
     media: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    suppressed: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
     rating_cycle: Mapped[int | None] = mapped_column(Integer)
     source_chat_id: Mapped[int | None] = mapped_column(BigInteger)
     source_message_id: Mapped[int | None] = mapped_column(BigInteger)
@@ -338,4 +359,16 @@ class BlocklistEntry(Base):
     telegram_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     blocked_by_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SupportBlock(Base):
+    __tablename__ = "support_blocks"
+
+    ticket_id: Mapped[str] = mapped_column(
+        ForeignKey("tickets.id", ondelete="CASCADE"), primary_key=True
+    )
+    blocked_by_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(32), default="telegram", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

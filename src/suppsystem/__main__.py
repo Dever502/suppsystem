@@ -152,7 +152,7 @@ async def run() -> None:
     runtime_health.register("database")
     runtime_health.register("telegram_ingress", progress_timeout_seconds=45)
     runtime_health.register("reconciliation", progress_timeout_seconds=45)
-    runtime_health.register("api", configured=settings.api_enabled)
+    runtime_health.register("api", configured=settings.api_enabled or settings.web_api_enabled)
     runtime_health.register("panel", configured=settings.remnawave_enabled)
     runtime_health.register("delivery_worker", progress_timeout_seconds=45)
     runtime_health.register(
@@ -164,6 +164,8 @@ async def run() -> None:
     metrics = MetricsRegistry()
     http_client = httpx.AsyncClient()
     ticket_service = TicketService(database)
+    if settings.web_api_enabled:
+        await ticket_service.validate_web_identity_mode(settings.web_identity_mode)
     durable_work = DurableWorkRepository(database)
     panel_service: PanelService | None = None
     if settings.remnawave_enabled:
@@ -239,8 +241,9 @@ async def run() -> None:
     )
     dispatcher.include_router(adapter.router)
     await adapter.recover_waiting_topics_after_restart()
+    await adapter.ensure_statistics_dashboard()
 
-    if settings.api_enabled:
+    if settings.api_enabled or settings.web_api_enabled:
         api_server = ApiServer(
             create_app(
                 database=database,

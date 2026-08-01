@@ -27,6 +27,8 @@ from suppsystem.models import (
 from suppsystem.runtime_health import RuntimeHealth
 from suppsystem.services import TicketService, TicketView
 
+API_TOKEN = "0123456789abcdef0123456789abcdef"
+
 
 @pytest.fixture
 async def api_context(
@@ -44,7 +46,8 @@ async def api_context(
     settings = Settings(
         support_bot_token=SecretStr("test-token"),
         support_group_id=-100123,
-        api_admin_token=SecretStr("admin-token"),
+        api_enabled=True,
+        api_admin_token=SecretStr(API_TOKEN),
         api_operator_telegram_id=999,
     )
     app = create_app(database=database, ticket_service=ticket_service, settings=settings)
@@ -110,7 +113,7 @@ async def test_api_messages_support_limit_and_offset(
         response = await client.get(
             f"/api/v1/tickets/{ticket.id}/messages",
             params={"limit": 1, "offset": 1},
-            headers={"X-API-Token": "admin-token"},
+            headers={"X-API-Token": API_TOKEN},
         )
     payload = response.json()
 
@@ -123,7 +126,7 @@ async def test_api_close_can_notify_user_via_outbox(
     api_context: tuple[Any, Database, TicketService, TicketView],
 ) -> None:
     app, _database, ticket_service, ticket = api_context
-    headers = {"X-API-Token": "admin-token", "X-Idempotency-Key": "close-one"}
+    headers = {"X-API-Token": API_TOKEN, "X-Idempotency-Key": "close-one"}
     async with _client(app) as client:
         response = await client.post(
             f"/api/v1/tickets/{ticket.id}/close",
@@ -177,7 +180,7 @@ async def test_api_message_failure_rolls_back_and_surfaces_retryable_error(
         response = await client.post(
             f"/api/v1/tickets/{ticket.id}/messages",
             headers={
-                "X-API-Token": "admin-token",
+                "X-API-Token": API_TOKEN,
                 "X-Idempotency-Key": "atomic-rollback",
             },
             json={"text": "must roll back"},
@@ -200,7 +203,7 @@ async def test_duplicate_api_message_after_reclose_does_not_reopen_ticket(
         idempotency_key="atomic-duplicate-first-close",
     )
     headers = {
-        "X-API-Token": "admin-token",
+        "X-API-Token": API_TOKEN,
         "X-Idempotency-Key": "atomic-duplicate",
     }
     async with _client(app) as client:
@@ -233,7 +236,7 @@ async def test_api_message_rejects_same_key_with_different_payload(
 ) -> None:
     app, database, _ticket_service, ticket = api_context
     headers = {
-        "X-API-Token": "admin-token",
+        "X-API-Token": API_TOKEN,
         "X-Idempotency-Key": "message-payload-conflict",
     }
 
@@ -261,7 +264,7 @@ async def test_api_message_duplicate_guard_rechecks_payload_fingerprint(
 ) -> None:
     app, _database, ticket_service, ticket = api_context
     headers = {
-        "X-API-Token": "admin-token",
+        "X-API-Token": API_TOKEN,
         "X-Idempotency-Key": "stale-replay-conflict",
     }
     async with _client(app) as client:
@@ -302,7 +305,7 @@ async def test_api_close_rejects_same_key_with_different_notification_payload(
 ) -> None:
     app, _database, ticket_service, ticket = api_context
     headers = {
-        "X-API-Token": "admin-token",
+        "X-API-Token": API_TOKEN,
         "X-Idempotency-Key": "close-payload-conflict",
     }
 
@@ -334,7 +337,7 @@ async def test_api_noop_result_is_durably_replayed(
         idempotency_key="close-before-api-noop",
     )
     headers = {
-        "X-API-Token": "admin-token",
+        "X-API-Token": API_TOKEN,
         "X-Idempotency-Key": "durable-noop-close",
     }
 
@@ -371,7 +374,7 @@ async def test_concurrent_same_key_api_messages_commit_one_atomic_command(
         idempotency_key="atomic-same-key-close",
     )
     headers = {
-        "X-API-Token": "admin-token",
+        "X-API-Token": API_TOKEN,
         "X-Idempotency-Key": "atomic-same-key",
     }
     async with _client(app) as client:
@@ -397,7 +400,7 @@ async def test_concurrent_same_key_different_payload_has_one_winner(
 ) -> None:
     app, database, _ticket_service, ticket = api_context
     headers = {
-        "X-API-Token": "admin-token",
+        "X-API-Token": API_TOKEN,
         "X-Idempotency-Key": "concurrent-payload-conflict",
     }
 
@@ -435,7 +438,7 @@ async def test_concurrent_distinct_api_messages_reopen_once_and_commit_both(
                 client.post(
                     f"/api/v1/tickets/{ticket.id}/messages",
                     headers={
-                        "X-API-Token": "admin-token",
+                        "X-API-Token": API_TOKEN,
                         "X-Idempotency-Key": key,
                     },
                     json={"text": f"message {key}"},
@@ -462,7 +465,8 @@ async def test_api_message_queues_topic_reconciliation_after_atomic_commit(
     settings = Settings(
         support_bot_token=SecretStr("test-token"),
         support_group_id=-100123,
-        api_admin_token=SecretStr("admin-token"),
+        api_enabled=True,
+        api_admin_token=SecretStr(API_TOKEN),
         api_operator_telegram_id=999,
     )
     app = create_app(database=database, ticket_service=ticket_service, settings=settings)
@@ -470,7 +474,7 @@ async def test_api_message_queues_topic_reconciliation_after_atomic_commit(
         response = await client.post(
             f"/api/v1/tickets/{ticket.id}/messages",
             headers={
-                "X-API-Token": "admin-token",
+                "X-API-Token": API_TOKEN,
                 "X-Idempotency-Key": "atomic-sync-message",
             },
             json={"text": "observe committed state"},
@@ -520,7 +524,7 @@ async def test_blocked_closed_ticket_is_not_reopened_by_api_message(
         response = await client.post(
             f"/api/v1/tickets/{ticket.id}/messages",
             headers={
-                "X-API-Token": "admin-token",
+                "X-API-Token": API_TOKEN,
                 "X-Idempotency-Key": "atomic-blocked-message",
             },
             json={"text": "must stay blocked"},
@@ -546,7 +550,7 @@ async def test_api_ticket_detail_does_not_embed_messages(
     async with _client(app) as client:
         response = await client.get(
             f"/api/v1/tickets/{ticket.id}",
-            headers={"X-API-Token": "admin-token"},
+            headers={"X-API-Token": API_TOKEN},
         )
     payload = response.json()
 
@@ -597,7 +601,7 @@ async def test_metrics_exposes_queue_and_runtime_metrics_without_pii(
     )
 
     async with _client(app) as client:
-        response = await client.get("/metrics", headers={"X-API-Token": "admin-token"})
+        response = await client.get("/metrics", headers={"X-API-Token": API_TOKEN})
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")
@@ -634,7 +638,8 @@ async def test_ready_reports_runtime_components(
     settings = Settings(
         support_bot_token=SecretStr("test-token"),
         support_group_id=-100123,
-        api_admin_token=SecretStr("admin-token"),
+        api_enabled=True,
+        api_admin_token=SecretStr(API_TOKEN),
     )
     health = RuntimeHealth()
     health.register("database")
@@ -651,7 +656,7 @@ async def test_ready_reports_runtime_components(
     )
 
     async with _client(app) as client:
-        response = await client.get("/ready", headers={"X-API-Token": "admin-token"})
+        response = await client.get("/ready", headers={"X-API-Token": API_TOKEN})
 
     assert response.status_code == 200
     assert response.json() == {
@@ -672,7 +677,8 @@ async def test_ready_returns_503_for_stale_enabled_worker(
     settings = Settings(
         support_bot_token=SecretStr("test-token"),
         support_group_id=-100123,
-        api_admin_token=SecretStr("admin-token"),
+        api_enabled=True,
+        api_admin_token=SecretStr(API_TOKEN),
     )
     health = RuntimeHealth()
     health.register("database")
@@ -688,7 +694,7 @@ async def test_ready_returns_503_for_stale_enabled_worker(
     )
 
     async with _client(app) as client:
-        response = await client.get("/ready", headers={"X-API-Token": "admin-token"})
+        response = await client.get("/ready", headers={"X-API-Token": API_TOKEN})
 
     assert response.status_code == 503
     assert response.json() == {
@@ -720,7 +726,8 @@ async def test_ready_returns_safe_503_when_database_probe_fails(
     settings = Settings(
         support_bot_token=SecretStr("test-token"),
         support_group_id=-100123,
-        api_admin_token=SecretStr("admin-token"),
+        api_enabled=True,
+        api_admin_token=SecretStr(API_TOKEN),
     )
     health = RuntimeHealth()
     health.register("database")
@@ -734,7 +741,7 @@ async def test_ready_returns_safe_503_when_database_probe_fails(
     )
 
     async with _client(app) as client:
-        response = await client.get("/ready", headers={"X-API-Token": "admin-token"})
+        response = await client.get("/ready", headers={"X-API-Token": API_TOKEN})
 
     assert response.status_code == 503
     assert response.json() == {
@@ -753,7 +760,7 @@ async def test_api_http_trace_is_returned_and_persisted_on_action(
         response = await client.post(
             f"/api/v1/tickets/{ticket.id}/close",
             headers={
-                "X-API-Token": "admin-token",
+                "X-API-Token": API_TOKEN,
                 "X-Idempotency-Key": "http-trace-close-1",
             },
             json={"notify_user": False},
@@ -777,15 +784,15 @@ async def test_api_http_trace_is_returned_and_persisted_on_action(
     ("headers", "payload"),
     [
         (
-            {"X-API-Token": "admin-token", "X-Idempotency-Key": "bad key"},
+            {"X-API-Token": API_TOKEN, "X-Idempotency-Key": "bad key"},
             {"text": "valid"},
         ),
         (
-            {"X-API-Token": "admin-token", "X-Idempotency-Key": "valid-key-1"},
+            {"X-API-Token": API_TOKEN, "X-Idempotency-Key": "valid-key-1"},
             {"text": "   "},
         ),
         (
-            {"X-API-Token": "admin-token", "X-Idempotency-Key": "valid-key-2"},
+            {"X-API-Token": API_TOKEN, "X-Idempotency-Key": "valid-key-2"},
             {"text": "valid", "unexpected": "field"},
         ),
     ],
@@ -822,7 +829,7 @@ async def test_api_pagination_offset_has_upper_bound(
     async with _client(app) as client:
         response = await client.get(
             "/api/v1/tickets?offset=100001",
-            headers={"X-API-Token": "admin-token"},
+            headers={"X-API-Token": API_TOKEN},
         )
 
     assert response.status_code == 422
@@ -836,7 +843,8 @@ async def test_api_rate_limit_returns_retry_after(
     settings = Settings(
         support_bot_token=SecretStr("test-token"),
         support_group_id=-100123,
-        api_admin_token=SecretStr("admin-token"),
+        api_enabled=True,
+        api_admin_token=SecretStr(API_TOKEN),
         api_operator_telegram_id=999,
         api_rate_limit_requests=2,
         api_rate_limit_window_seconds=60,
@@ -845,7 +853,7 @@ async def test_api_rate_limit_returns_retry_after(
 
     async with _client(app) as client:
         responses = [
-            await client.get("/health", headers={"X-API-Token": "admin-token"}) for _ in range(3)
+            await client.get("/health", headers={"X-API-Token": API_TOKEN}) for _ in range(3)
         ]
 
     assert [response.status_code for response in responses] == [200, 200, 429]
@@ -860,7 +868,8 @@ async def test_api_rate_limit_uses_forwarded_client_for_trusted_proxy(
     settings = Settings(
         support_bot_token=SecretStr("test-token"),
         support_group_id=-100123,
-        api_admin_token=SecretStr("admin-token"),
+        api_enabled=True,
+        api_admin_token=SecretStr(API_TOKEN),
         api_operator_telegram_id=999,
         api_rate_limit_requests=2,
         api_rate_limit_window_seconds=60,
@@ -874,7 +883,7 @@ async def test_api_rate_limit_uses_forwarded_client_for_trusted_proxy(
             await client.get(
                 "/health",
                 headers={
-                    "X-API-Token": "admin-token",
+                    "X-API-Token": API_TOKEN,
                     "X-Forwarded-For": f"203.0.113.{index}, 198.51.100.1",
                 },
             )
@@ -883,7 +892,7 @@ async def test_api_rate_limit_uses_forwarded_client_for_trusted_proxy(
         second_client = await client.get(
             "/health",
             headers={
-                "X-API-Token": "admin-token",
+                "X-API-Token": API_TOKEN,
                 "X-Forwarded-For": "198.51.100.2",
             },
         )
@@ -899,7 +908,8 @@ async def test_api_trusted_proxy_walks_forwarded_chain_from_nearest_hop(
     settings = Settings(
         support_bot_token=SecretStr("test-token"),
         support_group_id=-100123,
-        api_admin_token=SecretStr("admin-token"),
+        api_enabled=True,
+        api_admin_token=SecretStr(API_TOKEN),
         api_rate_limit_requests=1,
         api_rate_limit_window_seconds=60,
         api_trusted_proxy_ips={"10.0.0.0/24"},
@@ -911,14 +921,14 @@ async def test_api_trusted_proxy_walks_forwarded_chain_from_nearest_hop(
         first = await client.get(
             "/health",
             headers={
-                "X-API-Token": "admin-token",
+                "X-API-Token": API_TOKEN,
                 "X-Forwarded-For": "203.0.113.99, 198.51.100.7, 10.0.0.20",
             },
         )
         second = await client.get(
             "/health",
             headers={
-                "X-API-Token": "admin-token",
+                "X-API-Token": API_TOKEN,
                 "X-Forwarded-For": "192.0.2.88, 198.51.100.7, 10.0.0.20",
             },
         )
@@ -935,6 +945,8 @@ def test_nginx_example_overwrites_untrusted_forwarded_chain() -> None:
     assert "proxy_set_header X-Forwarded-For $remote_addr;" in config
     assert "$proxy_add_x_forwarded_for" not in config
 
+    assert "client_max_body_size 11m;" in config
+
 
 async def test_api_auth_failures_are_rate_limited(
     api_context: tuple[Any, Database, TicketService, TicketView],
@@ -943,7 +955,8 @@ async def test_api_auth_failures_are_rate_limited(
     settings = Settings(
         support_bot_token=SecretStr("test-token"),
         support_group_id=-100123,
-        api_admin_token=SecretStr("admin-token"),
+        api_enabled=True,
+        api_admin_token=SecretStr(API_TOKEN),
         api_operator_telegram_id=999,
         api_rate_limit_requests=100,
         api_auth_failure_limit=2,
@@ -969,7 +982,7 @@ async def test_api_not_found_does_not_expose_internal_detail(
     async with _client(app) as client:
         response = await client.get(
             f"/api/v1/tickets/{missing_id}",
-            headers={"X-API-Token": "admin-token"},
+            headers={"X-API-Token": API_TOKEN},
         )
 
     assert response.status_code == 404

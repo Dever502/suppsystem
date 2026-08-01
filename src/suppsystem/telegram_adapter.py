@@ -6,8 +6,10 @@ from aiogram.filters import CommandStart
 
 from suppsystem.authorization import AuthorizationService
 from suppsystem.config import Settings
+from suppsystem.media_storage import LocalMediaStorage
 from suppsystem.panel import PanelService
 from suppsystem.services import TicketService
+from suppsystem.statistics import StatisticsService
 from suppsystem.telegram_constants import (
     COMMAND_ALREADY_HANDLED_TEXT as COMMAND_ALREADY_HANDLED_TEXT,
 )
@@ -30,6 +32,7 @@ from suppsystem.telegram_panel_handler import (
     GIFT_DAYS_ERROR_TEXT as GIFT_DAYS_ERROR_TEXT,
 )
 from suppsystem.telegram_panel_handler import TelegramPanelCommandHandler
+from suppsystem.telegram_statistics import STATISTICS_CALLBACK_PREFIX
 
 
 class TelegramSupportAdapter(TelegramOperatorHandlers):
@@ -43,11 +46,15 @@ class TelegramSupportAdapter(TelegramOperatorHandlers):
         settings: Settings,
         limiter: TelegramRateLimiter,
         panel_service: PanelService | None = None,
+        media_storage: LocalMediaStorage | None = None,
+        statistics_service: StatisticsService | None = None,
     ) -> None:
         self.bot = bot
         self.ticket_service = ticket_service
         self.settings = settings
         self.panel_service = panel_service
+        self.media_storage = media_storage or LocalMediaStorage(settings.data_dir)
+        self.statistics_service = statistics_service or StatisticsService(ticket_service.database)
         self.panel_commands = TelegramPanelCommandHandler(panel_service)
         self.authorization = AuthorizationService(settings)
         self.limiter = limiter
@@ -68,6 +75,10 @@ class TelegramSupportAdapter(TelegramOperatorHandlers):
         self.router.message.register(
             self.handle_group_message,
             F.chat.id == self.settings.support_group_id,
+        )
+        self.router.callback_query.register(
+            self.handle_statistics_callback,
+            F.data.startswith(f"{STATISTICS_CALLBACK_PREFIX}:"),
         )
         self.router.callback_query.register(
             self.handle_rating_callback,

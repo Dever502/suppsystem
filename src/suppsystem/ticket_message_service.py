@@ -23,6 +23,7 @@ from suppsystem.models import (
     NotificationOutbox,
     OperatorAction,
     Ticket,
+    TicketChannel,
     TicketMessage,
     TicketStatus,
     utcnow,
@@ -30,6 +31,7 @@ from suppsystem.models import (
 from suppsystem.service_types import InternalNoteView, TicketNotFoundError, TicketView
 from suppsystem.ticket_service_base import TicketServiceBase
 from suppsystem.trace import get_trace_id
+from suppsystem.web_models import TicketLifecycleEvent
 
 
 @dataclass(frozen=True)
@@ -345,7 +347,9 @@ class TicketMessageService(TicketServiceBase):
                 return replay
 
             initial_view = await self._ticket_view(session, ticket)
-            if await self._is_blocked_in_session(session, initial_view.telegram_user_id):
+            if initial_view.telegram_user_id is not None and await self._is_blocked_in_session(
+                session, initial_view.telegram_user_id
+            ):
                 if api_idempotency is not None:
                     session.add(
                         OperatorAction(
@@ -408,6 +412,15 @@ class TicketMessageService(TicketServiceBase):
                     await session.refresh(ticket)
                 ticket.last_activity_at = transition_at
             if reopened:
+                session.add(
+                    TicketLifecycleEvent(
+                        ticket_id=ticket.id,
+                        event_type="reopened",
+                        channel=TicketChannel(ticket.channel),
+                        close_cycle=ticket.close_cycle,
+                        created_at=transition_at,
+                    )
+                )
                 session.add(
                     OperatorAction(
                         ticket_id=ticket.id,

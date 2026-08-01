@@ -9,7 +9,7 @@ from pathlib import Path
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import FSInputFile, InlineKeyboardMarkup
 
 from suppsystem.audit import record_event
 from suppsystem.config import Settings
@@ -283,6 +283,28 @@ class DeliveryWorker:
                         else None
                     ),
                     reply_markup=reply_markup,
+                )
+                delivered_message_id = sent_message.message_id
+            elif payload.get("kind") == "send_photo":
+                storage_path = payload.get("storage_path")
+                if not isinstance(storage_path, str):
+                    raise TypeError("send_photo delivery requires storage_path")
+                photo_path = (self.settings.data_dir / storage_path).resolve()
+                allowed_root = (self.settings.data_dir / "web-media" / "assets").resolve()
+                try:
+                    photo_path.relative_to(allowed_root)
+                except ValueError as error:
+                    raise ValueError("send_photo delivery path is outside media storage") from error
+                sent_message = await self.bot.send_photo(
+                    chat_id=_payload_int(payload, "target_chat_id"),
+                    photo=FSInputFile(photo_path),
+                    caption=str(payload["text"]) if payload.get("text") is not None else None,
+                    parse_mode=None,
+                    message_thread_id=(
+                        _payload_int(payload, "target_thread_id")
+                        if target_thread_id is not None
+                        else None
+                    ),
                 )
                 delivered_message_id = sent_message.message_id
             else:

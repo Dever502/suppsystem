@@ -6,9 +6,11 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from ipaddress import ip_address, ip_network
+from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.exceptions import RequestValidationError
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 
 from suppsystem.api_idempotency import ApiIdempotencyConflictError
@@ -18,12 +20,14 @@ from suppsystem.api_security import InMemoryRateLimiter
 from suppsystem.audit import record_event
 from suppsystem.config import Settings
 from suppsystem.database import Database
+from suppsystem.media_storage import LocalMediaStorage
 from suppsystem.metrics import MetricsRegistry
 from suppsystem.runtime_health import RuntimeHealth
 from suppsystem.service_types import TicketNotFoundError
 from suppsystem.services import TicketService
 from suppsystem.trace import trace_id_var
 from suppsystem.version import PROJECT_VERSION
+from suppsystem.web_api_routes import register_web_routes
 
 logger = logging.getLogger(__name__)
 MAX_FORWARDED_HOPS = 32
@@ -70,7 +74,6 @@ def client_key_from_request(request: Request, trusted_proxy_ips: frozenset[str])
         real_host = _valid_ip_text(real_ip)
         if real_host is not None:
             return real_host
-
     return direct_host
 
 
@@ -81,6 +84,7 @@ def create_app(
     settings: Settings,
     runtime_health: RuntimeHealth | None = None,
     metrics: MetricsRegistry | None = None,
+    media_storage: LocalMediaStorage | None = None,
 ) -> FastAPI:
     if runtime_health is None:
         runtime_health = RuntimeHealth()
@@ -89,6 +93,9 @@ def create_app(
         runtime_health.ready("api")
     if metrics is None:
         metrics = MetricsRegistry()
+    if media_storage is None:
+        media_storage = LocalMediaStorage(settings.data_dir)
+
     request_limiter = InMemoryRateLimiter(
         limit=settings.api_rate_limit_requests,
         window_seconds=settings.api_rate_limit_window_seconds,
@@ -97,22 +104,56 @@ def create_app(
         limit=settings.api_auth_failure_limit,
         window_seconds=settings.api_auth_failure_window_seconds,
     )
+    operator_contract = settings.api_enabled
 
     def client_key(request: Request) -> str:
         return client_key_from_request(request, settings.api_trusted_proxy_ips)
 
-    async def require_operator_token(
+    async def require_api_token(
         request: Request,
         x_api_token: str | None = Header(default=None, alias="X-API-Token"),
     ) -> None:
-        if settings.api_unsafe_disable_auth:
+        configured_tokens: tuple[str, ...]
+        is_web_path = request.url.path.startswith("/api/v1/web")
+        is_operator_path = request.url.path.startswith("/api/v1/tickets")
+        if is_web_path:
+            if not settings.web_api_enabled:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+            configured_tokens = (
+                (settings.web_api_token.get_secret_value(),)
+                if settings.web_api_token is not None
+                else ()
+            )
+            unsafe_auth = False
+            realm = "web"
+        elif is_operator_path:
+            if not operator_contract:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+            configured_tokens = (
+                (settings.api_admin_token.get_secret_value(),)
+                if settings.api_admin_token is not None
+                else ()
+            )
+            unsafe_auth = settings.api_unsafe_disable_auth
+            realm = "operator"
+        else:
+            configured_tokens = tuple(
+                token.get_secret_value()
+                for enabled, token in (
+                    (operator_contract, settings.api_admin_token),
+                    (settings.web_api_enabled, settings.web_api_token),
+                )
+                if enabled and token is not None
+            )
+            unsafe_auth = settings.api_unsafe_disable_auth
+            realm = "common"
+
+        if unsafe_auth:
             return
-        configured_token = settings.api_admin_token
-        key = f"auth:{client_key(request)}"
-        authenticated = (
-            configured_token is not None
-            and x_api_token is not None
-            and secrets.compare_digest(x_api_token, configured_token.get_secret_value())
+        key = f"auth:{realm}:{client_key(request)}"
+        authenticated = x_api_token is not None and any(
+            secrets.compare_digest(x_api_token, configured_token)
+            for configured_token in configured_tokens
         )
         if not authenticated:
             allowed, retry_after = await auth_failure_limiter.consume(key)
@@ -131,7 +172,7 @@ def create_app(
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
-        dependencies=[Depends(require_operator_token)],
+        dependencies=[Depends(require_api_token)],
     )
     app.router.add_event_handler("startup", lambda: runtime_health.ready("api"))
 
@@ -142,14 +183,13 @@ def create_app(
         message: str,
         headers: Mapping[str, str] | None = None,
     ) -> JSONResponse:
-        trace_id = trace_id_var.get()
         return JSONResponse(
             status_code=status_code,
             content={
                 "error": {
                     "code": code,
                     "message": message,
-                    "trace_id": trace_id,
+                    "trace_id": trace_id_var.get(),
                 }
             },
             headers=headers,
@@ -163,11 +203,10 @@ def create_app(
         trace_id = uuid.uuid4().hex
         trace_token = trace_id_var.set(trace_id)
         started_at = time.monotonic()
-        response: Response
         try:
             allowed, retry_after = await request_limiter.consume(f"request:{client_key(request)}")
             if not allowed:
-                response = error_response(
+                response: Response = error_response(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     code="rate_limited",
                     message="Too many requests",
@@ -196,13 +235,24 @@ def create_app(
                         message="Internal server error",
                     )
             response.headers["X-Trace-ID"] = trace_id
-            duration_ms = round((time.monotonic() - started_at) * 1000, 2)
+            component = (
+                "web_api"
+                if request.url.path.startswith("/api/v1/web")
+                else "operator_api"
+                if request.url.path.startswith("/api/v1/tickets")
+                else "api"
+            )
+            metrics.observe_request(
+                component,
+                f"http_{response.status_code // 100}xx",
+                time.monotonic() - started_at,
+            )
             record_event(
                 "api_request_completed",
                 http_method=request.method,
                 http_path=request.url.path,
                 http_status=response.status_code,
-                duration_ms=duration_ms,
+                duration_ms=round((time.monotonic() - started_at) * 1000, 2),
             )
             return response
         finally:
@@ -214,19 +264,24 @@ def create_app(
         status.HTTP_403_FORBIDDEN: ("forbidden", "Forbidden"),
         status.HTTP_404_NOT_FOUND: ("not_found", "Resource not found"),
         status.HTTP_409_CONFLICT: ("conflict", "Request conflict"),
-        status.HTTP_429_TOO_MANY_REQUESTS: ("rate_limited", "Too many requests"),
-        status.HTTP_503_SERVICE_UNAVAILABLE: (
-            "service_unavailable",
-            "Service unavailable",
+        status.HTTP_413_CONTENT_TOO_LARGE: ("payload_too_large", "Payload too large"),
+        status.HTTP_415_UNSUPPORTED_MEDIA_TYPE: (
+            "unsupported_media_type",
+            "Unsupported media type",
         ),
+        status.HTTP_422_UNPROCESSABLE_CONTENT: (
+            "validation_error",
+            "Request validation failed",
+        ),
+        status.HTTP_429_TOO_MANY_REQUESTS: ("rate_limited", "Too many requests"),
+        status.HTTP_503_SERVICE_UNAVAILABLE: ("service_unavailable", "Service unavailable"),
     }
 
     @app.exception_handler(HTTPException)
     async def handle_http_exception(request: Request, error: HTTPException) -> JSONResponse:
         del request
         code, message = safe_http_errors.get(
-            error.status_code,
-            ("request_failed", "Request failed"),
+            error.status_code, ("request_failed", "Request failed")
         )
         return error_response(
             status_code=error.status_code,
@@ -274,5 +329,76 @@ def create_app(
         runtime_health=runtime_health,
         metrics=metrics,
     )
+    if settings.web_api_enabled:
+        register_web_routes(
+            app,
+            ticket_service=ticket_service,
+            settings=settings,
+            media_storage=media_storage,
+            metrics=metrics,
+        )
 
+    def custom_openapi() -> dict[str, Any]:
+        if app.openapi_schema is not None:
+            return app.openapi_schema
+        schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
+        schemes: dict[str, object] = {}
+        if operator_contract and not settings.api_unsafe_disable_auth:
+            schemes["OperatorApiToken"] = {
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-API-Token",
+                "description": "Operator API credential",
+            }
+        if settings.web_api_enabled:
+            schemes["WebApiToken"] = {
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-API-Token",
+                "description": "Web Support API credential; never expose it to a browser",
+            }
+        components = schema.setdefault("components", {})
+        if schemes and isinstance(components, dict):
+            components["securitySchemes"] = schemes
+        paths = schema.get("paths", {})
+        if isinstance(paths, dict):
+            for path, methods in list(paths.items()):
+                if not isinstance(path, str) or not isinstance(methods, dict):
+                    continue
+                if path.startswith("/api/v1/tickets") and not operator_contract:
+                    del paths[path]
+                    continue
+                if path.startswith("/api/v1/web"):
+                    security: list[dict[str, list[str]]] = [{"WebApiToken": []}]
+                elif path.startswith("/api/v1/tickets"):
+                    security = (
+                        [] if settings.api_unsafe_disable_auth else [{"OperatorApiToken": []}]
+                    )
+                else:
+                    if settings.api_unsafe_disable_auth:
+                        security = []
+                    else:
+                        security = []
+                        if operator_contract:
+                            security.append({"OperatorApiToken": []})
+                        if settings.web_api_enabled:
+                            security.append({"WebApiToken": []})
+                for operation in methods.values():
+                    if not isinstance(operation, dict):
+                        continue
+                    operation["security"] = security
+                    parameters = operation.get("parameters")
+                    if isinstance(parameters, list):
+                        operation["parameters"] = [
+                            parameter
+                            for parameter in parameters
+                            if not (
+                                isinstance(parameter, dict)
+                                and str(parameter.get("name", "")).casefold() == "x-api-token"
+                            )
+                        ]
+        app.openapi_schema = schema
+        return schema
+
+    app.openapi = custom_openapi  # type: ignore[method-assign]
     return app

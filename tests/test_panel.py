@@ -18,7 +18,10 @@ from suppsystem.models import (
     NotificationStatus,
     OperatorAction,
     ReconciliationOutbox,
+    SupportBlock,
     Ticket,
+    TicketChannel,
+    TicketMessage,
     TicketStatus,
     User,
     WorkStatus,
@@ -87,6 +90,26 @@ class FakeRemnawave:
     async def reset_user_hwid_devices(self, *, user_uuid: str) -> RemnawaveHwidDeviceResetResult:
         self.reset_device_calls.append(user_uuid)
         return RemnawaveHwidDeviceResetResult(total=2, devices=[])
+
+
+class WebRemnawave(FakeRemnawave):
+    def __init__(self, result: RemnawaveUser, *, stale_uuid: str | None = None) -> None:
+        super().__init__(result)
+        self.stale_uuid = stale_uuid
+        self.uuids: list[str] = []
+        self.emails: list[str] = []
+
+    async def get_user_by_uuid(self, user_uuid: str) -> RemnawaveUser:
+        self.uuids.append(user_uuid)
+        if user_uuid == self.stale_uuid:
+            raise RemnawaveNotFoundError()
+        assert isinstance(self.result, RemnawaveUser)
+        return self.result
+
+    async def get_user_by_email(self, email: str) -> RemnawaveUser:
+        self.emails.append(email)
+        assert isinstance(self.result, RemnawaveUser)
+        return self.result
 
 
 class UnknownExtendRemnawave(FakeRemnawave):
@@ -208,6 +231,28 @@ def ticket_view() -> TicketView:
         updated_at=now,
         last_activity_at=now,
         closed_at=None,
+    )
+
+
+def web_ticket_view(*, binding: str | None = None) -> TicketView:
+    now = datetime(2026, 6, 25, tzinfo=UTC)
+    return TicketView(
+        id="web-ticket-1",
+        user_id=2,
+        telegram_user_id=None,
+        display_name="Web Alice",
+        username=None,
+        topic_id=778,
+        status=TicketStatus.OPEN,
+        created_at=now,
+        updated_at=now,
+        last_activity_at=now,
+        closed_at=None,
+        channel=TicketChannel.WEB,
+        email="web@example.com",
+        identity_provider="web_external_id",
+        identity_value="web-1",
+        remnawave_user_uuid=binding,
     )
 
 
@@ -429,6 +474,150 @@ async def database(tmp_path: Path) -> Database:
         await session.commit()
     yield db
     await db.dispose()
+
+
+async def add_web_ticket(database: Database, *, binding: str | None = None) -> None:
+    async with database.session() as session:
+        session.add(User(id=2, display_name="Web user", email="web@example.com"))
+        session.add(
+            Ticket(
+                id="web-ticket-1",
+                user_id=2,
+                topic_id=778,
+                status=TicketStatus.OPEN,
+                channel=TicketChannel.WEB,
+                remnawave_user_uuid=binding,
+            )
+        )
+        await session.commit()
+
+
+async def test_web_gift_uses_email_binding_and_polls_notification(database: Database) -> None:
+    await add_web_ticket(database)
+    remnawave = WebRemnawave(remnawave_user())
+    service = PanelService(remnawave, database=database)
+
+    result = await service.extend_subscription_for_ticket(
+        ticket=web_ticket_view(),
+        operator_telegram_id=42,
+        extend_days=7,
+        idempotency_key="telegram:-100:778:/gift",
+    )
+
+    async with database.session() as session:
+        ticket = await session.get(Ticket, "web-ticket-1")
+        messages = list(
+            (
+                await session.scalars(
+                    select(TicketMessage).where(TicketMessage.ticket_id == "web-ticket-1")
+                )
+            ).all()
+        )
+        deliveries = list(
+            (
+                await session.scalars(
+                    select(DeliveryOutbox).where(DeliveryOutbox.ticket_id == "web-ticket-1")
+                )
+            ).all()
+        )
+    assert result.completed is True
+    assert remnawave.emails == ["web@example.com"]
+    assert ticket is not None and ticket.remnawave_user_uuid == remnawave_user().uuid
+    assert len(messages) == 1 and "Подписка продлена" in (messages[0].content or "")
+    assert deliveries == []
+
+
+async def test_blocked_web_ticket_suppresses_gift_notification(database: Database) -> None:
+    await add_web_ticket(database)
+    async with database.session() as session:
+        session.add(
+            SupportBlock(
+                ticket_id="web-ticket-1",
+                blocked_by_telegram_id=42,
+                reason="abuse",
+                source="web",
+            )
+        )
+        await session.commit()
+    service = PanelService(WebRemnawave(remnawave_user()), database=database)
+
+    result = await service.extend_subscription_for_ticket(
+        ticket=web_ticket_view(),
+        operator_telegram_id=42,
+        extend_days=7,
+        idempotency_key="telegram:-100:778:/gift-blocked",
+    )
+
+    async with database.session() as session:
+        messages = list(
+            (
+                await session.scalars(
+                    select(TicketMessage).where(TicketMessage.ticket_id == "web-ticket-1")
+                )
+            ).all()
+        )
+        deliveries = list(
+            (
+                await session.scalars(
+                    select(DeliveryOutbox).where(DeliveryOutbox.ticket_id == "web-ticket-1")
+                )
+            ).all()
+        )
+    assert result.completed is True
+    assert messages == []
+    assert deliveries == []
+
+
+async def test_web_stale_uuid_is_cleared_and_rebound_by_exact_email(
+    database: Database,
+) -> None:
+    stale = "22222222-2222-2222-2222-222222222222"
+    await add_web_ticket(database, binding=stale)
+    remnawave = WebRemnawave(remnawave_user(), stale_uuid=stale)
+    service = PanelService(remnawave, database=database)
+
+    lookup = await service.get_subscription_for_ticket(web_ticket_view(binding=stale))
+
+    async with database.session() as session:
+        ticket = await session.get(Ticket, "web-ticket-1")
+    assert lookup.found is True
+    assert remnawave.uuids == [stale]
+    assert remnawave.emails == ["web@example.com"]
+    assert ticket is not None and ticket.remnawave_user_uuid == remnawave_user().uuid
+
+
+async def test_web_stale_uuid_action_refreshes_durable_recipient(
+    database: Database,
+) -> None:
+    stale = "22222222-2222-2222-2222-222222222222"
+    await add_web_ticket(database, binding=stale)
+    remnawave = WebRemnawave(remnawave_user(), stale_uuid=stale)
+    service = PanelService(remnawave, database=database)
+    key = "telegram:-100:778:/revokelink-stale"
+
+    result = await service.revoke_subscription_link_for_ticket(
+        ticket=web_ticket_view(binding=stale),
+        operator_telegram_id=42,
+        idempotency_key=key,
+    )
+
+    async with database.session() as session:
+        action = await session.scalar(
+            select(OperatorAction).where(OperatorAction.idempotency_key == key)
+        )
+        assert action is not None
+        intent = await session.scalar(
+            select(NotificationOutbox).where(NotificationOutbox.operator_action_id == action.id)
+        )
+    assert result.completed is True
+    assert result.identity_provider == "email"
+    assert result.identity_value == "web@example.com"
+    assert action.payload["identity_provider"] == "email"
+    assert action.payload["identity_value"] == "web@example.com"
+    assert action.payload["remnawave_uuid"] == remnawave_user().uuid
+    assert intent is not None
+    assert intent.recipient_identity_provider == "email"
+    assert intent.recipient_identity_value == "web@example.com"
 
 
 @pytest.mark.asyncio

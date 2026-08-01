@@ -41,6 +41,15 @@ class RecordingTextBot(SuccessfulBot):
         return await super().send_message(**kwargs)
 
 
+class RecordingPhotoBot(SuccessfulBot):
+    def __init__(self) -> None:
+        self.photo_calls: list[dict[str, object]] = []
+
+    async def send_photo(self, **kwargs: object) -> SimpleNamespace:
+        self.photo_calls.append(kwargs)
+        return SimpleNamespace(message_id=790)
+
+
 class BotMustNotSend:
     async def copy_message(self, **kwargs: object) -> None:
         raise AssertionError("blocked delivery reached Telegram copy_message")
@@ -111,11 +120,12 @@ class FakeTicketService:
         return len(claims)
 
 
-def settings() -> Settings:
+def settings(data_dir: Path | None = None) -> Settings:
     return Settings(
         support_bot_token=SecretStr("test-token"),
         support_group_id=-100123,
         delivery_max_attempts=8,
+        data_dir=data_dir or Path("./data"),
     )
 
 
@@ -152,7 +162,7 @@ def delivery_worker(
         bot=bot,
         ticket_service=service,
         outbox=service,
-        settings=settings(),
+        settings=settings(tmp_path),
         limiter=FakeLimiter(),
         heartbeat_path=tmp_path / "delivery.heartbeat",
         recover_missing_topic=recovery,
@@ -295,6 +305,39 @@ async def test_text_delivery_uses_only_explicit_html_parse_mode(tmp_path: Path) 
         )
 
     assert [call["parse_mode"] for call in bot.send_calls] == [None, "HTML"]
+
+
+async def test_web_photo_delivery_reads_only_from_managed_media_storage(
+    tmp_path: Path,
+) -> None:
+    photo = tmp_path / "web-media" / "assets" / "aa" / "photo.png"
+    photo.parent.mkdir(parents=True)
+    photo.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+    service = FakeTicketService()
+    bot = RecordingPhotoBot()
+    worker = delivery_worker(tmp_path, service=service, bot=bot)
+
+    await worker._deliver(
+        DeliveryJob(
+            id="web-photo",
+            ticket_id="ticket-1",
+            payload={
+                "kind": "send_photo",
+                "target_chat_id": -100123,
+                "target_thread_id": 900,
+                "storage_path": "web-media/assets/aa/photo.png",
+                "text": "Screenshot",
+            },
+            attempt_count=1,
+            claim_token="claim-photo",
+        )
+    )
+
+    assert len(bot.photo_calls) == 1
+    assert bot.photo_calls[0]["caption"] == "Screenshot"
+    assert bot.photo_calls[0]["parse_mode"] is None
+    assert bot.photo_calls[0]["message_thread_id"] == 900
+    assert service.delivered_calls == [("web-photo", "claim-photo", 790)]
 
 
 async def test_stale_success_is_not_reported_as_delivered(tmp_path: Path, caplog: Any) -> None:

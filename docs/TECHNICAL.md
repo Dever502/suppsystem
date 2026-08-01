@@ -5,13 +5,13 @@
 
 ## Назначение и границы
 
-Система связывает личный чат клиента с темой закрытой Telegram Forum-группы. Operator API,
-Remnawave и notification webhook опциональны. Поддерживается один процесс приложения; база —
-SQLite или PostgreSQL.
+Система связывает Telegram-чат или backend сайта с темой закрытой Telegram Forum-группы. Web API,
+Operator API, Remnawave и notification webhook включаются независимо. Поддерживается один процесс;
+база — SQLite или PostgreSQL.
 
 ```text
 Telegram updates ──> Telegram adapter ──┐
-                                       ├──> application services ──> SQL database
+Web Support API ────> Web adapter ──────┼──> application services ──> SQL database
 Operator REST API ──────────────────────┘              │
                                                       ├──> Remnawave API
                                                       └──> durable outbox
@@ -29,16 +29,17 @@ FastAPI. Основные модули:
 | Telegram и тикеты | `telegram_*`, `ticket_*`, `services.py` |
 | доставка | `outbox_repository.py`, `delivery.py`, `notification_webhook.py` |
 | Remnawave | `panel*`, `remnawave.py` |
-| API и runtime | `api*`, `__main__.py`, `runtime_health.py` |
+| API и runtime | `api*`, `web_api*`, `__main__.py`, `runtime_health.py` |
 | данные | `models.py`, `database.py`, Alembic migrations |
 
 Границы проверяются architecture-тестами.
 
 ## Тикеты и сообщения
 
-Тикет находится в состоянии `provisioning`, `open` или `closed`. У пользователя не более
-одного тикета, `topic_id` уникален. Новое сообщение повторно открывает закрытый тикет; счётчик
-циклов закрытия ограничивает оценку одной на каждый цикл.
+Тикет находится в состоянии `provisioning`, `open` или `closed`, имеет канал `telegram|web`, а
+`topic_id` уникален. Telegram и Web identities автоматически не объединяются. На одну Web identity
+существует один постоянный тикет/topic. Новое сообщение открывает следующий close cycle, в котором
+допустима одна оценка.
 
 Создание Forum-темы защищено provisioning token. Неизвестный результат Telegram-вызова остаётся
 для ручной проверки: автоматический повтор мог бы создать вторую тему.
@@ -58,7 +59,8 @@ waiting_topic ──> pending ──> processing ──> delivered
 - FIFO внутри тикета и ограниченные повторы с backoff;
 - возврат зависших `processing` заданий;
 - восстановление удалённой темы и перенаправление незавершённых сообщений;
-- blocklist до создания тикета и перед исходящей доставкой;
+- общая блокировка тикета перед ingress и ответом оператора; legacy blocklist сохраняет
+  совместимость Telegram-блокировки до создания тикета;
 - дедупликация Telegram updates и API-мутаций;
 - персональный admission limit: 30 личных сообщений в минуту и 150 в час.
 
@@ -71,10 +73,12 @@ waiting_topic ──> pending ──> processing ──> delivered
 | --- | --- |
 | `users`, `user_identities` | пользователь и внешние идентификаторы |
 | `tickets`, `ticket_messages` | тикеты, темы, сообщения, заметки и оценки |
+| `media_assets`, `ticket_lifecycle_events` | Web-фото и append-only события статистики |
+| `system_settings`, `operator_dashboard_state` | identity mode и сообщение статистики |
 | `delivery_outbox`, `notification_outbox` | очереди Telegram и webhook |
 | `inbound_updates` | дедупликация входящих updates |
 | `operator_actions`, `reconciliation_outbox` | аудит Remnawave и очередь сверки |
-| `blocklist` | заблокированные Telegram-пользователи |
+| `support_blocks`, `blocklist` | блокировки тикетов и совместимость Telegram pre-ticket blocklist |
 
 После успешной обработки сырой Telegram payload удаляется. Метаданные обработанных updates
 хранятся 7 дней, завершённые outbox и reconciliation записи — 30 дней; failed-записи
@@ -88,14 +92,15 @@ least-privilege роли, `postgres-migrate` применяет Alembic, а пр
 `CONNECT`, `USAGE`, DML и необходимые права sequences. Поддержка нескольких экземпляров
 приложения отсутствует.
 
-## Авторизация и Operator API
+## Авторизация и HTTP API
 
 `ADMIN_TELEGRAM_IDS` содержит администраторов с доступом ко всем Telegram-командам, включая
 `/resolvepanel`. Права в самой группе доступа к приложению не дают. Пустой список разрешён только
 при включённом Operator API и означает API-only работу операторов.
 
 Operator API включается отдельно. Все endpoints, включая `/docs` и `/openapi.json`, защищены
-`X-API-Token`; мутации дополнительно требуют `X-Idempotency-Key`.
+`X-API-Token`; общие endpoints принимают любой включённый API token, а пространства `/tickets` и
+`/web` — только свой. Мутации дополнительно требуют `X-Idempotency-Key`.
 
 | Метод | Назначение |
 | --- | --- |
@@ -110,11 +115,24 @@ Operator API включается отдельно. Все endpoints, включ
 `409`. Rate limit process-local, forwarded IP принимается только от доверенных proxy. Uvicorn и
 Telegram polling работают в одном failure domain.
 
+Web API `/api/v1/web` использует независимый token и только server-to-server модель. Identity mode
+`external_id` или `email` фиксируется при первом ingress. Мутации idempotent; polling использует
+непрозрачный cursor `(created_at, id)`. Фото проверяется по общему размеру запроса, MIME и
+сигнатуре, сохраняется под generated path в `DATA_DIR/web-media`; подпись ограничена лимитом
+Telegram, URL клиента и исходное имя не определяют путь. Ответ оператора Web-клиенту фиксируется в
+БД без Telegram delivery job. Для заблокированного тикета входящие сообщения и оценки сохраняются
+с `ticket_messages.suppressed=true` и возвращаются в polling как обычные, но исключаются из
+Operator API, delivery/lifecycle work и статистики. Исходящие и служебные уведомления подавляются;
+точный retry сохраняет исходный скрытый результат. Block/unblock доступны из Forum-темы и через
+идемпотентные Web API endpoints; состояние блокировки в клиентский контракт не включается.
+
 ## Remnawave
 
-Поддерживается API Remnawave 2.8.x. Поиск выполняется только по `telegramId`; требуется ровно
-один пользователь. Перед каждой мутацией выполняется свежий lookup, Remnawave остаётся источником
-истины, а для одного тикета допускается одна незавершённая мутация.
+Поддерживается API Remnawave 2.8.x. Telegram ticket ищется по `telegramId`. Web ticket сначала
+использует сохранённый UUID, затем точный email lookup; stale UUID очищается. Найденный UUID
+сохраняется, но не объединяет Telegram/Web tickets. Перед мутацией выполняется свежий lookup, а
+его фактическая identity атомарно обновляется в action и notification intent. Для одного тикета
+допускается одна незавершённая мутация.
 
 Действие и reconciliation job фиксируются до внешнего вызова. Timeout, HTTP 5xx, некорректный JSON
 или недостоверный success считаются **unknown outcome** и не вызывают повторную мутацию. Worker
@@ -144,6 +162,7 @@ backoff и после 20 неудач становятся `inconclusive`.
 ## Наблюдаемость и безопасность
 
 - JSON-логи содержат `event`, trace ID и идентификаторы сущностей;
+- Web audit по явному решению владельца содержит email и полный текст сообщений;
 - `/health` проверяет HTTP-процесс, `/ready` — базу и компоненты, `/metrics` — метрики;
 - heartbeat-файлы используются Docker healthcheck даже при выключенном API;
 - секреты интеграций должны содержать не менее 32 символов;

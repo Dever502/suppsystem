@@ -17,7 +17,9 @@ from suppsystem.models import (
     NotificationStatus,
     OperatorAction,
     ReconciliationOutbox,
+    SupportBlock,
     Ticket,
+    TicketChannel,
     WorkStatus,
     utcnow,
 )
@@ -25,6 +27,7 @@ from suppsystem.panel_persistence_service import PanelPersistenceService
 from suppsystem.panel_types import (
     Mutation,
     PanelActionResult,
+    PanelActionStatus,
     PanelSubscriptionInfo,
     action_status_from_error,
     action_status_from_lookup,
@@ -132,7 +135,7 @@ class PanelReconciliationService(PanelPersistenceService):
             "remnawave_reset_key",
             "remnawave_reset_devices",
         )
-        revoke_identity_value: str | None = None
+        revoke_user_uuid: str | None = None
         revoke_telegram_id: int | None = None
         async with database.session() as session:
             if await session.scalar(duplicate_query):
@@ -157,22 +160,38 @@ class PanelReconciliationService(PanelPersistenceService):
                         NotificationOutbox.status == NotificationStatus.AWAITING_PAYLOAD,
                     )
                 )
+                identity_provider = action.payload.get("identity_provider", "telegram")
                 identity_value = action.payload.get("identity_value")
-                if intent is None or not isinstance(identity_value, str):
+                user_uuid = action.payload.get("remnawave_uuid")
+                if (
+                    intent is None
+                    or not isinstance(identity_provider, str)
+                    or not isinstance(identity_value, str)
+                ):
+                    return False
+                if not isinstance(user_uuid, str) and identity_provider != "telegram":
                     return False
                 raw_before_url = intent.payload.get("before_subscription_url")
                 if not isinstance(raw_before_url, str):
                     return False
                 revoke_before_url = raw_before_url
-                revoke_identity_value = identity_value
+                revoke_user_uuid = user_uuid if isinstance(user_uuid, str) else None
+                if identity_provider == "telegram":
+                    try:
+                        revoke_telegram_id = int(identity_value)
+                    except ValueError:
+                        return False
 
         revoke_user: RemnawaveUser | None = None
         if revoke_before_url is not None:
-            assert revoke_identity_value is not None
             try:
-                revoke_telegram_id = int(revoke_identity_value)
-                revoke_user = await self.remnawave.get_user_by_telegram_id(revoke_telegram_id)
-            except (RemnawaveError, ValueError):
+                if revoke_user_uuid is not None:
+                    revoke_user = await self.remnawave.get_user_by_uuid(revoke_user_uuid)
+                elif revoke_telegram_id is not None:
+                    revoke_user = await self.remnawave.get_user_by_telegram_id(revoke_telegram_id)
+                else:
+                    return False
+            except RemnawaveError:
                 return False
             if revoke_user.subscription_url == revoke_before_url:
                 return False
@@ -210,6 +229,7 @@ class PanelReconciliationService(PanelPersistenceService):
                 await session.rollback()
                 return False
             if row.action == "remnawave_revoke_subscription_link":
+                ticket = await session.get(Ticket, ticket_id)
                 intent = await session.scalar(
                     select(NotificationOutbox).where(
                         NotificationOutbox.operator_action_id == operator_action_id,
@@ -222,8 +242,10 @@ class PanelReconciliationService(PanelPersistenceService):
                             await session.rollback()
                             return False
                         self._fill_revoke_notification(intent, revoke_user, recovered=True)
-                        if self.revoke_link_telegram_notification:
-                            assert revoke_telegram_id is not None
+                        if ticket is not None and (
+                            TicketChannel(ticket.channel) is TicketChannel.WEB
+                            or self.revoke_link_telegram_notification
+                        ):
                             self._queue_revoke_link_telegram_notification(
                                 session,
                                 ticket_id=ticket_id,
@@ -277,8 +299,22 @@ class PanelReconciliationService(PanelPersistenceService):
         request_payload: dict[str, Any],
         mutation: Mutation,
     ) -> PanelActionResult:
-        identity_provider = "telegram"
-        identity_value = str(ticket.telegram_user_id)
+        if ticket.channel is TicketChannel.WEB:
+            identity_provider = "uuid" if ticket.remnawave_user_uuid else "email"
+            identity_value = ticket.remnawave_user_uuid or ticket.email or ""
+            if not identity_value:
+                return PanelActionResult(
+                    action=action,
+                    status="validation_error",
+                    changed=False,
+                    identity_provider=identity_provider,
+                    identity_value=identity_value,
+                )
+        else:
+            if ticket.telegram_user_id is None:
+                raise RuntimeError("Telegram ticket has no Telegram identity")
+            identity_provider = "telegram"
+            identity_value = str(ticket.telegram_user_id)
         if action == "extend_subscription":
             extend_days = request_payload.get("extend_days")
             if not isinstance(extend_days, int) or not 1 <= extend_days <= 9999:
@@ -311,7 +347,27 @@ class PanelReconciliationService(PanelPersistenceService):
             )
 
         lookup = await self.get_subscription_for_ticket(ticket)
-        if lookup.subscription is None:
+        identity_provider = lookup.identity_provider
+        identity_value = lookup.identity_value
+        subscription = lookup.subscription
+        identity_refreshed = await self._refresh_reserved_identity(
+            idempotency_key,
+            identity_provider=identity_provider,
+            identity_value=identity_value,
+            remnawave_uuid=subscription.uuid if subscription is not None else None,
+        )
+        if not identity_refreshed:
+            status: PanelActionStatus = "unexpected_response"
+            await self._finish_action(idempotency_key, status, {})
+            self._record_panel_event(ticket, operator_telegram_id, action, status)
+            return PanelActionResult(
+                action=action,
+                status=status,
+                changed=False,
+                identity_provider=identity_provider,
+                identity_value=identity_value,
+            )
+        if subscription is None:
             status = action_status_from_lookup(lookup.status)
             await self._finish_action(idempotency_key, status, {})
             self._record_panel_event(ticket, operator_telegram_id, action, status)
@@ -323,7 +379,6 @@ class PanelReconciliationService(PanelPersistenceService):
                 identity_value=identity_value,
             )
 
-        subscription = lookup.subscription
         if action == "revoke_subscription_link" and not await self._prepare_revoke_intent(
             idempotency_key,
             subscription,
@@ -343,6 +398,7 @@ class PanelReconciliationService(PanelPersistenceService):
             reconciliation_payload = self._reconciliation_payload(
                 action=action, request_payload=request_payload, before=subscription
             )
+            reconciliation_payload["remnawave_uuid"] = subscription.uuid
         except RemnawaveError as error:
             status = action_status_from_error(error)
             await self._finish_action(idempotency_key, status, {})
@@ -463,7 +519,8 @@ class PanelReconciliationService(PanelPersistenceService):
                 operator_action_id=operator_action.id,
                 delay_seconds=self.reconcile_delay_seconds,
                 payload={
-                    "identity_value": str(ticket.telegram_user_id),
+                    "identity_provider": operator_action.payload.get("identity_provider"),
+                    "identity_value": operator_action.payload.get("identity_value"),
                     **payload,
                 },
             )
@@ -491,24 +548,37 @@ class PanelReconciliationService(PanelPersistenceService):
 
         outcome: Literal["applied", "not_applied", "inconclusive"]
         extend_days: int | None = None
-        telegram_id: int | None = None
+        recipient_telegram_id: int | None = None
         user: RemnawaveUser | None = None
         terminal_error: Exception | None = None
         terminal_failure: str | None = None
         try:
+            identity_provider = payload.get("identity_provider", "telegram")
             identity_value = payload.get("identity_value")
+            remnawave_uuid = payload.get("remnawave_uuid")
             action_name = payload.get("action")
-            if not isinstance(identity_value, str) or not isinstance(action_name, str):
+            if (
+                not isinstance(identity_provider, str)
+                or not isinstance(identity_value, str)
+                or not isinstance(action_name, str)
+            ):
                 raise ReconciliationPayloadError("invalid Remnawave reconciliation payload")
             if action_name != stored_action_name:
                 raise ReconciliationPayloadError("Remnawave reconciliation action mismatch")
-            try:
-                telegram_id = int(identity_value)
-            except ValueError as error:
-                raise ReconciliationPayloadError(
-                    "invalid Remnawave reconciliation identity"
-                ) from error
-            user = await self.remnawave.get_user_by_telegram_id(telegram_id)
+            if identity_provider == "telegram":
+                try:
+                    recipient_telegram_id = int(identity_value)
+                except ValueError as error:
+                    raise ReconciliationPayloadError(
+                        "invalid Remnawave reconciliation identity"
+                    ) from error
+                user = await self.remnawave.get_user_by_telegram_id(recipient_telegram_id)
+            else:
+                if not isinstance(remnawave_uuid, str):
+                    raise ReconciliationPayloadError(
+                        "Remnawave UUID is missing from reconciliation payload"
+                    )
+                user = await self.remnawave.get_user_by_uuid(remnawave_uuid)
             if action_name == "extend_subscription":
                 before_raw = payload.get("before_expire_at")
                 request = payload.get("request_payload")
@@ -620,31 +690,39 @@ class PanelReconciliationService(PanelPersistenceService):
                     elif outcome == "not_applied":
                         intent.status = NotificationStatus.CANCELLED
             ticket = await session.get(Ticket, row.ticket_id) if row.ticket_id is not None else None
+            blocked = ticket is not None and await session.get(SupportBlock, ticket.id) is not None
             if (
                 action_name == "revoke_subscription_link"
                 and outcome == "applied"
                 and ticket is not None
-                and self.revoke_link_telegram_notification
+                and not blocked
+                and (
+                    TicketChannel(ticket.channel) is TicketChannel.WEB
+                    or self.revoke_link_telegram_notification
+                )
                 and revoke_intent_ready
             ):
                 assert user is not None
-                assert telegram_id is not None
                 self._queue_revoke_link_telegram_notification(
                     session,
                     ticket_id=ticket.id,
                     operator_action_id=operator_action_id,
-                    recipient_telegram_id=telegram_id,
+                    recipient_telegram_id=recipient_telegram_id,
                     subscription_url=user.subscription_url,
                 )
-            if action_name == "extend_subscription" and outcome == "applied" and ticket is not None:
+            if (
+                action_name == "extend_subscription"
+                and outcome == "applied"
+                and ticket is not None
+                and not blocked
+            ):
                 assert user is not None
                 assert extend_days is not None
-                assert telegram_id is not None
                 self._queue_gift_notification(
                     session,
                     ticket_id=ticket.id,
                     operator_action_id=operator_action_id,
-                    recipient_telegram_id=telegram_id,
+                    recipient_telegram_id=recipient_telegram_id,
                     extend_days=extend_days,
                     expire_at=user.expire_at,
                 )

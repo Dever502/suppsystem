@@ -81,7 +81,7 @@ def test_immutable_image_references_are_accepted(image: str) -> None:
     "image",
     [
         "suppsystem:latest",
-        "suppsystem:2.0.0",
+        "suppsystem:2.1.0",
         "registry.example/suppsystem:" + "b" * 40,
         "suppsystem@sha256:not-a-digest",
     ],

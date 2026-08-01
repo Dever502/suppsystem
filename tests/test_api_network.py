@@ -15,6 +15,8 @@ from suppsystem.runtime_health import RuntimeHealth
 from suppsystem.services import TicketService
 from suppsystem.version import PROJECT_VERSION
 
+API_TOKEN = "abcdef0123456789abcdef0123456789"
+
 
 def _unused_loopback_port() -> int:
     with socket.socket() as sock:
@@ -124,7 +126,8 @@ async def test_real_uvicorn_reverse_proxy_security_and_graceful_shutdown(
     settings = Settings(
         support_bot_token=SecretStr("test-token"),
         support_group_id=-100123,
-        api_admin_token=SecretStr("network-admin-token"),
+        api_enabled=True,
+        api_admin_token=SecretStr(API_TOKEN),
         api_operator_telegram_id=101,
         api_host="127.0.0.1",
         api_port=api_port,
@@ -149,7 +152,7 @@ async def test_real_uvicorn_reverse_proxy_security_and_graceful_shutdown(
         await _wait_until_started(api_server, api_task)
         await primary_proxy.start()
         await rate_proxy.start()
-        auth_headers = {"X-API-Token": "network-admin-token"}
+        auth_headers = {"X-API-Token": API_TOKEN}
 
         async with httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{primary_proxy.port}", timeout=5

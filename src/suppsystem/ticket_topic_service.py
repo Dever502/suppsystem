@@ -16,6 +16,7 @@ from suppsystem.models import (
     DeliveryStatus,
     Direction,
     Ticket,
+    TicketChannel,
     TicketStatus,
     User,
     utcnow,
@@ -42,7 +43,12 @@ class TicketTopicService(TicketServiceBase):
         async with self.database.session() as session:
             created = False
             reopened = False
-            ticket = await session.scalar(select(Ticket).where(Ticket.user_id == user.id))
+            ticket = await session.scalar(
+                select(Ticket).where(
+                    Ticket.user_id == user.id,
+                    Ticket.channel == TicketChannel.TELEGRAM,
+                )
+            )
             if ticket is None:
                 ticket = Ticket(user_id=user.id, status=TicketStatus.PROVISIONING)
                 session.add(ticket)
@@ -51,7 +57,12 @@ class TicketTopicService(TicketServiceBase):
                     created = True
                 except IntegrityError:
                     await session.rollback()
-                    ticket = await session.scalar(select(Ticket).where(Ticket.user_id == user.id))
+                    ticket = await session.scalar(
+                        select(Ticket).where(
+                            Ticket.user_id == user.id,
+                            Ticket.channel == TicketChannel.TELEGRAM,
+                        )
+                    )
                     if ticket is None:
                         raise
 

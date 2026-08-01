@@ -107,7 +107,7 @@ async def test_explicit_upgrade_target_ignores_ambient_database_url(
 
     await upgrade_database(explicit_url)
 
-    assert await current_revision(explicit_url) == "0011_durable_ingress_reconciliation"
+    assert await current_revision(explicit_url) == "0012_web_support"
     assert not ambient_path.exists()
 
 
@@ -124,12 +124,12 @@ async def test_explicit_downgrade_target_ignores_ambient_database_url(
     await downgrade_to_revision(explicit_url, "0009_ticket_last_activity")
 
     assert await current_revision(explicit_url) == "0009_ticket_last_activity"
-    assert await current_revision(ambient_url) == "0011_durable_ingress_reconciliation"
+    assert await current_revision(ambient_url) == "0012_web_support"
 
     await upgrade_database(explicit_url)
 
-    assert await current_revision(explicit_url) == "0011_durable_ingress_reconciliation"
-    assert await current_revision(ambient_url) == "0011_durable_ingress_reconciliation"
+    assert await current_revision(explicit_url) == "0012_web_support"
+    assert await current_revision(ambient_url) == "0012_web_support"
 
 
 async def test_alembic_cli_still_uses_ambient_database_url(
@@ -142,7 +142,7 @@ async def test_alembic_cli_still_uses_ambient_database_url(
 
     await asyncio.to_thread(command.upgrade, config, "head")
 
-    assert await current_revision(ambient_url) == "0011_durable_ingress_reconciliation"
+    assert await current_revision(ambient_url) == "0012_web_support"
 
 
 def test_alembic_config_accepts_percent_encoded_credentials() -> None:

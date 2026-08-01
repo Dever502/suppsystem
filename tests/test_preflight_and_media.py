@@ -16,7 +16,7 @@ from suppsystem.__main__ import (
 )
 from suppsystem.authorization import AuthorizationService
 from suppsystem.config import Settings
-from suppsystem.models import TicketStatus
+from suppsystem.models import TicketChannel, TicketStatus
 from suppsystem.panel import PanelActionResult
 from suppsystem.service_types import InternalNoteView, TopicProvisioningConflictError
 from suppsystem.telegram_adapter import (
@@ -363,6 +363,24 @@ async def test_customer_card_hides_internal_ticket_id() -> None:
     assert "4244b623-d894-463c-9753-6fd42160ac48" not in card
     assert "Telegram ID: <code>123456789</code>" in card
     assert "<b>Ivan &lt;Petrov&gt; · @ivan</b>" in card
+
+
+async def test_web_customer_card_escapes_email() -> None:
+    ticket = SimpleNamespace(
+        id="web-ticket",
+        display_name="Web <Person>",
+        username=None,
+        telegram_user_id=None,
+        email="unsafe<mail>@example.com",
+        channel=TicketChannel.WEB,
+    )
+    adapter = object.__new__(TelegramSupportAdapter)
+    adapter.panel_service = None
+
+    card = await adapter._customer_card(ticket)  # type: ignore[arg-type]
+
+    assert "<b>Web &lt;Person&gt;</b>" in card
+    assert "Email: <code>unsafe&lt;mail&gt;@example.com</code>" in card
 
 
 async def test_send_customer_card_posts_to_support_topic() -> None:

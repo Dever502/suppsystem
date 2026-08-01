@@ -80,7 +80,7 @@ def test_runtime_and_postgres_images_are_digest_pinned() -> None:
     assert "python:3.12.13-alpine3.24@sha256:" in dockerfile
     assert "python:3.12.13-slim-" not in dockerfile
     assert "COPY pyproject.toml uv.lock README.md LICENSE ./" in dockerfile
-    assert 'org.opencontainers.image.version="2.0.0"' in dockerfile
+    assert 'org.opencontainers.image.version="2.1.0"' in dockerfile
     assert "org.opencontainers.image.revision" in dockerfile
     for relative_path in compose_files:
         assert "postgres:16.14-alpine3.22@sha256:" in (ROOT / relative_path).read_text(
@@ -93,7 +93,7 @@ def test_public_start_script_is_transparent_and_pins_the_pulled_image() -> None:
     text = path.read_text(encoding="utf-8")
 
     assert path.stat().st_mode & 0o100
-    assert "ghcr.io/dever502/suppsystem:v2.0.0" in text
+    assert "ghcr.io/dever502/suppsystem:v2.1.0" in text
     assert "docker pull" in text
     assert "RepoDigests" in text
     assert "config --format json" in text
@@ -118,7 +118,7 @@ def test_public_documentation_is_curated() -> None:
         assert not (ROOT / relative_path).exists()
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "> Версия: `v2.0.0`." in readme
+    assert "> Версия: `v2.1.0`." in readme
     assert "./scripts/start.sh sqlite" in readme
     assert "## Ограничения" not in readme
     assert "## Разработка" not in readme

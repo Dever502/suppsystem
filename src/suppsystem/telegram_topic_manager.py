@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from html import escape
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
@@ -45,7 +46,9 @@ class TelegramTopicManager:
 
     async def prepare_reopened_customer_topic(self, ticket_id: str) -> None:
         ticket = await self.ticket_service.get_ticket(ticket_id)
-        async with self._ticket_locks.hold(ticket.telegram_user_id):
+        async with self._ticket_locks.hold(
+            getattr(ticket, "lock_key", str(ticket.telegram_user_id))
+        ):
             ticket = await self.ticket_service.get_ticket(ticket_id)
             await self._refresh_reopened_ticket_context(ticket)
 
@@ -124,7 +127,9 @@ class TelegramTopicManager:
 
     async def reconcile_ticket_topic(self, ticket_id: str) -> bool:
         ticket = await self.ticket_service.get_ticket(ticket_id)
-        async with self._ticket_locks.hold(ticket.telegram_user_id):
+        async with self._ticket_locks.hold(
+            getattr(ticket, "lock_key", str(ticket.telegram_user_id))
+        ):
             ticket = await self.ticket_service.get_ticket(ticket_id)
             if ticket.topic_id is None:
                 ticket = await self._ensure_topic(ticket, reconcile_missing=True)
@@ -136,7 +141,9 @@ class TelegramTopicManager:
         """Replace a topic Telegram has confirmed no longer exists."""
 
         ticket = await self.ticket_service.get_ticket(ticket_id)
-        async with self._ticket_locks.hold(ticket.telegram_user_id):
+        async with self._ticket_locks.hold(
+            getattr(ticket, "lock_key", str(ticket.telegram_user_id))
+        ):
             ticket = await self.ticket_service.get_ticket(ticket_id)
             if ticket.topic_id == old_topic_id:
                 await self.ticket_service.invalidate_topic(
@@ -166,7 +173,9 @@ class TelegramTopicManager:
         for ticket_id in ticket_ids:
             try:
                 ticket = await self.ticket_service.get_ticket(ticket_id)
-                async with self._ticket_locks.hold(ticket.telegram_user_id):
+                async with self._ticket_locks.hold(
+                    getattr(ticket, "lock_key", str(ticket.telegram_user_id))
+                ):
                     ticket = await self.ticket_service.get_ticket(ticket_id)
                     recovering_closed = ticket.status.value == "closed"
                     ticket = await self._ensure_topic(
@@ -427,10 +436,15 @@ class TelegramTopicManager:
         )
 
     async def _customer_card(self, ticket: TicketView) -> str:
+        if ticket.telegram_user_id is None:
+            email = ticket.email or "—"
+            identity = f"Email: <code>{escape(email)}</code>\nИсточник: <code>Web</code>"
+        else:
+            identity = f"Telegram ID: <code>{ticket.telegram_user_id}</code>"
         return (
             "👤 <b>Клиент</b>\n\n"
             f"<b>{customer_identity(ticket)}</b>\n"
-            f"Telegram ID: <code>{ticket.telegram_user_id}</code>\n\n"
+            f"{identity}\n\n"
             f"{await self._subscription_block(ticket)}"
         )
 

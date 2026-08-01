@@ -16,6 +16,7 @@ from suppsystem.models import (
     Direction,
     OperatorAction,
     Ticket,
+    TicketChannel,
     TicketMessage,
     TicketStatus,
     User,
@@ -25,6 +26,7 @@ from suppsystem.models import (
 from suppsystem.service_types import TicketNotFoundError, TicketView
 from suppsystem.ticket_service_base import TicketServiceBase
 from suppsystem.trace import get_trace_id
+from suppsystem.web_models import TicketLifecycleEvent
 
 
 @dataclass(frozen=True)
@@ -57,7 +59,12 @@ class TicketIngressService(TicketServiceBase):
             return None
         return cast(
             Ticket | None,
-            await session.scalar(select(Ticket).where(Ticket.user_id == identity.user_id)),
+            await session.scalar(
+                select(Ticket).where(
+                    Ticket.user_id == identity.user_id,
+                    Ticket.channel == TicketChannel.TELEGRAM,
+                )
+            ),
         )
 
     @retry_sqlite_locks
@@ -106,7 +113,12 @@ class TicketIngressService(TicketServiceBase):
                 user.username = username
 
             ticket = await session.scalar(
-                select(Ticket).where(Ticket.user_id == user.id).with_for_update()
+                select(Ticket)
+                .where(
+                    Ticket.user_id == user.id,
+                    Ticket.channel == TicketChannel.TELEGRAM,
+                )
+                .with_for_update()
             )
             created = ticket is None
             reopened = False
@@ -157,6 +169,14 @@ class TicketIngressService(TicketServiceBase):
                 )
             )
             if created or reopened:
+                session.add(
+                    TicketLifecycleEvent(
+                        ticket_id=ticket.id,
+                        event_type="created" if created else "reopened",
+                        channel=TicketChannel.TELEGRAM,
+                        close_cycle=ticket.close_cycle,
+                    )
+                )
                 await enqueue_topic_reconciliation(
                     session, ticket_id=ticket.id, desired_status=TicketStatus.OPEN.value
                 )
@@ -196,7 +216,9 @@ class TicketIngressService(TicketServiceBase):
             if ticket is None:
                 raise TicketNotFoundError(ticket_id)
             view = await self._ticket_view(session, ticket)
-            if await self._is_blocked_in_session(session, view.telegram_user_id):
+            if view.telegram_user_id is not None and await self._is_blocked_in_session(
+                session, view.telegram_user_id
+            ):
                 return TelegramOperatorReplyResult(False, True, ticket=view)
             if await self._delivery_exists(session, key):
                 return TelegramOperatorReplyResult(False, False, ticket=view)
@@ -208,6 +230,15 @@ class TicketIngressService(TicketServiceBase):
                     TicketStatus.OPEN if ticket.topic_id is not None else TicketStatus.PROVISIONING
                 )
                 ticket.closed_at = None
+                session.add(
+                    TicketLifecycleEvent(
+                        ticket_id=ticket.id,
+                        event_type="reopened",
+                        channel=TicketChannel.TELEGRAM,
+                        close_cycle=ticket.close_cycle,
+                        created_at=now,
+                    )
+                )
                 session.add(
                     OperatorAction(
                         ticket_id=ticket.id,

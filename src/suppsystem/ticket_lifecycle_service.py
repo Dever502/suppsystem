@@ -25,10 +25,13 @@ from suppsystem.models import (
     DeliveryOutbox,
     Direction,
     OperatorAction,
+    SupportBlock,
     Ticket,
+    TicketChannel,
     TicketMessage,
     TicketStatus,
     User,
+    UserIdentity,
     utcnow,
 )
 from suppsystem.service_types import (
@@ -37,6 +40,7 @@ from suppsystem.service_types import (
 )
 from suppsystem.ticket_topic_service import TicketTopicService
 from suppsystem.trace import get_trace_id
+from suppsystem.web_models import TicketLifecycleEvent
 
 
 class TicketLifecycleService(TicketTopicService):
@@ -59,8 +63,6 @@ class TicketLifecycleService(TicketTopicService):
         if api_idempotency is not None and action_key != api_idempotency.storage_key:
             raise ValueError("API idempotency storage key mismatch")
         notification_chat_id = notification_target_chat_id
-        if notification_text is not None and notification_chat_id is None:
-            raise ValueError("notification_target_chat_id is required for close notification")
         if notification_reply_markup is not None and notification_reply_markup_builder is not None:
             raise ValueError("notification reply markup inputs are mutually exclusive")
 
@@ -125,24 +127,33 @@ class TicketLifecycleService(TicketTopicService):
                     trace_id=get_trace_id(),
                 )
             )
-            if notification_text is not None:
-                assert notification_chat_id is not None
-                if not await self._is_blocked_in_session(session, notification_chat_id):
+            session.add(
+                TicketLifecycleEvent(
+                    ticket_id=ticket.id,
+                    event_type="closed",
+                    channel=TicketChannel(ticket.channel),
+                    close_cycle=close_cycle,
+                    created_at=transition_at,
+                )
+            )
+            notification_blocked = await self._is_ticket_blocked_in_session(session, ticket.id)
+            if notification_text is not None and not notification_blocked:
+                session.add(
+                    TicketMessage(
+                        ticket_id=ticket.id,
+                        direction=Direction.OPERATOR_TO_USER,
+                        channel="system",
+                        source_chat_id=None,
+                        source_message_id=None,
+                        content=notification_text,
+                    )
+                )
+                if notification_chat_id is not None:
                     delivery_key = notification_idempotency_key or f"{action_key}:notification"
                     reply_markup = (
                         notification_reply_markup_builder(close_cycle)
                         if notification_reply_markup_builder is not None
                         else notification_reply_markup
-                    )
-                    session.add(
-                        TicketMessage(
-                            ticket_id=ticket.id,
-                            direction=Direction.OPERATOR_TO_USER,
-                            channel="system",
-                            source_chat_id=None,
-                            source_message_id=None,
-                            content=notification_text,
-                        )
                     )
                     session.add(
                         DeliveryOutbox(
@@ -235,6 +246,14 @@ class TicketLifecycleService(TicketTopicService):
                 )
             )
             session.add(
+                TicketLifecycleEvent(
+                    ticket_id=ticket.id,
+                    event_type="rated",
+                    channel=TicketChannel(ticket.channel),
+                    close_cycle=close_cycle,
+                )
+            )
+            session.add(
                 DeliveryOutbox(
                     ticket_id=ticket_id,
                     direction=Direction.USER_TO_OPERATOR,
@@ -299,12 +318,25 @@ class TicketLifecycleService(TicketTopicService):
                     topic_provisioning_token=None,
                     topic_provisioning_started_at=None,
                 )
-                .returning(Ticket.id)
+                .returning(Ticket.id, Ticket.channel, Ticket.close_cycle)
             )
-            ticket_ids = [row.id for row in close_result.all()]
+            closed_rows = close_result.all()
+            ticket_ids = [row.id for row in closed_rows]
             views: list[TicketView] = []
             if ticket_ids:
                 trace_id = get_trace_id()
+                session.add_all(
+                    [
+                        TicketLifecycleEvent(
+                            ticket_id=row.id,
+                            event_type="closed",
+                            channel=TicketChannel(row.channel),
+                            close_cycle=row.close_cycle,
+                            created_at=transition_at,
+                        )
+                        for row in closed_rows
+                    ]
+                )
                 session.add_all(
                     [
                         OperatorAction(
@@ -351,6 +383,174 @@ class TicketLifecycleService(TicketTopicService):
         return views
 
     @retry_sqlite_locks
+    async def block_ticket(
+        self,
+        *,
+        ticket_id: str,
+        operator_telegram_id: int,
+        reason: str | None = None,
+        source: str = "telegram",
+        idempotency_key: str | None = None,
+        api_idempotency: ApiIdempotencyCommand | None = None,
+    ) -> bool:
+        action_key = idempotency_key or f"block-ticket:{ticket_id}:{uuid.uuid4()}"
+        if api_idempotency is not None and action_key != api_idempotency.storage_key:
+            raise ValueError("API idempotency storage key mismatch")
+        async with self.database.session() as session:
+            replay = await load_api_replay(session, api_idempotency)
+            if replay is not None:
+                return replay
+            if await self._operator_action_exists(session, action_key):
+                return False
+            ticket = await session.scalar(
+                select(Ticket).where(Ticket.id == ticket_id).with_for_update()
+            )
+            if ticket is None:
+                raise TicketNotFoundError(ticket_id)
+            block = await session.get(SupportBlock, ticket_id)
+            telegram_user_id = (
+                await session.scalar(
+                    select(UserIdentity.external_id).where(
+                        UserIdentity.user_id == ticket.user_id,
+                        UserIdentity.provider == "telegram",
+                    )
+                )
+                if TicketChannel(ticket.channel) is TicketChannel.TELEGRAM
+                else None
+            )
+            legacy_entry = (
+                await session.get(BlocklistEntry, int(telegram_user_id))
+                if telegram_user_id is not None
+                else None
+            )
+            changed = block is None and legacy_entry is None
+            if block is None:
+                session.add(
+                    SupportBlock(
+                        ticket_id=ticket_id,
+                        blocked_by_telegram_id=operator_telegram_id,
+                        reason=reason,
+                        source=source,
+                    )
+                )
+            if telegram_user_id is not None and legacy_entry is None:
+                session.add(
+                    BlocklistEntry(
+                        telegram_user_id=int(telegram_user_id),
+                        blocked_by_telegram_id=operator_telegram_id,
+                        reason=reason,
+                    )
+                )
+            session.add(
+                OperatorAction(
+                    ticket_id=ticket_id,
+                    operator_telegram_id=operator_telegram_id,
+                    action="block_user",
+                    idempotency_key=action_key,
+                    payload=api_action_payload(
+                        {"reason": reason, "source": source},
+                        command=api_idempotency,
+                        changed=changed,
+                    ),
+                    result="completed",
+                    trace_id=get_trace_id(),
+                )
+            )
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                replay = await load_api_replay(session, api_idempotency)
+                if replay is not None:
+                    return replay
+                if await self._operator_action_exists(session, action_key):
+                    return False
+                raise
+        record_event(
+            "user_blocked",
+            ticket_id=ticket_id,
+            operator_telegram_id=operator_telegram_id,
+        )
+        return changed
+
+    @retry_sqlite_locks
+    async def unblock_ticket(
+        self,
+        *,
+        ticket_id: str,
+        operator_telegram_id: int,
+        source: str = "telegram",
+        idempotency_key: str | None = None,
+        api_idempotency: ApiIdempotencyCommand | None = None,
+    ) -> bool:
+        action_key = idempotency_key or f"unblock-ticket:{ticket_id}:{uuid.uuid4()}"
+        if api_idempotency is not None and action_key != api_idempotency.storage_key:
+            raise ValueError("API idempotency storage key mismatch")
+        async with self.database.session() as session:
+            replay = await load_api_replay(session, api_idempotency)
+            if replay is not None:
+                return replay
+            if await self._operator_action_exists(session, action_key):
+                return False
+            ticket = await session.scalar(
+                select(Ticket).where(Ticket.id == ticket_id).with_for_update()
+            )
+            if ticket is None:
+                raise TicketNotFoundError(ticket_id)
+            block = await session.get(SupportBlock, ticket_id)
+            telegram_user_id = (
+                await session.scalar(
+                    select(UserIdentity.external_id).where(
+                        UserIdentity.user_id == ticket.user_id,
+                        UserIdentity.provider == "telegram",
+                    )
+                )
+                if TicketChannel(ticket.channel) is TicketChannel.TELEGRAM
+                else None
+            )
+            legacy_entry = (
+                await session.get(BlocklistEntry, int(telegram_user_id))
+                if telegram_user_id is not None
+                else None
+            )
+            changed = block is not None or legacy_entry is not None
+            if block is not None:
+                await session.delete(block)
+            if legacy_entry is not None:
+                await session.delete(legacy_entry)
+            session.add(
+                OperatorAction(
+                    ticket_id=ticket_id,
+                    operator_telegram_id=operator_telegram_id,
+                    action="unblock_user",
+                    idempotency_key=action_key,
+                    payload=api_action_payload(
+                        {"source": source},
+                        command=api_idempotency,
+                        changed=changed,
+                    ),
+                    result="completed",
+                    trace_id=get_trace_id(),
+                )
+            )
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                replay = await load_api_replay(session, api_idempotency)
+                if replay is not None:
+                    return replay
+                if await self._operator_action_exists(session, action_key):
+                    return False
+                raise
+        record_event(
+            "user_unblocked",
+            ticket_id=ticket_id,
+            operator_telegram_id=operator_telegram_id,
+        )
+        return changed
+
+    @retry_sqlite_locks
     async def block(
         self,
         *,
@@ -371,6 +571,27 @@ class TicketLifecycleService(TicketTopicService):
                         telegram_user_id=telegram_user_id,
                         blocked_by_telegram_id=operator_telegram_id,
                         reason=reason,
+                    )
+                )
+            resolved_ticket_id = ticket_id or await session.scalar(
+                select(Ticket.id)
+                .join(UserIdentity, UserIdentity.user_id == Ticket.user_id)
+                .where(
+                    Ticket.channel == TicketChannel.TELEGRAM,
+                    UserIdentity.provider == "telegram",
+                    UserIdentity.external_id == str(telegram_user_id),
+                )
+            )
+            if (
+                resolved_ticket_id is not None
+                and await session.get(SupportBlock, resolved_ticket_id) is None
+            ):
+                session.add(
+                    SupportBlock(
+                        ticket_id=resolved_ticket_id,
+                        blocked_by_telegram_id=operator_telegram_id,
+                        reason=reason,
+                        source="legacy_service",
                     )
                 )
             session.add(
@@ -413,6 +634,19 @@ class TicketLifecycleService(TicketTopicService):
             entry = await session.get(BlocklistEntry, telegram_user_id)
             if entry is not None:
                 await session.delete(entry)
+            resolved_ticket_id = ticket_id or await session.scalar(
+                select(Ticket.id)
+                .join(UserIdentity, UserIdentity.user_id == Ticket.user_id)
+                .where(
+                    Ticket.channel == TicketChannel.TELEGRAM,
+                    UserIdentity.provider == "telegram",
+                    UserIdentity.external_id == str(telegram_user_id),
+                )
+            )
+            if resolved_ticket_id is not None:
+                support_block = await session.get(SupportBlock, resolved_ticket_id)
+                if support_block is not None:
+                    await session.delete(support_block)
             if operator_telegram_id is not None:
                 session.add(
                     OperatorAction(
@@ -477,6 +711,7 @@ class TicketLifecycleService(TicketTopicService):
             ticket = await session.get(Ticket, ticket_id)
             if ticket is None:
                 raise TicketNotFoundError(ticket_id)
+            transition_at = utcnow()
             reopen_result = await session.execute(
                 update(Ticket)
                 .where(
@@ -489,7 +724,7 @@ class TicketLifecycleService(TicketTopicService):
                         else_=TicketStatus.PROVISIONING,
                     ),
                     closed_at=None,
-                    last_activity_at=utcnow(),
+                    last_activity_at=transition_at,
                 )
             )
             if cast(CursorResult[object], reopen_result).rowcount != 1:
@@ -525,6 +760,15 @@ class TicketLifecycleService(TicketTopicService):
                     payload=api_action_payload({}, command=api_idempotency, changed=True),
                     result="completed",
                     trace_id=get_trace_id(),
+                )
+            )
+            session.add(
+                TicketLifecycleEvent(
+                    ticket_id=ticket.id,
+                    event_type="reopened",
+                    channel=TicketChannel(ticket.channel),
+                    close_cycle=ticket.close_cycle,
+                    created_at=transition_at,
                 )
             )
             await enqueue_topic_reconciliation(

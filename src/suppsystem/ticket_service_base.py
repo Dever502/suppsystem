@@ -10,7 +10,9 @@ from suppsystem.models import (
     BlocklistEntry,
     DeliveryOutbox,
     OperatorAction,
+    SupportBlock,
     Ticket,
+    TicketChannel,
     TicketStatus,
     User,
     UserIdentity,
@@ -33,6 +35,28 @@ class TicketServiceBase:
     @staticmethod
     async def _is_blocked_in_session(session: AsyncSession, telegram_user_id: int) -> bool:
         return await session.get(BlocklistEntry, telegram_user_id) is not None
+
+    async def is_ticket_blocked(self, ticket_id: str) -> bool:
+        async with self.database.session() as session:
+            return await self._is_ticket_blocked_in_session(session, ticket_id)
+
+    @staticmethod
+    async def _is_ticket_blocked_in_session(session: AsyncSession, ticket_id: str) -> bool:
+        if await session.get(SupportBlock, ticket_id) is not None:
+            return True
+        telegram_identity = await session.scalar(
+            select(UserIdentity.external_id)
+            .join(Ticket, Ticket.user_id == UserIdentity.user_id)
+            .where(
+                Ticket.id == ticket_id,
+                Ticket.channel == TicketChannel.TELEGRAM,
+                UserIdentity.provider == "telegram",
+            )
+        )
+        return bool(
+            telegram_identity is not None
+            and await session.get(BlocklistEntry, int(telegram_identity)) is not None
+        )
 
     @staticmethod
     async def _operator_action_exists(session: AsyncSession, idempotency_key: str) -> bool:
@@ -90,22 +114,35 @@ class TicketServiceBase:
         user = await session.get(User, ticket.user_id)
         if user is None:
             raise TicketNotFoundError(ticket.id)
+        channel = TicketChannel(ticket.channel)
+        providers = (
+            ("telegram",) if channel is TicketChannel.TELEGRAM else ("web_external_id", "web_email")
+        )
         identity = await session.scalar(
             select(UserIdentity).where(
                 UserIdentity.user_id == user.id,
-                UserIdentity.provider == "telegram",
+                UserIdentity.provider.in_(providers),
             )
         )
         if identity is None:
             raise TicketNotFoundError(ticket.id)
-        return self._ticket_view_from_user(ticket, user, int(identity.external_id))
+        telegram_user_id = int(identity.external_id) if identity.provider == "telegram" else None
+        return self._ticket_view_from_user(
+            ticket,
+            user,
+            telegram_user_id,
+            identity_provider=identity.provider,
+            identity_value=identity.external_id,
+        )
 
     @staticmethod
     def _ticket_view_from_user(
         ticket: Ticket,
         user: User,
-        telegram_user_id: int,
+        telegram_user_id: int | None,
         *,
+        identity_provider: str = "telegram",
+        identity_value: str | None = None,
         reopened: bool = False,
     ) -> TicketView:
         return TicketView(
@@ -122,13 +159,22 @@ class TicketServiceBase:
             closed_at=ticket.closed_at,
             close_cycle=ticket.close_cycle,
             reopened=reopened,
+            channel=TicketChannel(ticket.channel),
+            email=user.email,
+            identity_provider=identity_provider,
+            identity_value=identity_value,
+            remnawave_user_uuid=ticket.remnawave_user_uuid,
         )
 
     @staticmethod
     def _loaded_ticket_view(ticket: Ticket) -> TicketView:
         user = ticket.user
+        channel = TicketChannel(ticket.channel)
+        providers = (
+            ("telegram",) if channel is TicketChannel.TELEGRAM else ("web_external_id", "web_email")
+        )
         identity = next(
-            (item for item in user.identities if item.provider == "telegram"),
+            (item for item in user.identities if item.provider in providers),
             None,
         )
         if identity is None:
@@ -136,5 +182,7 @@ class TicketServiceBase:
         return TicketServiceBase._ticket_view_from_user(
             ticket,
             user,
-            int(identity.external_id),
+            int(identity.external_id) if identity.provider == "telegram" else None,
+            identity_provider=identity.provider,
+            identity_value=identity.external_id,
         )

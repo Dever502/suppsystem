@@ -11,6 +11,7 @@ from alembic import command
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
+import suppsystem.web_models  # noqa: F401
 from suppsystem.migrations import build_alembic_config, upgrade_database
 from suppsystem.models import (
     Base,
@@ -18,6 +19,7 @@ from suppsystem.models import (
     DeliveryOutbox,
     NotificationOutbox,
     OperatorAction,
+    SupportBlock,
     Ticket,
     TicketMessage,
     User,
@@ -26,7 +28,7 @@ from suppsystem.models import (
 
 pytestmark = pytest.mark.postgres
 
-HEAD_REVISION = "0011_durable_ingress_reconciliation"
+HEAD_REVISION = "0012_web_support"
 LEGACY_ACTIVE_TICKET_ID = "00000000-0000-4000-8000-000000000001"
 LEGACY_IDLE_TICKET_ID = "00000000-0000-4000-8000-000000000002"
 LEGACY_MESSAGE_ID = "00000000-0000-4000-8000-000000000101"
@@ -80,6 +82,8 @@ def _normalized_ondelete(value: object) -> str | None:
 
 
 def _type_signature(column_type: object) -> tuple[str, int | None]:
+    if isinstance(column_type, sa.Boolean):
+        return ("boolean", None)
     if isinstance(column_type, sa.BigInteger):
         return ("bigint", None)
     if isinstance(column_type, sa.Integer):
@@ -400,12 +404,20 @@ def _seed_revision_0001(connection: Connection) -> None:
     )
     connection.execute(
         blocklist.insert(),
-        {
-            "telegram_user_id": 71999,
-            "blocked_by_telegram_id": 42,
-            "reason": "legacy spam",
-            "created_at": CREATED_AT,
-        },
+        [
+            {
+                "telegram_user_id": 71999,
+                "blocked_by_telegram_id": 42,
+                "reason": "legacy pre-ticket spam",
+                "created_at": CREATED_AT,
+            },
+            {
+                "telegram_user_id": 71001,
+                "blocked_by_telegram_id": 42,
+                "reason": "legacy ticket spam",
+                "created_at": CREATED_AT,
+            },
+        ],
     )
 
 
@@ -504,6 +516,9 @@ async def _assert_0001_to_head_preserves_and_backfills_legacy_data(
                 "blocklist": await connection.scalar(
                     sa.select(sa.func.count()).select_from(BlocklistEntry)
                 ),
+                "support_blocks": await connection.scalar(
+                    sa.select(sa.func.count()).select_from(SupportBlock)
+                ),
             }
             active_ticket = (
                 await connection.execute(
@@ -530,6 +545,7 @@ async def _assert_0001_to_head_preserves_and_backfills_legacy_data(
                         TicketMessage.content,
                         TicketMessage.media,
                         TicketMessage.rating_cycle,
+                        TicketMessage.suppressed,
                         TicketMessage.source_chat_id,
                         TicketMessage.source_message_id,
                     ).where(TicketMessage.id == LEGACY_MESSAGE_ID)
@@ -600,7 +616,8 @@ async def _assert_0001_to_head_preserves_and_backfills_legacy_data(
         "deliveries": 2,
         "actions": 3,
         "notifications": 1,
-        "blocklist": 1,
+        "blocklist": 2,
+        "support_blocks": 1,
     }
     assert active_ticket.status == "open"
     assert active_ticket.close_cycle == 0
@@ -612,6 +629,7 @@ async def _assert_0001_to_head_preserves_and_backfills_legacy_data(
     assert message.content is None
     assert message.media is None
     assert message.rating_cycle is None
+    assert message.suppressed is False
     assert message.source_chat_id == 71001
     assert message.source_message_id == 17
     assert processing_delivery.status == "pending"

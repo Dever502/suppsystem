@@ -109,6 +109,13 @@ class RemnawaveClient:
         self._client = client
         self.metrics = metrics
 
+    async def get_user_by_uuid(self, user_uuid: str) -> RemnawaveUser:
+        payload = await self._request_json("/api/users/" + quote(user_uuid, safe=""))
+        response = payload.get("response")
+        if not isinstance(response, dict):
+            raise RemnawaveUnexpectedResponseError("Remnawave user response is malformed")
+        return self._parse_user(response)
+
     async def get_user_by_telegram_id(self, telegram_id: int) -> RemnawaveUser:
         users = await self._request_user_array(f"/api/users/by-telegram-id/{telegram_id}")
         return self._single_user(users, lookup="telegram ID")

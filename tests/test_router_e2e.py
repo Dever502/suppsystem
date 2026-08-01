@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 from aiogram import Bot, Dispatcher
@@ -100,12 +101,13 @@ async def test_router_registers_and_routes_private_and_authorized_group_boundari
         ticket_service=TicketServiceMustNotBeCalled(),  # type: ignore[arg-type]
         settings=settings,
         limiter=TelegramRateLimiter(0),
+        statistics_service=SimpleNamespace(),  # type: ignore[arg-type]
     )
     dispatcher = Dispatcher()
     dispatcher.include_router(adapter.router)
 
     assert len(adapter.router.message.handlers) == 3
-    assert len(adapter.router.callback_query.handlers) == 1
+    assert len(adapter.router.callback_query.handlers) == 2
 
     await dispatcher.feed_update(
         bot,

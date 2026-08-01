@@ -8,7 +8,7 @@
 - Linux, Docker Engine и Docker Compose v2;
 - Telegram-бот и закрытая supergroup с включёнными Topics;
 - числовые Telegram ID администраторов;
-- HTTPS reverse proxy, если Operator API доступен извне.
+- HTTPS reverse proxy, если Operator API или Web API доступны извне.
 
 Добавьте бота администратором Forum-группы с правом управления темами. При старте preflight
 проверяет токен, тип группы, Topics и права бота; `SUPPORT_GROUP_ID` supergroup обычно начинается
@@ -71,7 +71,7 @@ POSTGRES_RUNTIME_PASSWORD=replace-with-random-password-3
 | `SUPPORT_BOT_TOKEN` | обязательна | токен Telegram-бота |
 | `SUPPORT_GROUP_ID` | обязательна | ID закрытой Forum-группы |
 | `ADMIN_TELEGRAM_IDS` | обязательна без API | ID администраторов через запятую; доступ ко всем командам |
-| `DATA_DIR` | `./data` | SQLite и heartbeat-файлы |
+| `DATA_DIR` | `./data` | SQLite, Web-фото и heartbeat-файлы |
 | `DATABASE_URL` | SQLite в `DATA_DIR` | async SQLAlchemy URL |
 | `MIGRATION_DATABASE_URL` | `DATABASE_URL` | отдельный URL для миграций |
 | `MIGRATIONS_AT_STARTUP` | `true` | PostgreSQL Compose меняет на `false` |
@@ -101,6 +101,54 @@ proxy. Каждая мутация требует
 `409 Conflict`. Rate limit и защита токена process-local и сбрасываются при рестарте.
 
 Пример reverse proxy: [`deploy/nginx/suppsystem-api.conf.example`](../deploy/nginx/suppsystem-api.conf.example).
+
+### Web Support API
+
+Web API предназначен только для backend сайта. Не передавайте token в браузер и не включайте
+CORS. Он использует тот же bind/port и общий process-local rate limit, но отдельный credential:
+
+| Переменная | По умолчанию | Назначение |
+| --- | --- | --- |
+| `WEB_API_ENABLED` | `false` | включает `/api/v1/web` |
+| `WEB_API_TOKEN` | пусто | отдельный `X-API-Token`, минимум 32 символа |
+| `WEB_IDENTITY_MODE` | `external_id` | `external_id` или `email` |
+
+`WEB_API_TOKEN` не может совпадать с `API_ADMIN_TOKEN`. Рекомендуемый режим `external_id`
+использует стабильный ID аккаунта сайта, email остаётся изменяемым атрибутом. В режиме `email`
+смена email создаёт нового клиента. После первого Web-обращения режим фиксируется в БД.
+
+Все мутации требуют `X-Idempotency-Key`. Текст принимается как JSON (до 4096 символов); текст с
+одним JPEG/PNG/WebP до 10 MiB — как multipart, при этом подпись ограничена 1024 символами.
+Пример Nginx допускает 11 MiB на весь multipart-запрос. Минимальный запрос:
+
+```bash
+curl -X POST https://support.example.com/api/v1/web/messages \
+  -H "X-API-Token: $WEB_API_TOKEN" \
+  -H "X-Idempotency-Key: message-account-42-0001" \
+  -H 'Content-Type: application/json' \
+  -d '{"external_user_id":"account-42","email":"user@example.com","text":"Нужна помощь"}'
+```
+
+Backend сохраняет `conversation_id` и `next_cursor`, затем каждые 2–5 секунд читает:
+
+```text
+GET  /api/v1/web/conversations/{id}
+GET  /api/v1/web/conversations/{id}/messages?after={cursor}
+POST /api/v1/web/conversations/{id}/close
+POST /api/v1/web/conversations/{id}/rating
+POST /api/v1/web/conversations/{id}/block
+POST /api/v1/web/conversations/{id}/unblock
+GET  /api/v1/web/media/{media_id}
+```
+
+Повтор cursor безопасен; порядок стабилен по `(created_at, id)`. Блокировка не раскрывается
+клиенту: входящие сообщения и оценки принимаются обычным ответом и остаются в клиентской истории,
+но помечаются как подавленные. Они не видны в Operator API и статистике, не доставляются оператору
+и не переоткрывают тикет. Ответы оператора, служебные сообщения и пользовательские Remnawave-
+уведомления для заблокированного тикета также не ставятся в доставку; точный retry сохраняет этот
+результат. В первой версии нет SSE, WebSocket, delivery webhook и browser widget. По принятому
+privacy trade-off JSON-логи содержат email и полный текст Web-сообщений: ограничьте доступ и
+retention.
 
 ### Remnawave и webhook
 
@@ -143,6 +191,12 @@ HMAC-SHA256 и дедуплицирует эффект по `event_id`.
 | `/synctopics` | синхронизировать Forum-темы |
 
 Обычный ответ в теме отправляется клиенту и при необходимости заново открывает тикет.
+В Web-теме поддерживаются текст и одно фото; ответ забирает backend сайта. `/block` и `/unblock`
+работают в обоих каналах; для Web заблокированный клиент продолжает получать обычные API-ответы,
+но его новые сообщения не попадают оператору. Remnawave-команды работают для обоих каналов при
+однозначной привязке.
+В General topic хранится одно сообщение `📊 Статистика` с периодами сегодня, 7 и 30 дней; callback
+доступен только `ADMIN_TELEGRAM_IDS`.
 
 ## Production
 
@@ -157,7 +211,7 @@ Operator API на loopback. `.env` хранит секреты с правами
 
 ```bash
 DEPLOY_DIR=/opt/suppsystem \
-  sh scripts/deploy.sh deploy registry.example/suppsystem:v2.0.0
+  sh scripts/deploy.sh deploy registry.example/suppsystem:v2.1.0
 DEPLOY_DIR=/opt/suppsystem sh scripts/production-compose.sh ps
 ```
 
@@ -189,14 +243,15 @@ curl -H "X-API-Token: $API_ADMIN_TOKEN" http://127.0.0.1:8080/ready
 curl -H "X-API-Token: $API_ADMIN_TOKEN" http://127.0.0.1:8080/metrics
 ```
 
-HTTP endpoints доступны при включённом API. `/health` проверяет процесс, `/ready` — базу и
+HTTP endpoints доступны при включённом Operator API или Web API. `/health` проверяет процесс, `/ready` — базу и
 настроенные компоненты, `/metrics` отдаёт Prometheus-метрики. Логи — JSON; основные поля:
 `event`, `trace_id`, `ticket_id`, `delivery_id`, `operator_action_id`.
 
 ## Backup и восстановление
 
 Храните зашифрованные копии вне Docker volumes и регулярно проверяйте restore на отдельном
-стенде. Backup содержит пользовательские данные.
+стенде. Backup содержит пользовательские данные. При включённом Web API передавайте третий путь:
+скрипт кратко остановит единственный writer и создаст согласованную пару БД + media archive.
 
 ### SQLite
 
@@ -204,21 +259,21 @@ HTTP endpoints доступны при включённом API. `/health` пр�
 
 ```bash
 COMPOSE_FILE=compose.production.sqlite.yaml \
-  ./scripts/backup.sh sqlite /srv/backups/support-$(date +%F-%H%M).db
+  ./scripts/backup.sh sqlite /srv/backups/support.db /srv/backups/support-media.tar.gz
 CONFIRM_RESTORE=yes COMPOSE_FILE=compose.production.sqlite.yaml \
-  ./scripts/restore.sh sqlite /srv/backups/support-backup.db
+  ./scripts/restore.sh sqlite /srv/backups/support.db /srv/backups/support-media.tar.gz
 ```
 
-Backup не останавливает приложение. Restore проверяет `PRAGMA integrity_check`, останавливает
-приложение и атомарно заменяет БД; после ошибки приложение остаётся остановленным.
+Двухаргументный DB-only backup сохраняет прежнее online-поведение. Трёхаргументный backup
+останавливает приложение на время согласованного снимка. Restore заранее проверяет оба архива.
 
 ### PostgreSQL
 
 ```bash
 PRODUCTION_DEPLOYMENT=yes DEPLOY_DIR=/opt/suppsystem \
-  sh scripts/backup.sh postgres /srv/backups/support-$(date +%F-%H%M).dump
+  sh scripts/backup.sh postgres /srv/backups/support.dump /srv/backups/support-media.tar.gz
 CONFIRM_RESTORE=yes PRODUCTION_DEPLOYMENT=yes DEPLOY_DIR=/opt/suppsystem \
-  sh scripts/restore.sh postgres /srv/backups/support-backup.dump
+  sh scripts/restore.sh postgres /srv/backups/support.dump /srv/backups/support-media.tar.gz
 ```
 
 Archive проверяется до остановки. Restore работает через migration role, повторно применяет
@@ -226,6 +281,13 @@ Archive проверяется до остановки. Restore работает
 
 Перед обновлением всегда создавайте backup. Не запускайте старый image поверх новой схемы без
 явно поддерживаемого downgrade.
+
+Проверка orphan/temp Web-файлов безопасна по умолчанию; удаление требует явного флага:
+
+```bash
+docker compose exec suppsystem python -m suppsystem.media_cleanup
+docker compose exec suppsystem python -m suppsystem.media_cleanup --apply
+```
 
 `scripts/drill_production_data_path.sh` проверяет deploy, rollback, backup и restore только на
 изолированном стенде. Его отчёты и дампы могут содержать чувствительные данные.

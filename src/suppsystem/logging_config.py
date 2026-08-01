@@ -72,6 +72,10 @@ LOG_EXTRA_FIELDS = (
     "http_path",
     "http_status",
     "duration_ms",
+    "email",
+    "message_content",
+    "identity_provider",
+    "identity_value",
 )
 
 

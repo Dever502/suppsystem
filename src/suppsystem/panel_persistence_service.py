@@ -16,6 +16,9 @@ from suppsystem.models import (
     NotificationOutbox,
     NotificationStatus,
     OperatorAction,
+    SupportBlock,
+    Ticket,
+    TicketChannel,
     TicketMessage,
     utcnow,
 )
@@ -32,7 +35,7 @@ from suppsystem.panel_types import (
     lookup_status_from_error,
     subscription_info,
 )
-from suppsystem.remnawave import RemnawaveError, RemnawaveUser
+from suppsystem.remnawave import RemnawaveError, RemnawaveNotFoundError, RemnawaveUser
 from suppsystem.service_types import TicketView
 from suppsystem.trace import get_trace_id
 
@@ -62,16 +65,77 @@ class PanelPersistenceService:
         return self.database
 
     async def get_subscription_for_ticket(self, ticket: TicketView) -> PanelSubscriptionLookup:
-        identity_provider = "telegram"
-        identity_value = str(ticket.telegram_user_id)
+        if ticket.remnawave_user_uuid is not None:
+            identity_provider = "uuid"
+            identity_value = ticket.remnawave_user_uuid
+            try:
+                user = await self.remnawave.get_user_by_uuid(ticket.remnawave_user_uuid)
+            except RemnawaveNotFoundError:
+                if ticket.channel is not TicketChannel.WEB or not ticket.email:
+                    return PanelSubscriptionLookup(
+                        status="not_found",
+                        identity_provider=identity_provider,
+                        identity_value=identity_value,
+                    )
+                if self.database is not None:
+                    async with self.database.session() as session:
+                        stored_ticket = await session.get(Ticket, ticket.id)
+                        if (
+                            stored_ticket is not None
+                            and stored_ticket.remnawave_user_uuid == ticket.remnawave_user_uuid
+                        ):
+                            stored_ticket.remnawave_user_uuid = None
+                            await session.commit()
+                identity_provider = "email"
+                identity_value = ticket.email
+                lookup = self.remnawave.get_user_by_email(identity_value)
+            except RemnawaveError as error:
+                return PanelSubscriptionLookup(
+                    status=lookup_status_from_error(error),
+                    identity_provider=identity_provider,
+                    identity_value=identity_value,
+                )
+            else:
+                return PanelSubscriptionLookup(
+                    status="found",
+                    identity_provider=identity_provider,
+                    identity_value=identity_value,
+                    subscription=subscription_info(user),
+                )
+        elif ticket.channel is TicketChannel.WEB:
+            identity_provider = "email"
+            identity_value = ticket.email or ""
+            if not identity_value:
+                return PanelSubscriptionLookup(
+                    status="validation_error",
+                    identity_provider=identity_provider,
+                    identity_value=identity_value,
+                )
+            lookup = self.remnawave.get_user_by_email(identity_value)
+        else:
+            identity_provider = "telegram"
+            if ticket.telegram_user_id is None:
+                raise RuntimeError("Telegram ticket has no Telegram identity")
+            identity_value = str(ticket.telegram_user_id)
+            lookup = self.remnawave.get_user_by_telegram_id(ticket.telegram_user_id)
         try:
-            user = await self.remnawave.get_user_by_telegram_id(ticket.telegram_user_id)
+            user = await lookup
         except RemnawaveError as error:
             return PanelSubscriptionLookup(
                 status=lookup_status_from_error(error),
                 identity_provider=identity_provider,
                 identity_value=identity_value,
             )
+        if (
+            ticket.channel is TicketChannel.WEB
+            and identity_provider == "email"
+            and self.database is not None
+        ):
+            async with self.database.session() as session:
+                stored_ticket = await session.get(Ticket, ticket.id)
+                if stored_ticket is not None and stored_ticket.remnawave_user_uuid is None:
+                    stored_ticket.remnawave_user_uuid = user.uuid
+                    await session.commit()
         return PanelSubscriptionLookup(
             status="found",
             identity_provider=identity_provider,
@@ -117,6 +181,12 @@ class PanelPersistenceService:
             try:
                 await session.flush()
                 if action == "revoke_subscription_link":
+                    identity_provider = payload.get("identity_provider")
+                    identity_value = payload.get("identity_value")
+                    if not isinstance(identity_provider, str) or not isinstance(
+                        identity_value, str
+                    ):
+                        raise RuntimeError("Remnawave action identity is missing")
                     session.add(
                         NotificationOutbox(
                             ticket_id=ticket.id,
@@ -124,8 +194,8 @@ class PanelPersistenceService:
                             idempotency_key=f"{idempotency_key}:user-notification",
                             event_type="subscription_link_reissued",
                             destination="subscription_owner",
-                            recipient_identity_provider="telegram",
-                            recipient_identity_value=str(ticket.telegram_user_id),
+                            recipient_identity_provider=identity_provider,
+                            recipient_identity_value=identity_value,
                             payload={},
                             status=NotificationStatus.AWAITING_PAYLOAD,
                         )
@@ -139,6 +209,42 @@ class PanelPersistenceService:
                     return "needs_reconcile"
                 raise
             return "reserved"
+
+    async def _refresh_reserved_identity(
+        self,
+        idempotency_key: str,
+        *,
+        identity_provider: str,
+        identity_value: str,
+        remnawave_uuid: str | None,
+    ) -> bool:
+        database = self._require_database()
+        async with database.session() as session:
+            action = await session.scalar(
+                select(OperatorAction)
+                .where(OperatorAction.idempotency_key == idempotency_key)
+                .with_for_update()
+            )
+            if action is None or action.result != "started":
+                return False
+            action.payload = {
+                **action.payload,
+                "identity_provider": identity_provider,
+                "identity_value": identity_value,
+                **({"remnawave_uuid": remnawave_uuid} if remnawave_uuid is not None else {}),
+            }
+            if action.action == "remnawave_revoke_subscription_link":
+                intent = await session.scalar(
+                    select(NotificationOutbox).where(
+                        NotificationOutbox.operator_action_id == action.id
+                    )
+                )
+                if intent is None:
+                    return False
+                intent.recipient_identity_provider = identity_provider
+                intent.recipient_identity_value = identity_value
+            await session.commit()
+            return True
 
     async def _prepare_revoke_intent(
         self,
@@ -171,7 +277,7 @@ class PanelPersistenceService:
         idempotency_key: str,
         audit_payload: dict[str, Any],
         subscription: PanelSubscriptionInfo,
-        recipient_telegram_id: int,
+        recipient_telegram_id: int | None,
     ) -> PanelActionStatus:
         database = self._require_database()
         async with database.session() as session:
@@ -198,7 +304,7 @@ class PanelPersistenceService:
                 await session.commit()
                 return "unknown"
 
-            if self.revoke_link_telegram_notification and action.ticket_id is None:
+            if action.ticket_id is None:
                 action.result = "unknown"
                 action.payload = {
                     **action.payload,
@@ -212,8 +318,22 @@ class PanelPersistenceService:
             self._fill_revoke_notification(intent, subscription)
             action.result = "completed"
             action.payload = {**action.payload, **audit_payload}
-            if self.revoke_link_telegram_notification:
-                assert action.ticket_id is not None
+            ticket = await session.get(Ticket, action.ticket_id)
+            if ticket is None:
+                action.result = "unknown"
+                action.payload = {
+                    **action.payload,
+                    **audit_payload,
+                    "requires_reconcile": True,
+                    "recovery_reason": "revoke_notification_ticket_missing",
+                }
+                await session.commit()
+                return "unknown"
+            blocked = await session.get(SupportBlock, ticket.id) is not None
+            if not blocked and (
+                TicketChannel(ticket.channel) is TicketChannel.WEB
+                or self.revoke_link_telegram_notification
+            ):
                 self._queue_revoke_link_telegram_notification(
                     session,
                     ticket_id=action.ticket_id,
@@ -243,8 +363,13 @@ class PanelPersistenceService:
                 return "unknown"
             if action.result == "completed":
                 return "completed"
+            identity_provider = action.payload.get("identity_provider")
             identity_value = action.payload.get("identity_value")
-            if action.ticket_id is None or not isinstance(identity_value, str):
+            if (
+                action.ticket_id is None
+                or not isinstance(identity_provider, str)
+                or not isinstance(identity_value, str)
+            ):
                 action.result = "unknown"
                 action.payload = {
                     **action.payload,
@@ -254,28 +379,42 @@ class PanelPersistenceService:
                 }
                 await session.commit()
                 return "unknown"
-            try:
-                recipient_telegram_id = int(identity_value)
-            except ValueError:
+            ticket = await session.get(Ticket, action.ticket_id)
+            if ticket is None:
                 action.result = "unknown"
                 action.payload = {
                     **action.payload,
                     **audit_payload,
                     "requires_reconcile": True,
-                    "recovery_reason": "gift_notification_recipient_invalid",
+                    "recovery_reason": "gift_notification_ticket_missing",
                 }
                 await session.commit()
                 return "unknown"
+            recipient_telegram_id: int | None = None
+            if TicketChannel(ticket.channel) is TicketChannel.TELEGRAM:
+                try:
+                    recipient_telegram_id = int(identity_value)
+                except ValueError:
+                    action.result = "unknown"
+                    action.payload = {
+                        **action.payload,
+                        **audit_payload,
+                        "requires_reconcile": True,
+                        "recovery_reason": "gift_notification_recipient_invalid",
+                    }
+                    await session.commit()
+                    return "unknown"
             action.result = "completed"
             action.payload = {**action.payload, **audit_payload}
-            self._queue_gift_notification(
-                session,
-                ticket_id=action.ticket_id,
-                operator_action_id=action.id,
-                recipient_telegram_id=recipient_telegram_id,
-                extend_days=extend_days,
-                expire_at=expire_at,
-            )
+            if await session.get(SupportBlock, ticket.id) is None:
+                self._queue_gift_notification(
+                    session,
+                    ticket_id=action.ticket_id,
+                    operator_action_id=action.id,
+                    recipient_telegram_id=recipient_telegram_id,
+                    extend_days=extend_days,
+                    expire_at=expire_at,
+                )
             await session.commit()
             return "completed"
 
@@ -285,7 +424,7 @@ class PanelPersistenceService:
         *,
         ticket_id: str,
         operator_action_id: str,
-        recipient_telegram_id: int,
+        recipient_telegram_id: int | None,
         extend_days: int,
         expire_at: datetime,
     ) -> None:
@@ -298,19 +437,20 @@ class PanelPersistenceService:
                 content=text,
             )
         )
-        session.add(
-            DeliveryOutbox(
-                ticket_id=ticket_id,
-                direction=Direction.OPERATOR_TO_USER,
-                idempotency_key=f"panel-gift:{operator_action_id}:user-notification",
-                payload={
-                    "kind": "send_text",
-                    "target_chat_id": recipient_telegram_id,
-                    "text": text,
-                    "parse_mode": "HTML",
-                },
+        if recipient_telegram_id is not None:
+            session.add(
+                DeliveryOutbox(
+                    ticket_id=ticket_id,
+                    direction=Direction.OPERATOR_TO_USER,
+                    idempotency_key=f"panel-gift:{operator_action_id}:user-notification",
+                    payload={
+                        "kind": "send_text",
+                        "target_chat_id": recipient_telegram_id,
+                        "text": text,
+                        "parse_mode": "HTML",
+                    },
+                )
             )
-        )
 
     @staticmethod
     def _queue_revoke_link_telegram_notification(
@@ -318,7 +458,7 @@ class PanelPersistenceService:
         *,
         ticket_id: str,
         operator_action_id: str,
-        recipient_telegram_id: int,
+        recipient_telegram_id: int | None,
         subscription_url: str,
     ) -> None:
         text = revoke_link_notification_text(subscription_url)
@@ -330,19 +470,22 @@ class PanelPersistenceService:
                 content=text,
             )
         )
-        session.add(
-            DeliveryOutbox(
-                ticket_id=ticket_id,
-                direction=Direction.OPERATOR_TO_USER,
-                idempotency_key=(f"panel-revoke-link:{operator_action_id}:telegram-notification"),
-                payload={
-                    "kind": "send_text",
-                    "target_chat_id": recipient_telegram_id,
-                    "text": text,
-                    "parse_mode": "HTML",
-                },
+        if recipient_telegram_id is not None:
+            session.add(
+                DeliveryOutbox(
+                    ticket_id=ticket_id,
+                    direction=Direction.OPERATOR_TO_USER,
+                    idempotency_key=(
+                        f"panel-revoke-link:{operator_action_id}:telegram-notification"
+                    ),
+                    payload={
+                        "kind": "send_text",
+                        "target_chat_id": recipient_telegram_id,
+                        "text": text,
+                        "parse_mode": "HTML",
+                    },
+                )
             )
-        )
 
     @staticmethod
     def _fill_revoke_notification(

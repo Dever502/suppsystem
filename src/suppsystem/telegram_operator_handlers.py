@@ -7,6 +7,8 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Message
 
 from suppsystem.authorization import AuthorizationService
+from suppsystem.media_storage import LocalMediaStorage, MediaValidationError, StoredMedia
+from suppsystem.models import TicketChannel
 from suppsystem.service_types import (
     TicketNotFoundError,
     TopicAlreadyBoundError,
@@ -30,14 +32,16 @@ from suppsystem.telegram_message_utils import (
     command_key as build_command_key,
 )
 from suppsystem.telegram_panel_handler import TelegramPanelCommandHandler
+from suppsystem.telegram_statistics import TelegramStatisticsDashboard
 from suppsystem.telegram_user_handlers import TelegramUserHandlers
 
 logger = logging.getLogger(__name__)
 
 
-class TelegramOperatorHandlers(TelegramUserHandlers):
+class TelegramOperatorHandlers(TelegramStatisticsDashboard, TelegramUserHandlers):
     authorization: AuthorizationService
     panel_commands: TelegramPanelCommandHandler
+    media_storage: LocalMediaStorage
 
     async def _handle_topic_rename_service_message(self, message: Message) -> bool:
         topic_edit = getattr(message, "forum_topic_edited", None)
@@ -267,10 +271,9 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
             await message.reply(f"✅ Темы поставлены на синхронизацию: <b>{queued}</b>.")
             return
         if command == "/block":
-            changed = await self.ticket_service.block(
-                telegram_user_id=ticket.telegram_user_id,
-                operator_telegram_id=message.from_user.id,
+            changed = await self.ticket_service.block_ticket(
                 ticket_id=ticket.id,
+                operator_telegram_id=message.from_user.id,
                 idempotency_key=command_key,
             )
             await message.reply(
@@ -278,10 +281,9 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
             )
             return
         if command == "/unblock":
-            changed = await self.ticket_service.unblock(
-                telegram_user_id=ticket.telegram_user_id,
-                operator_telegram_id=message.from_user.id,
+            changed = await self.ticket_service.unblock_ticket(
                 ticket_id=ticket.id,
+                operator_telegram_id=message.from_user.id,
                 idempotency_key=command_key,
             )
             await message.reply(
@@ -292,14 +294,49 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
             await message.reply("❓ Неизвестная команда. Сообщение не отправлено клиенту.")
             return
 
-        result = await self.ticket_service.accept_operator_reply(
-            ticket_id=ticket.id,
-            operator_telegram_id=message.from_user.id,
-            source_chat_id=message.chat.id,
-            source_message_id=message.message_id,
-            content=message_text(message),
-            media=media_metadata(message),
-        )
+        stored_media: StoredMedia | None = None
+        operator_media = media_metadata(message)
+        if getattr(ticket, "channel", TicketChannel.TELEGRAM) is TicketChannel.WEB:
+            content_type = getattr(message.content_type, "value", str(message.content_type))
+            if content_type not in {"text", "photo"}:
+                await message.reply("⚠️ Для Web-клиента сейчас поддерживаются только текст и фото.")
+                return
+            if content_type == "photo":
+                photos = message.photo or []
+                if not photos:
+                    await message.reply("⚠️ Не удалось прочитать фотографию.")
+                    return
+                try:
+                    stored_media = await self.media_storage.save_telegram_photo(
+                        self.bot, file_id=photos[-1].file_id
+                    )
+                except MediaValidationError:
+                    await message.reply("⚠️ Фотография не прошла проверку.")
+                    return
+                except Exception:
+                    logger.exception(
+                        "Unable to persist operator photo for Web client",
+                        extra={"event": "web_operator_photo_store_failed", "ticket_id": ticket.id},
+                    )
+                    await message.reply("⚠️ Не удалось сохранить фотографию для Web-клиента.")
+                    return
+                operator_media = stored_media.message_metadata()
+        try:
+            result = await self.ticket_service.accept_operator_reply(
+                ticket_id=ticket.id,
+                operator_telegram_id=message.from_user.id,
+                source_chat_id=message.chat.id,
+                source_message_id=message.message_id,
+                content=message_text(message),
+                media=operator_media,
+                stored_media=stored_media,
+            )
+        except Exception:
+            if stored_media is not None:
+                self.media_storage.delete(stored_media)
+            raise
+        if stored_media is not None and not result.changed:
+            self.media_storage.delete(stored_media)
         if result.blocked:
             await message.reply("⛔ Пользователь заблокирован. Сообщение не отправлено.")
             return
@@ -346,7 +383,9 @@ class TelegramOperatorHandlers(TelegramUserHandlers):
         token: str | None = None
         try:
             target = await self.ticket_service.get_ticket(ticket_id)
-            async with self._ticket_locks.hold(target.telegram_user_id):
+            async with self._ticket_locks.hold(
+                getattr(target, "lock_key", str(target.telegram_user_id))
+            ):
                 # /bindtopic is an explicit administrator recovery decision. Cancel
                 # any uncertain automatic claim, then attach only under a fresh
                 # token so a late automatic result cannot overwrite this binding.

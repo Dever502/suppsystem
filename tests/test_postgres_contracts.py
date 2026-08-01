@@ -11,8 +11,10 @@ from pydantic import SecretStr
 from sqlalchemy import event, func, select
 
 from suppsystem.api import create_app
+from suppsystem.api_idempotency import api_idempotency_command
 from suppsystem.config import Settings
 from suppsystem.database import Database
+from suppsystem.media_storage import StoredMedia
 from suppsystem.migrations import upgrade_database
 from suppsystem.models import (
     DeliveryOutbox,
@@ -26,6 +28,7 @@ from suppsystem.models import (
 )
 from suppsystem.service_types import DeliveryJob, TicketView, TopicProvisioningConflictError
 from suppsystem.services import TicketService
+from suppsystem.web_models import MediaAsset
 
 pytestmark = pytest.mark.postgres
 
@@ -141,6 +144,57 @@ async def operator_message_effect_counts(
             )
         )
     return tuple(int(value or 0) for value in (messages, deliveries, send_actions, reopen_actions))
+
+
+async def test_postgres_web_photo_persists_message_before_media(
+    postgres_database_url: str,
+) -> None:
+    async with migrated_service(postgres_database_url) as (database, service):
+        media = StoredMedia(
+            id="d2a3f55e-a6de-4ff7-a55c-196a807325ab",
+            storage_path="web-media/assets/d2/test.png",
+            mime_type="image/png",
+            size_bytes=67,
+            sha256="a" * 64,
+            original_filename="test.png",
+        )
+        result = await service.accept_message(
+            identity_mode="external_id",
+            external_user_id="postgres-photo-user",
+            email="postgres-photo@example.com",
+            display_name="PostgreSQL photo",
+            remnawave_user_uuid=None,
+            content="Screenshot",
+            media=media,
+            target_chat_id=-100123,
+            command=api_idempotency_command(
+                operation="web_message",
+                resource="postgres-photo-user",
+                key="postgres-web-photo",
+                payload={
+                    "external_user_id": "postgres-photo-user",
+                    "email": "postgres-photo@example.com",
+                    "text": "Screenshot",
+                    "photo_sha256": media.sha256,
+                },
+            ),
+        )
+
+        async with database.session() as session:
+            message = await session.get(TicketMessage, result.message_id)
+            asset = await session.get(MediaAsset, media.id)
+            delivery = await session.scalar(
+                select(DeliveryOutbox).where(DeliveryOutbox.ticket_id == result.ticket.id)
+            )
+
+        assert result.changed is True
+        assert message is not None
+        assert message.media is not None
+        assert message.media["media_id"] == media.id
+        assert asset is not None
+        assert asset.message_id == result.message_id
+        assert delivery is not None
+        assert delivery.payload["kind"] == "send_photo"
 
 
 async def test_postgres_concurrent_close_has_one_winner(

@@ -306,6 +306,8 @@ class WebSupportService(TicketServiceBase):
                 )
                 session.add(message)
                 if media is not None:
+                    # Keep the PostgreSQL FK parent ahead of its media asset.
+                    await session.flush()
                     session.add(
                         MediaAsset(
                             id=media.id,

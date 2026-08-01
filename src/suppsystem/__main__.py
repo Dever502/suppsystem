@@ -34,6 +34,7 @@ from suppsystem.telegram_adapter import TelegramSupportAdapter
 from suppsystem.telegram_ingress import DurableTelegramIngressMiddleware, TelegramIngressWorker
 from suppsystem.telegram_lifecycle import create_polling_task
 from suppsystem.telegram_limits import TelegramInboundRateLimiter, TelegramRateLimiter
+from suppsystem.telegram_system_topics import TelegramSystemTopicService
 from suppsystem.trace import TraceMiddleware
 
 logger = logging.getLogger(__name__)
@@ -215,6 +216,12 @@ async def run() -> None:
         await database.dispose()
         raise
     limiter = TelegramRateLimiter(settings.telegram_min_request_interval_seconds)
+    system_topics = TelegramSystemTopicService(
+        bot=bot,
+        database=database,
+        support_group_id=settings.support_group_id,
+        limiter=limiter,
+    )
     dispatcher = Dispatcher()
     ingress_worker = TelegramIngressWorker(
         bot=bot, dispatcher=dispatcher, repository=durable_work, runtime_health=runtime_health
@@ -270,6 +277,8 @@ async def run() -> None:
         limiter=limiter,
         heartbeat_path=settings.data_dir / "delivery-worker-heartbeat",
         recover_missing_topic=adapter.recover_missing_topic,
+        resolve_system_topic=system_topics.ensure,
+        recover_system_topic=system_topics.recover,
         prepare_reopened_customer_topic=adapter.prepare_reopened_customer_topic,
         runtime_health=runtime_health,
     )

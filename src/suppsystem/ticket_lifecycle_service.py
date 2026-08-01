@@ -261,6 +261,7 @@ class TicketLifecycleService(TicketTopicService):
                     payload={
                         "kind": "send_text",
                         "target_chat_id": target_chat_id,
+                        "target_system_topic": "ratings",
                         "text": text,
                         **({"parse_mode": parse_mode} if parse_mode is not None else {}),
                     },

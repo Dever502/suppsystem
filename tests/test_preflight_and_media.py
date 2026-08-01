@@ -249,6 +249,7 @@ def test_operator_ticket_info_is_readable() -> None:
 def test_rating_messages_use_card_format() -> None:
     ticket = SimpleNamespace(
         id="ticket-1",
+        topic_id=777,
         display_name="Ivan <Petrov>",
         username="ivan",
         telegram_user_id=123456789,
@@ -267,12 +268,14 @@ def test_rating_messages_use_card_format() -> None:
         "мы снова откроем тикет.\n\n"
         "⭐ <b>Ваша оценка: ⭐⭐⭐⭐ 4/5</b>"
     )
-    assert rating_report(ticket, 4) == (  # type: ignore[arg-type]
+    assert rating_report(ticket, 4, support_group_id=-1003703559915) == (  # type: ignore[arg-type]
         "⭐ <b>Оценка поддержки</b>\n\n"
         "Оценка: ⭐⭐⭐⭐ <b>4/5</b>\n\n"
         "👤 <b>Клиент</b>\n\n"
         "<b>Ivan &lt;Petrov&gt; · @ivan</b>\n"
-        "Telegram ID: <code>123456789</code>"
+        "Telegram ID: <code>123456789</code>\n\n"
+        '📂 <a href="https://t.me/c/3703559915/777">'
+        "Перейти к тикету</a>"
     )
     keyboard = rating_keyboard("ticket-1", 3)
     assert keyboard.inline_keyboard[0][3].callback_data == "suppsystem_rating:ticket-1:3:4"
@@ -281,6 +284,7 @@ def test_rating_messages_use_card_format() -> None:
 async def test_rating_callback_replaces_prompt_with_selected_score() -> None:
     ticket = SimpleNamespace(
         id="ticket-1",
+        topic_id=777,
         display_name="Ivan",
         username="ivan",
         telegram_user_id=123456789,

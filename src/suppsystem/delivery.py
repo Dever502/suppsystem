@@ -47,6 +47,8 @@ class DeliveryWorker:
         limiter: TelegramRateLimiter,
         heartbeat_path: Path,
         recover_missing_topic: Callable[[str, int], Awaitable[int | None]],
+        resolve_system_topic: Callable[[str], Awaitable[int]] | None = None,
+        recover_system_topic: Callable[[str, int], Awaitable[int]] | None = None,
         prepare_reopened_customer_topic: Callable[[str], Awaitable[None]] | None = None,
         runtime_health: RuntimeHealth | None = None,
         stale_recovery_interval_seconds: float = 60.0,
@@ -64,6 +66,8 @@ class DeliveryWorker:
         self.limiter = limiter
         self.heartbeat_path = heartbeat_path
         self.recover_missing_topic = recover_missing_topic
+        self.resolve_system_topic = resolve_system_topic
+        self.recover_system_topic = recover_system_topic
         self.prepare_reopened_customer_topic = prepare_reopened_customer_topic
         self.runtime_health = runtime_health
         self.stale_recovery_interval_seconds = stale_recovery_interval_seconds
@@ -171,6 +175,7 @@ class DeliveryWorker:
             "source_chat_id": payload.get("source_chat_id"),
             "source_message_id": payload.get("source_message_id"),
             "topic_id": payload.get("target_thread_id"),
+            "system_topic": payload.get("target_system_topic"),
             "attempt_count": job.attempt_count,
         }
 
@@ -245,8 +250,15 @@ class DeliveryWorker:
     async def _deliver(self, job: DeliveryJob) -> None:
         payload = job.payload
         delivered_message_id: int | None = None
+        system_topic = payload.get("target_system_topic")
+        target_thread_id: int | None = None
         try:
-            target_thread_id = payload.get("target_thread_id")
+            if system_topic is not None:
+                if not isinstance(system_topic, str) or self.resolve_system_topic is None:
+                    raise TypeError("system topic delivery requires a valid resolver")
+                target_thread_id = await self.resolve_system_topic(system_topic)
+            elif payload.get("target_thread_id") is not None:
+                target_thread_id = _payload_int(payload, "target_thread_id")
             if await self._recipient_is_blocked(job, payload):
                 return
             if payload.get("prepare_reopened_context") is True:
@@ -277,11 +289,7 @@ class DeliveryWorker:
                     chat_id=_payload_int(payload, "target_chat_id"),
                     text=str(payload["text"]),
                     parse_mode="HTML" if payload.get("parse_mode") == "HTML" else None,
-                    message_thread_id=(
-                        _payload_int(payload, "target_thread_id")
-                        if target_thread_id is not None
-                        else None
-                    ),
+                    message_thread_id=target_thread_id,
                     reply_markup=reply_markup,
                 )
                 delivered_message_id = sent_message.message_id
@@ -300,11 +308,7 @@ class DeliveryWorker:
                     photo=FSInputFile(photo_path),
                     caption=str(payload["text"]) if payload.get("text") is not None else None,
                     parse_mode=None,
-                    message_thread_id=(
-                        _payload_int(payload, "target_thread_id")
-                        if target_thread_id is not None
-                        else None
-                    ),
+                    message_thread_id=target_thread_id,
                 )
                 delivered_message_id = sent_message.message_id
             else:
@@ -312,11 +316,7 @@ class DeliveryWorker:
                     chat_id=_payload_int(payload, "target_chat_id"),
                     from_chat_id=_payload_int(payload, "source_chat_id"),
                     message_id=_payload_int(payload, "source_message_id"),
-                    message_thread_id=(
-                        _payload_int(payload, "target_thread_id")
-                        if target_thread_id is not None
-                        else None
-                    ),
+                    message_thread_id=target_thread_id,
                 )
                 delivered_message_id = copied_message.message_id
         except TelegramRetryAfter as error:
@@ -349,7 +349,48 @@ class DeliveryWorker:
         except TelegramBadRequest as error:
             error_text = str(error)
             if is_missing_topic_error(error) and target_thread_id is not None:
-                old_topic_id = _payload_int(payload, "target_thread_id")
+                old_topic_id = target_thread_id
+                if isinstance(system_topic, str):
+                    try:
+                        if self.recover_system_topic is None:
+                            raise RuntimeError("system topic recovery is not configured")
+                        replacement_system_topic_id = await self.recover_system_topic(
+                            system_topic, old_topic_id
+                        )
+                        if not await self._retry_delivery(
+                            job,
+                            payload,
+                            "system topic recreated",
+                            0,
+                        ):
+                            return
+                        logger.warning(
+                            "Recreated missing system topic and requeued delivery",
+                            extra={
+                                "event": "missing_system_topic_recovered",
+                                **self._delivery_context(job, payload),
+                                "old_topic_id": old_topic_id,
+                                "new_topic_id": replacement_system_topic_id,
+                            },
+                        )
+                    except Exception as recovery_error:
+                        if not await self._retry_delivery(
+                            job,
+                            payload,
+                            f"system topic recovery failed: {recovery_error}"[:1000],
+                            5,
+                        ):
+                            return
+                        logger.exception(
+                            "Unable to recover missing system topic; delivery requeued",
+                            extra={
+                                "event": "missing_system_topic_recovery_failed",
+                                **self._delivery_context(job, payload),
+                                "old_topic_id": old_topic_id,
+                                "error_kind": type(recovery_error).__name__,
+                            },
+                        )
+                    return
                 try:
                     new_topic_id = await self.recover_missing_topic(job.ticket_id, old_topic_id)
                     if new_topic_id is None:

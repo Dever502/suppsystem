@@ -106,6 +106,20 @@ def customer_identity(ticket: TicketView) -> str:
     )
 
 
+def ticket_topic_url(support_group_id: int, topic_id: int | None) -> str | None:
+    if topic_id is None:
+        return None
+    group_id = str(support_group_id)
+    if not group_id.startswith("-100") or len(group_id) == 4:
+        raise ValueError("support_group_id must be a Telegram supergroup ID")
+    return f"https://t.me/c/{group_id[4:]}/{topic_id}"
+
+
+def ticket_topic_link(support_group_id: int, topic_id: int | None) -> str:
+    url = ticket_topic_url(support_group_id, topic_id)
+    return f'📂 <a href="{url}">Перейти к тикету</a>' if url is not None else ""
+
+
 def operator_ticket_info(ticket: TicketView) -> str:
     topic_id = ticket.topic_id if ticket.topic_id is not None else "—"
     if getattr(ticket, "channel", TicketChannel.TELEGRAM) is TicketChannel.WEB:

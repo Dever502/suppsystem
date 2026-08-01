@@ -395,6 +395,23 @@ async def test_web_close_rating_and_reopen_cycles(tmp_path: Path) -> None:
         ticket = await service.get_web_ticket(ticket_id)
         assert ticket.status is TicketStatus.CLOSED
         assert ticket.close_cycle == 2
+        async with database.session() as session:
+            deliveries = list(
+                (
+                    await session.scalars(
+                        select(DeliveryOutbox).where(DeliveryOutbox.ticket_id == ticket_id)
+                    )
+                ).all()
+            )
+        rating_payloads = [
+            delivery.payload
+            for delivery in deliveries
+            if delivery.payload.get("target_system_topic")
+        ]
+        assert [payload["target_system_topic"] for payload in rating_payloads] == [
+            "ratings",
+            "ratings",
+        ]
     finally:
         await client.aclose()
         await database.dispose()

@@ -4,7 +4,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from suppsystem.service_types import TicketView
 from suppsystem.telegram_constants import TICKET_CLOSED_SUMMARY_TEXT
-from suppsystem.telegram_formatting import customer_identity
+from suppsystem.telegram_formatting import customer_identity, ticket_topic_link
 
 RATING_CALLBACK_PREFIX = "suppsystem_rating"
 
@@ -78,13 +78,16 @@ def rating_keyboard(ticket_id: str, close_cycle: int) -> InlineKeyboardMarkup:
     )
 
 
-def rating_report(ticket: TicketView, score: int) -> str:
+def rating_report(ticket: TicketView, score: int, *, support_group_id: int) -> str:
+    ticket_link = ticket_topic_link(support_group_id, ticket.topic_id)
+    ticket_link_suffix = f"\n\n{ticket_link}" if ticket_link else ""
     return (
         "⭐ <b>Оценка поддержки</b>\n\n"
         f"Оценка: {'⭐' * score} <b>{score}/5</b>\n\n"
         "👤 <b>Клиент</b>\n\n"
         f"<b>{customer_identity(ticket)}</b>\n"
         f"Telegram ID: <code>{ticket.telegram_user_id}</code>"
+        f"{ticket_link_suffix}"
     )
 
 

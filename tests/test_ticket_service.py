@@ -753,7 +753,7 @@ async def test_close_notification_builder_uses_committed_close_cycle(
     }
 
 
-async def test_rating_enqueue_targets_general_support_group(
+async def test_rating_enqueue_targets_ratings_system_topic(
     ticket_service: TicketService,
 ) -> None:
     ticket = await ticket_service.open_or_reopen(
@@ -794,6 +794,7 @@ async def test_rating_enqueue_targets_general_support_group(
     assert jobs[0].payload == {
         "kind": "send_text",
         "target_chat_id": -100123,
+        "target_system_topic": "ratings",
         "text": "Оценка: ⭐ 5/5",
         "parse_mode": "HTML",
     }

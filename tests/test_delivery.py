@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.methods import CopyMessage
+from aiogram.methods import CopyMessage, SendMessage
 from pydantic import SecretStr
 
 from suppsystem.config import Settings
@@ -20,6 +20,14 @@ class MissingTopicBot:
     async def copy_message(self, **kwargs: object) -> None:
         raise TelegramBadRequest(
             method=CopyMessage(chat_id=1, from_chat_id=2, message_id=3),
+            message="message thread not found",
+        )
+
+
+class MissingSystemTopicBot:
+    async def send_message(self, **kwargs: object) -> None:
+        raise TelegramBadRequest(
+            method=SendMessage(chat_id=1, text="rating"),
             message="message thread not found",
         )
 
@@ -305,6 +313,87 @@ async def test_text_delivery_uses_only_explicit_html_parse_mode(tmp_path: Path) 
         )
 
     assert [call["parse_mode"] for call in bot.send_calls] == [None, "HTML"]
+
+
+async def test_system_topic_delivery_resolves_thread_before_sending(tmp_path: Path) -> None:
+    resolved: list[str] = []
+
+    async def resolve_system_topic(topic_kind: str) -> int:
+        resolved.append(topic_kind)
+        return 955
+
+    service = FakeTicketService()
+    bot = RecordingTextBot()
+    worker = delivery_worker(
+        tmp_path,
+        service=service,
+        bot=bot,
+        resolve_system_topic=resolve_system_topic,
+    )
+
+    await worker._deliver(
+        DeliveryJob(
+            id="rating-delivery",
+            ticket_id="ticket-1",
+            payload={
+                "kind": "send_text",
+                "target_chat_id": -100123,
+                "target_system_topic": "ratings",
+                "text": "⭐ Rating",
+                "parse_mode": "HTML",
+            },
+            attempt_count=1,
+            claim_token="claim-rating",
+        )
+    )
+
+    assert resolved == ["ratings"]
+    assert bot.send_calls[0]["message_thread_id"] == 955
+    assert service.delivered_calls == [("rating-delivery", "claim-rating", 789)]
+
+
+async def test_missing_system_topic_is_recreated_without_ticket_retarget(
+    tmp_path: Path,
+) -> None:
+    recovered: list[tuple[str, int]] = []
+
+    async def resolve_system_topic(topic_kind: str) -> int:
+        assert topic_kind == "ratings"
+        return 955
+
+    async def recover_system_topic(topic_kind: str, old_topic_id: int) -> int:
+        recovered.append((topic_kind, old_topic_id))
+        return 956
+
+    service = FakeTicketService()
+    worker = delivery_worker(
+        tmp_path,
+        service=service,
+        bot=MissingSystemTopicBot(),
+        resolve_system_topic=resolve_system_topic,
+        recover_system_topic=recover_system_topic,
+    )
+
+    await worker._deliver(
+        DeliveryJob(
+            id="rating-delivery",
+            ticket_id="ticket-1",
+            payload={
+                "kind": "send_text",
+                "target_chat_id": -100123,
+                "target_system_topic": "ratings",
+                "text": "⭐ Rating",
+            },
+            attempt_count=1,
+            claim_token="claim-rating",
+        )
+    )
+
+    assert recovered == [("ratings", 955)]
+    assert service.retarget_calls == []
+    assert service.retry_calls[0][0] == "rating-delivery"
+    assert service.retry_calls[0][1]["error"] == "system topic recreated"
+    assert service.retry_calls[0][1]["retry_after_seconds"] == 0
 
 
 async def test_web_photo_delivery_reads_only_from_managed_media_storage(

@@ -32,6 +32,7 @@ from suppsystem.models import (
     utcnow,
 )
 from suppsystem.service_types import TicketNotFoundError, TicketView
+from suppsystem.telegram_formatting import ticket_topic_link
 from suppsystem.ticket_service_base import TicketServiceBase
 from suppsystem.trace import get_trace_id
 from suppsystem.web_models import MediaAsset, SystemSetting, TicketLifecycleEvent
@@ -514,6 +515,8 @@ class WebSupportService(TicketServiceBase):
                             close_cycle=ticket.close_cycle,
                         )
                     )
+                    ticket_link = ticket_topic_link(target_chat_id, ticket.topic_id)
+                    ticket_link_suffix = f"\n\n{ticket_link}" if ticket_link else ""
                     session.add(
                         DeliveryOutbox(
                             ticket_id=ticket.id,
@@ -522,17 +525,15 @@ class WebSupportService(TicketServiceBase):
                             payload={
                                 "kind": "send_text",
                                 "target_chat_id": target_chat_id,
-                                "target_thread_id": ticket.topic_id,
+                                "target_system_topic": "ratings",
                                 "text": (
-                                    f"⭐ <b>Оценка поддержки</b>\n\nWeb-клиент: <b>{score}/5</b>"
+                                    f"⭐ <b>Оценка поддержки</b>\n\n"
+                                    f"Web-клиент: <b>{score}/5</b>"
+                                    f"{ticket_link_suffix}"
                                 ),
                                 "parse_mode": "HTML",
                             },
-                            status=(
-                                DeliveryStatus.PENDING
-                                if ticket.topic_id is not None
-                                else DeliveryStatus.WAITING_TOPIC
-                            ),
+                            status=DeliveryStatus.PENDING,
                         )
                     )
             session.add(

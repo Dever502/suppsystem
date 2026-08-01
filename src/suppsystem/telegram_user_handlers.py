@@ -61,7 +61,7 @@ class TelegramUserHandlers(TelegramTopicManager):
             score=score,
             close_cycle=close_cycle,
             target_chat_id=self.settings.support_group_id,
-            text=rating_report(ticket, score),
+            text=rating_report(ticket, score, support_group_id=self.settings.support_group_id),
             idempotency_key=(f"rating:{ticket.id}:{close_cycle}:{ticket.telegram_user_id}"),
             parse_mode="HTML",
         )

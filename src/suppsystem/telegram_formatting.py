@@ -62,12 +62,7 @@ def panel_action_reply(result: PanelActionResult) -> str:
     if result.status != "completed":
         return "⚠️ <b>Remnawave</b>\n\n" + panel_status_text(result.status)
     if result.action == "extend_subscription":
-        suffix = (
-            f"\nЗатронуто записей: <b>{result.affected_rows}</b>."
-            if result.affected_rows is not None
-            else ""
-        )
-        return "✅ <b>Подписка продлена</b>" + suffix
+        return "✅ <b>Подписка продлена</b>"
     if result.action == "reset_key":
         return "✅ Ключи подписки перевыпущены."
     if result.action == "revoke_subscription_link":

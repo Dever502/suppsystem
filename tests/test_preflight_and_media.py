@@ -604,7 +604,7 @@ def test_panel_action_reply_formats_mutation_results() -> None:
                 affected_rows=1,
             )
         )
-        == "✅ <b>Подписка продлена</b>\nЗатронуто записей: <b>1</b>."
+        == "✅ <b>Подписка продлена</b>"
     )
     assert (
         panel_action_reply(

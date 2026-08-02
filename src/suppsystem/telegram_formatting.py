@@ -231,7 +231,7 @@ def format_subscription_lookup(lookup: PanelSubscriptionLookup) -> str:
     if lookup.subscription is None:
         return (
             "💳 <b>Подписка Remnawave</b>\n\n"
-            f"Поиск: {identity}\n"
+            f"{identity}\n"
             f"Статус: {panel_status_text(lookup.status)}"
         )
     subscription = lookup.subscription

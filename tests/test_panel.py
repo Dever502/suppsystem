@@ -400,9 +400,7 @@ def test_subscription_lookup_uses_compact_telegram_search_label() -> None:
     )
 
     assert text == (
-        "💳 <b>Подписка Remnawave</b>\n\n"
-        "TG:<code>802720292</code>\n"
-        "Статус: пользователь не найден"
+        "💳 <b>Подписка Remnawave</b>\n\nTG:<code>802720292</code>\nСтатус: пользователь не найден"
     )
 
 

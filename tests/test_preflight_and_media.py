@@ -587,6 +587,11 @@ def test_message_command_uses_caption_for_media_commands() -> None:
     assert message_command(message) == "/tsop"  # type: ignore[arg-type]
 
 
+def test_message_command_handles_media_without_caption() -> None:
+    message = SimpleNamespace(text=None, caption=None)
+    assert message_command(message) == ""  # type: ignore[arg-type]
+
+
 def test_panel_action_reply_formats_mutation_results() -> None:
     assert (
         panel_action_reply(

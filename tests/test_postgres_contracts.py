@@ -197,6 +197,62 @@ async def test_postgres_web_photo_persists_message_before_media(
         assert delivery.payload["kind"] == "send_photo"
 
 
+async def test_postgres_operator_photo_persists_message_before_media(
+    postgres_database_url: str,
+) -> None:
+    async with migrated_service(postgres_database_url) as (database, service):
+        created = await service.accept_message(
+            identity_mode="external_id",
+            external_user_id="postgres-operator-photo-user",
+            email="postgres-operator-photo@example.com",
+            display_name="PostgreSQL operator photo",
+            remnawave_user_uuid=None,
+            content="Initial message",
+            media=None,
+            target_chat_id=-100123,
+            command=api_idempotency_command(
+                operation="web_message",
+                resource="postgres-operator-photo-user",
+                key="postgres-operator-photo-create",
+                payload={"text": "Initial message"},
+            ),
+        )
+        media = StoredMedia(
+            id="e3b4f66f-b7ef-4008-b66d-207b918436bc",
+            storage_path="web-media/assets/e3/operator.jpg",
+            mime_type="image/jpeg",
+            size_bytes=1024,
+            sha256="b" * 64,
+            original_filename=None,
+        )
+
+        result = await service.accept_operator_reply(
+            ticket_id=created.ticket.id,
+            operator_telegram_id=77,
+            source_chat_id=-100123,
+            source_message_id=91_001,
+            content=None,
+            media=media.message_metadata(),
+            stored_media=media,
+        )
+
+        async with database.session() as session:
+            message = await session.scalar(
+                select(TicketMessage).where(
+                    TicketMessage.ticket_id == created.ticket.id,
+                    TicketMessage.direction == Direction.OPERATOR_TO_USER,
+                )
+            )
+            asset = await session.get(MediaAsset, media.id)
+
+        assert result.changed is True
+        assert message is not None
+        assert message.media is not None
+        assert message.media["media_id"] == media.id
+        assert asset is not None
+        assert asset.message_id == message.id
+
+
 async def test_postgres_concurrent_close_has_one_winner(
     postgres_database_url: str,
 ) -> None:

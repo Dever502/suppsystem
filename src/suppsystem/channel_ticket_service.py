@@ -140,6 +140,7 @@ class ChannelAwareTicketService(WebSupportService):
                 )
             )
             if stored_media is not None:
+                await session.flush()
                 session.add(
                     MediaAsset(
                         id=stored_media.id,

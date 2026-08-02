@@ -11,7 +11,8 @@ RATING_CALLBACK_PREFIX = "suppsystem_rating"
 
 def message_command(message: Message) -> str:
     text = message.text or message.caption or ""
-    return text.split(maxsplit=1)[0].lower().split("@", maxsplit=1)[0]
+    parts = text.split(maxsplit=1)
+    return parts[0].lower().split("@", maxsplit=1)[0] if parts else ""
 
 
 def command_argument(message: Message) -> str:

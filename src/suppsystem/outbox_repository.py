@@ -30,13 +30,33 @@ class OutboxRepository:
     async def claim_due_notifications(self, limit: int = 20) -> list[NotificationJob]:
         now = utcnow()
         claim_token = str(uuid.uuid4())
-        claimable_ids = (
-            select(NotificationOutbox.id)
-            .where(
-                NotificationOutbox.status == NotificationStatus.PENDING,
-                NotificationOutbox.next_attempt_at <= now,
+        candidate = aliased(NotificationOutbox)
+        earlier = aliased(NotificationOutbox)
+        unfinished_statuses = (
+            NotificationStatus.PENDING,
+            NotificationStatus.PROCESSING,
+        )
+        has_earlier_unfinished = exists(
+            select(earlier.id).where(
+                earlier.ticket_id == candidate.ticket_id,
+                earlier.status.in_(unfinished_statuses),
+                or_(
+                    earlier.created_at < candidate.created_at,
+                    and_(
+                        earlier.created_at == candidate.created_at,
+                        earlier.id < candidate.id,
+                    ),
+                ),
             )
-            .order_by(NotificationOutbox.created_at)
+        )
+        claimable_ids = (
+            select(candidate.id)
+            .where(
+                candidate.status == NotificationStatus.PENDING,
+                candidate.next_attempt_at <= now,
+                ~has_earlier_unfinished,
+            )
+            .order_by(candidate.created_at, candidate.id)
             .limit(limit)
         )
         async with self.database.session() as session:

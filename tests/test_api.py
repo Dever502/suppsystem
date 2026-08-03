@@ -962,3 +962,36 @@ async def test_api_not_found_does_not_expose_internal_detail(
         "message": "Resource not found",
         "trace_id": response.headers["X-Trace-ID"],
     }
+
+
+async def test_metrics_cache_database_aggregates(
+    api_context: tuple[Any, Database, TicketService, TicketView],
+) -> None:
+    _app, database, ticket_service, ticket = api_context
+
+    class Clock:
+        value = 0.0
+
+        def __call__(self) -> float:
+            return self.value
+
+    clock = Clock()
+    metrics = MetricsRegistry(database_cache_ttl_seconds=30, monotonic=clock)
+    health = RuntimeHealth()
+    health.register("database")
+    health.ready("database")
+
+    before = await metrics.render(database, health)
+    assert 'suppsystem_queue_depth{queue="delivery"} 0' in before
+    await ticket_service.enqueue_text(
+        ticket_id=ticket.id,
+        direction=Direction.OPERATOR_TO_USER,
+        text="queued after scrape",
+        target_chat_id=ticket.telegram_user_id,
+        idempotency_key="metrics-cache-delivery",
+    )
+    cached = await metrics.render(database, health)
+    assert 'suppsystem_queue_depth{queue="delivery"} 0' in cached
+    clock.value = 31.0
+    refreshed = await metrics.render(database, health)
+    assert 'suppsystem_queue_depth{queue="delivery"} 1' in refreshed

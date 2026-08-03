@@ -6,10 +6,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import cast
 
-from sqlalchemy import and_, case, delete, or_, select, update
+from sqlalchemy import and_, case, delete, exists, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from suppsystem.database import Database
 from suppsystem.models import (
@@ -337,29 +338,47 @@ class DurableWorkRepository:
             reconciliation_outbox=cast(CursorResult[object], reconciliations).rowcount,
         )
 
-    async def claim_reconciliation(self) -> ReconciliationJob | None:
+    async def claim_reconciliations(self, limit: int) -> list[ReconciliationJob]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
         now = utcnow()
         token = str(uuid.uuid4())
-        candidate = (
-            select(ReconciliationOutbox.id)
-            .where(
-                ReconciliationOutbox.status == WorkStatus.PENDING,
-                ReconciliationOutbox.next_attempt_at <= now,
+        candidate = aliased(ReconciliationOutbox)
+        earlier = aliased(ReconciliationOutbox)
+        has_earlier_unfinished = exists(
+            select(earlier.id).where(
+                earlier.ticket_id == candidate.ticket_id,
+                earlier.status.in_((WorkStatus.PENDING, WorkStatus.PROCESSING)),
                 or_(
-                    ReconciliationOutbox.kind != "remnawave",
-                    ReconciliationOutbox.operator_action_id.in_(
-                        select(OperatorAction.id).where(OperatorAction.result != "started")
+                    earlier.created_at < candidate.created_at,
+                    and_(
+                        earlier.created_at == candidate.created_at,
+                        earlier.id < candidate.id,
                     ),
                 ),
             )
-            .order_by(ReconciliationOutbox.created_at, ReconciliationOutbox.id)
-            .limit(1)
+        ).correlate(candidate)
+        claimable_ids = (
+            select(candidate.id)
+            .where(
+                candidate.status == WorkStatus.PENDING,
+                candidate.next_attempt_at <= now,
+                or_(
+                    candidate.kind != "remnawave",
+                    candidate.operator_action_id.in_(
+                        select(OperatorAction.id).where(OperatorAction.result != "started")
+                    ),
+                ),
+                or_(candidate.ticket_id.is_(None), ~has_earlier_unfinished),
+            )
+            .order_by(candidate.created_at, candidate.id)
+            .limit(limit)
         )
         async with self.database.session() as session:
             result = await session.execute(
                 update(ReconciliationOutbox)
                 .where(
-                    ReconciliationOutbox.id.in_(candidate),
+                    ReconciliationOutbox.id.in_(claimable_ids),
                     ReconciliationOutbox.status == WorkStatus.PENDING,
                     ReconciliationOutbox.next_attempt_at <= now,
                 )
@@ -378,19 +397,24 @@ class DurableWorkRepository:
                     ReconciliationOutbox.attempt_count,
                 )
             )
-            row = result.first()
+            rows = result.all()
             await session.commit()
-            if row is None:
-                return None
-            return ReconciliationJob(
-                id=row.id,
-                kind=row.kind,
-                ticket_id=row.ticket_id,
-                operator_action_id=row.operator_action_id,
-                payload=row.payload,
-                attempt_count=row.attempt_count,
-                claim_token=token,
-            )
+            return [
+                ReconciliationJob(
+                    id=row.id,
+                    kind=row.kind,
+                    ticket_id=row.ticket_id,
+                    operator_action_id=row.operator_action_id,
+                    payload=row.payload,
+                    attempt_count=row.attempt_count,
+                    claim_token=token,
+                )
+                for row in rows
+            ]
+
+    async def claim_reconciliation(self) -> ReconciliationJob | None:
+        jobs = await self.claim_reconciliations(limit=1)
+        return jobs[0] if jobs else None
 
     async def finish_reconciliation(self, job: ReconciliationJob) -> bool:
         return await self._transition_reconciliation(

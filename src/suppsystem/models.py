@@ -227,6 +227,12 @@ class NotificationOutbox(Base):
     __table_args__ = (
         Index("ix_notification_outbox_claim", "status", "next_attempt_at", "created_at"),
         Index("ix_notification_outbox_stale", "status", "claimed_at"),
+        Index(
+            "ix_notification_outbox_ticket_status_created",
+            "ticket_id",
+            "status",
+            "created_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -287,6 +293,12 @@ class ReconciliationOutbox(Base):
     __table_args__ = (
         Index("ix_reconciliation_claim", "status", "next_attempt_at", "created_at"),
         Index("ix_reconciliation_stale", "status", "claimed_at"),
+        Index(
+            "ix_reconciliation_ticket_status_created",
+            "ticket_id",
+            "status",
+            "created_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))

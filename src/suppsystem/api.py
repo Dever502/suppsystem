@@ -265,13 +265,16 @@ def create_app(
                 f"http_{response.status_code // 100}xx",
                 time.monotonic() - started_at,
             )
-            record_event(
-                "api_request_completed",
-                http_method=request.method,
-                http_path=request.url.path,
-                http_status=response.status_code,
-                duration_ms=round((time.monotonic() - started_at) * 1000, 2),
-            )
+            if response.status_code >= 400 or not getattr(
+                request.state, "suppress_success_completion_log", False
+            ):
+                record_event(
+                    "api_request_completed",
+                    http_method=request.method,
+                    http_path=request.url.path,
+                    http_status=response.status_code,
+                    duration_ms=round((time.monotonic() - started_at) * 1000, 2),
+                )
             return response
         finally:
             trace_id_var.reset(trace_token)

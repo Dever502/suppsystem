@@ -29,6 +29,8 @@ EXPECTED_QUERY_INDEXES = {
     "ix_delivery_outbox_ticket_status_created",
     "ix_notification_outbox_claim",
     "ix_notification_outbox_stale",
+    "ix_notification_outbox_ticket_status_created",
+    "ix_reconciliation_ticket_status_created",
     "ix_operator_actions_ticket_action_result",
     "ix_operator_actions_result_created",
     "uq_operator_actions_unresolved_ticket",
@@ -107,7 +109,7 @@ async def test_explicit_upgrade_target_ignores_ambient_database_url(
 
     await upgrade_database(explicit_url)
 
-    assert await current_revision(explicit_url) == "0012_web_support"
+    assert await current_revision(explicit_url) == "0013_worker_concurrency_indexes"
     assert not ambient_path.exists()
 
 
@@ -124,12 +126,12 @@ async def test_explicit_downgrade_target_ignores_ambient_database_url(
     await downgrade_to_revision(explicit_url, "0009_ticket_last_activity")
 
     assert await current_revision(explicit_url) == "0009_ticket_last_activity"
-    assert await current_revision(ambient_url) == "0012_web_support"
+    assert await current_revision(ambient_url) == "0013_worker_concurrency_indexes"
 
     await upgrade_database(explicit_url)
 
-    assert await current_revision(explicit_url) == "0012_web_support"
-    assert await current_revision(ambient_url) == "0012_web_support"
+    assert await current_revision(explicit_url) == "0013_worker_concurrency_indexes"
+    assert await current_revision(ambient_url) == "0013_worker_concurrency_indexes"
 
 
 async def test_alembic_cli_still_uses_ambient_database_url(
@@ -142,7 +144,7 @@ async def test_alembic_cli_still_uses_ambient_database_url(
 
     await asyncio.to_thread(command.upgrade, config, "head")
 
-    assert await current_revision(ambient_url) == "0012_web_support"
+    assert await current_revision(ambient_url) == "0013_worker_concurrency_indexes"
 
 
 def test_alembic_config_accepts_percent_encoded_credentials() -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -201,7 +202,7 @@ async def test_stopping_worker_releases_only_unstarted_claims(tmp_path: Path) ->
     assert service.delivered_calls == []
 
 
-async def test_worker_finishes_current_claim_then_releases_remaining_claims(
+async def test_worker_finishes_concurrent_claims_after_stop(
     tmp_path: Path,
 ) -> None:
     service = FakeTicketService()
@@ -226,8 +227,46 @@ async def test_worker_finishes_current_claim_then_releases_remaining_claims(
 
     await worker._process_claimed_jobs([delivery_job(), second])
 
-    assert service.delivered_calls == [("delivery-1", "claim-1", 456)]
-    assert service.released_claims == [("delivery-2", "claim-2")]
+    assert service.delivered_calls == [
+        ("delivery-1", "claim-1", 456),
+        ("delivery-2", "claim-2", 456),
+    ]
+    assert service.released_claims == []
+
+
+async def test_worker_processes_independent_deliveries_concurrently(tmp_path: Path) -> None:
+    active = 0
+    max_active = 0
+    both_started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingBot(SuccessfulBot):
+        async def copy_message(self, **kwargs: object) -> SimpleNamespace:
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            if active == 2:
+                both_started.set()
+            await release.wait()
+            active -= 1
+            return SimpleNamespace(message_id=456)
+
+    service = FakeTicketService()
+    worker = delivery_worker(tmp_path, service=service, bot=BlockingBot(), concurrency=2)
+    second = DeliveryJob(
+        id="delivery-2",
+        ticket_id="ticket-2",
+        payload=delivery_job().payload,
+        attempt_count=1,
+        claim_token="claim-2",
+    )
+    processing = asyncio.create_task(worker._process_claimed_jobs([delivery_job(), second]))
+    try:
+        await asyncio.wait_for(both_started.wait(), timeout=1)
+        assert max_active == 2
+    finally:
+        release.set()
+        await processing
 
 
 async def test_blocked_recipient_cancels_outgoing_delivery(tmp_path: Path) -> None:
@@ -476,7 +515,8 @@ async def test_delivery_worker_recovers_stale_claims_periodically(tmp_path: Path
             self.release_calls.append(stale_after_seconds)
             return 0
 
-        async def claim_due_deliveries(self) -> list[DeliveryJob]:
+        async def claim_due_deliveries(self, limit: int = 20) -> list[DeliveryJob]:
+            assert limit == 8
             self.claim_calls += 1
             self.clock.advance(5.0)
             if self.claim_calls == 3:

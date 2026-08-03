@@ -92,7 +92,7 @@ def client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncCli
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
-async def test_worker_claims_one_notification_at_a_time_during_shutdown() -> None:
+async def test_worker_uses_bounded_notification_batch_during_shutdown() -> None:
     class ClaimLimitService(FakeTicketService):
         def __init__(self) -> None:
             super().__init__()
@@ -115,7 +115,40 @@ async def test_worker_claims_one_notification_at_a_time_during_shutdown() -> Non
 
     await worker.run()
 
-    assert service.limits == [1]
+    assert service.limits == [4]
+
+
+async def test_notification_claims_preserve_order_within_ticket(tmp_path: Path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/notification-order.db")
+    await database.create_schema_for_tests()
+    try:
+        ticket_service = TicketService(database)
+        ticket = await ticket_service.open_or_reopen(
+            telegram_user_id=123456789,
+            display_name="Webhook user",
+            username=None,
+        )
+        for index in (1, 2):
+            assert await ticket_service.enqueue_notification(
+                ticket_id=ticket.id,
+                event_type="subscription_link_reissued",
+                destination="subscription_owner",
+                recipient_identity_provider="telegram",
+                recipient_identity_value=str(ticket.telegram_user_id),
+                payload={"sequence": index},
+                idempotency_key=f"notification-order-{index}",
+            )
+        outbox = OutboxRepository(database)
+        first_batch = await outbox.claim_due_notifications(limit=4)
+        assert len(first_batch) == 1
+        assert await outbox.mark_notification_delivered(
+            first_batch[0].id, claim_token=first_batch[0].claim_token
+        )
+        second_batch = await outbox.claim_due_notifications(limit=4)
+        assert len(second_batch) == 1
+        assert second_batch[0].id != first_batch[0].id
+    finally:
+        await database.dispose()
 
 
 @pytest.mark.asyncio

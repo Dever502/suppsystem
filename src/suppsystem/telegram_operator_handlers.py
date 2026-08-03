@@ -333,10 +333,10 @@ class TelegramOperatorHandlers(TelegramStatisticsDashboard, TelegramUserHandlers
             )
         except Exception:
             if stored_media is not None:
-                self.media_storage.delete(stored_media)
+                await self.media_storage.delete(stored_media)
             raise
         if stored_media is not None and not result.changed:
-            self.media_storage.delete(stored_media)
+            await self.media_storage.delete(stored_media)
         if result.blocked:
             await message.reply("⛔ Пользователь заблокирован. Сообщение не отправлено.")
             return

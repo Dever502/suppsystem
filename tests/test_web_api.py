@@ -88,6 +88,8 @@ async def test_web_message_flow_is_channel_aware_and_idempotent(
             if getattr(record, "event", None) == "web_message_accepted"
         )
         assert accepted_record.conversation_created is True
+        assert not hasattr(accepted_record, "email")
+        assert not hasattr(accepted_record, "message_content")
         assert replay.json() == first.json()
         assert conflict.status_code == 409
         body = first.json()
@@ -721,4 +723,56 @@ async def test_web_identity_mode_is_persisted(tmp_path: Path, mode: str) -> None
             alternate_mode = "email" if mode == "external_id" else "external_id"
             await service.validate_web_identity_mode(alternate_mode)
     finally:
+        await database.dispose()
+
+
+async def test_successful_web_polling_is_not_written_to_audit_log(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    client, database, _service = await _context(tmp_path)
+    try:
+        created = await client.post(
+            "/api/v1/web/messages",
+            headers={
+                "X-API-Token": WEB_TOKEN,
+                "X-Idempotency-Key": "polling-log-create",
+            },
+            json={
+                "external_user_id": "polling-log-user",
+                "email": "polling-log@example.com",
+                "text": "Message",
+            },
+        )
+        ticket_id = created.json()["conversation_id"]
+        caplog.clear()
+        caplog.set_level(logging.INFO, logger="suppsystem.audit")
+
+        conversation = await client.get(
+            f"/api/v1/web/conversations/{ticket_id}",
+            headers={"X-API-Token": WEB_TOKEN},
+        )
+        messages = await client.get(
+            f"/api/v1/web/conversations/{ticket_id}/messages",
+            headers={"X-API-Token": WEB_TOKEN},
+        )
+        assert conversation.status_code == 200
+        assert messages.status_code == 200
+        assert not [
+            record
+            for record in caplog.records
+            if getattr(record, "event", None) == "api_request_completed"
+        ]
+
+        invalid = await client.get(
+            f"/api/v1/web/conversations/{ticket_id}/messages?after=invalid00",
+            headers={"X-API-Token": WEB_TOKEN},
+        )
+        assert invalid.status_code == 422
+        assert any(
+            getattr(record, "event", None) == "api_request_completed"
+            and getattr(record, "http_status", None) == 422
+            for record in caplog.records
+        )
+    finally:
+        await client.aclose()
         await database.dispose()

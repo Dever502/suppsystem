@@ -218,7 +218,7 @@ def register_web_routes(
             )
         except (ValueError, MediaValidationError) as error:
             if stored_media is not None:
-                media_storage.delete(stored_media)
+                await media_storage.delete(stored_media)
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=str(error),
@@ -228,13 +228,13 @@ def register_web_routes(
                 try:
                     await ticket_service.get_media(stored_media.id)
                 except Exception:
-                    media_storage.delete(stored_media)
+                    await media_storage.delete(stored_media)
             raise
         if stored_media is not None:
             try:
                 await ticket_service.get_media(stored_media.id)
             except Exception:
-                media_storage.delete(stored_media)
+                await media_storage.delete(stored_media)
         metrics.event("web_ingress", "replayed" if not result.changed else "accepted")
         return accepted_message_response(result)
 
@@ -243,7 +243,10 @@ def register_web_routes(
         response_model=WebConversationResponse,
         tags=["web-support"],
     )
-    async def get_web_conversation(ticket_id: TicketId) -> WebConversationResponse:
+    async def get_web_conversation(
+        ticket_id: TicketId, request: Request
+    ) -> WebConversationResponse:
+        request.state.suppress_success_completion_log = True
         return conversation_response(await ticket_service.get_web_ticket(ticket_id))
 
     @app.get(
@@ -253,9 +256,11 @@ def register_web_routes(
     )
     async def get_web_messages(
         ticket_id: TicketId,
+        request: Request,
         after: str | None = Query(default=None, min_length=8, max_length=512),
         limit: int = Query(default=50, ge=1, le=100),
     ) -> WebMessagesResponse:
+        request.state.suppress_success_completion_log = True
         try:
             page = await ticket_service.list_messages(ticket_id, after=after, limit=limit)
         except ValueError as error:
@@ -368,8 +373,8 @@ def register_web_routes(
     @app.get("/api/v1/web/media/{media_id}", tags=["web-support"])
     async def get_web_media(media_id: TicketId) -> FileResponse:
         media = await ticket_service.get_media(media_id)
-        path = media_storage.resolve(media.storage_path)
-        if not path.is_file():
+        path = await media_storage.resolve_file(media.storage_path)
+        if path is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media not found")
         metrics.event("web_media", "downloaded")
         return FileResponse(

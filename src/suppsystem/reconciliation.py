@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 
 from suppsystem.durable_work import DurableWorkRepository, ReconciliationJob
 from suppsystem.panel import PanelService
+from suppsystem.runtime_defaults import RECONCILIATION_CONCURRENCY
 from suppsystem.runtime_health import RuntimeHealth
 from suppsystem.runtime_supervision import wait_for_event
 
@@ -23,13 +24,17 @@ class ReconciliationWorker:
         runtime_health: RuntimeHealth | None = None,
         poll_interval_seconds: float = 0.5,
         stale_recovery_interval_seconds: float = 60.0,
+        concurrency: int = RECONCILIATION_CONCURRENCY,
     ) -> None:
+        if concurrency <= 0:
+            raise ValueError("concurrency must be positive")
         self.repository = repository
         self.reconcile_topic = reconcile_topic
         self.panel_service = panel_service
         self.runtime_health = runtime_health
         self.poll_interval_seconds = poll_interval_seconds
         self.stale_recovery_interval_seconds = stale_recovery_interval_seconds
+        self.concurrency = concurrency
         self._stopped = asyncio.Event()
         self._next_stale_recovery_at = 0.0
 
@@ -42,12 +47,12 @@ class ReconciliationWorker:
         while not self._stopped.is_set():
             try:
                 await self._release_stale_if_due()
-                job = await self.repository.claim_reconciliation()
+                jobs = await self.repository.claim_reconciliations(limit=self.concurrency)
                 self._progress()
-                if job is None:
+                if not jobs:
                     await self._wait()
                     continue
-                await self._process(job)
+                await self._process_claimed_jobs(jobs)
                 self._progress()
             except asyncio.CancelledError:
                 raise
@@ -59,6 +64,15 @@ class ReconciliationWorker:
                     extra={"event": "reconciliation_worker_failed"},
                 )
                 await self._wait(delay_seconds=5.0)
+
+    async def _process_claimed_jobs(self, jobs: list[ReconciliationJob]) -> None:
+        results = await asyncio.gather(
+            *(self._process(job) for job in jobs),
+            return_exceptions=True,
+        )
+        errors = [result for result in results if isinstance(result, Exception)]
+        if errors:
+            raise errors[0]
 
     async def _process(self, job: ReconciliationJob) -> None:
         try:

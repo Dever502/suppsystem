@@ -400,8 +400,6 @@ class WebSupportService(TicketServiceBase):
                     extra={
                         "event": "web_message_suppressed" if suppressed else "web_message_accepted",
                         "ticket_id": ticket.id,
-                        "email": normalized_email,
-                        "message_content": content,
                         "conversation_created": created,
                         "reopened": reopened,
                         "suppressed": suppressed,

@@ -190,7 +190,6 @@ class ChannelAwareTicketService(WebSupportService):
                 "event": "web_operator_reply_accepted",
                 "ticket_id": ticket_id,
                 "operator_telegram_id": operator_telegram_id,
-                "message_content": content,
             },
         )
         return TelegramOperatorReplyResult(True, False, reopened, committed)
@@ -382,7 +381,6 @@ class ChannelAwareTicketService(WebSupportService):
                     "event": "web_operator_api_message_accepted",
                     "ticket_id": ticket_id,
                     "operator_telegram_id": operator_telegram_id,
-                    "message_content": text,
                 },
             )
             return OperatorMessageResult(True, reopened, view)

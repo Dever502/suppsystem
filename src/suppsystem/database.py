@@ -15,6 +15,12 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from suppsystem.models import Base
+from suppsystem.runtime_defaults import (
+    POSTGRES_MAX_OVERFLOW,
+    POSTGRES_POOL_RECYCLE_SECONDS,
+    POSTGRES_POOL_SIZE,
+    POSTGRES_POOL_TIMEOUT_SECONDS,
+)
 
 
 class DatabaseOwner(Protocol):
@@ -48,8 +54,20 @@ def configure_sqlite_connection(
 
 class Database:
     def __init__(self, database_url: str) -> None:
-        self.is_sqlite = make_url(database_url).get_backend_name() == "sqlite"
-        self.engine: AsyncEngine = create_async_engine(database_url, pool_pre_ping=True)
+        backend_name = make_url(database_url).get_backend_name()
+        self.is_sqlite = backend_name == "sqlite"
+        engine_options: dict[str, Any] = {"pool_pre_ping": True}
+        if backend_name == "postgresql":
+            # Bound the pool below the PostgreSQL connection budget while allowing
+            # enough overlap for the API and the internal workers in one application instance.
+            engine_options.update(
+                pool_size=POSTGRES_POOL_SIZE,
+                max_overflow=POSTGRES_MAX_OVERFLOW,
+                pool_timeout=POSTGRES_POOL_TIMEOUT_SECONDS,
+                pool_recycle=POSTGRES_POOL_RECYCLE_SECONDS,
+                pool_use_lifo=True,
+            )
+        self.engine: AsyncEngine = create_async_engine(database_url, **engine_options)
         if self.is_sqlite:
             event.listen(self.engine.sync_engine, "connect", configure_sqlite_connection)
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)

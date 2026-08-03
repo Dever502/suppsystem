@@ -15,7 +15,11 @@ from suppsystem.audit import record_event
 from suppsystem.config import Settings
 from suppsystem.models import Direction
 from suppsystem.outbox_repository import OutboxRepository
-from suppsystem.runtime_defaults import DELIVERY_MAX_ATTEMPTS, DELIVERY_POLL_INTERVAL_SECONDS
+from suppsystem.runtime_defaults import (
+    DELIVERY_CONCURRENCY,
+    DELIVERY_MAX_ATTEMPTS,
+    DELIVERY_POLL_INTERVAL_SECONDS,
+)
 from suppsystem.runtime_health import RuntimeHealth
 from suppsystem.runtime_supervision import wait_for_event
 from suppsystem.service_types import DeliveryJob
@@ -54,12 +58,15 @@ class DeliveryWorker:
         runtime_health: RuntimeHealth | None = None,
         stale_recovery_interval_seconds: float = 60.0,
         stale_delivery_after_seconds: int = 300,
+        concurrency: int = DELIVERY_CONCURRENCY,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if stale_recovery_interval_seconds <= 0:
             raise ValueError("stale_recovery_interval_seconds must be positive")
         if stale_delivery_after_seconds <= 0:
             raise ValueError("stale_delivery_after_seconds must be positive")
+        if concurrency <= 0:
+            raise ValueError("concurrency must be positive")
         self.bot = bot
         self.ticket_service = ticket_service
         self.outbox = outbox
@@ -73,6 +80,7 @@ class DeliveryWorker:
         self.runtime_health = runtime_health
         self.stale_recovery_interval_seconds = stale_recovery_interval_seconds
         self.stale_delivery_after_seconds = stale_delivery_after_seconds
+        self.concurrency = concurrency
         self._monotonic = monotonic
         self._next_stale_recovery_at = 0.0
         self._stopped = asyncio.Event()
@@ -84,7 +92,7 @@ class DeliveryWorker:
             try:
                 await self._release_stale_deliveries_if_due()
                 self._record_progress()
-                jobs = await self.outbox.claim_due_deliveries()
+                jobs = await self.outbox.claim_due_deliveries(limit=self.concurrency)
                 self._record_progress()
                 if jobs:
                     logger.info(
@@ -130,19 +138,18 @@ class DeliveryWorker:
         self._stopped.set()
 
     async def _process_claimed_jobs(self, jobs: list[DeliveryJob]) -> None:
-        for index, job in enumerate(jobs):
-            if self._stopped.is_set():
-                await self._release_unstarted_jobs(jobs[index:])
-                return
-            self._record_progress()
-            try:
-                await self._deliver(job)
-            except asyncio.CancelledError:
-                # The current Telegram call can have an unknown outcome and must
-                # retain its claim for stale recovery. Later jobs have not started.
-                await self._release_unstarted_jobs(jobs[index + 1 :])
-                raise
-            self._record_progress()
+        if self._stopped.is_set():
+            await self._release_unstarted_jobs(jobs)
+            return
+        self._record_progress()
+        results = await asyncio.gather(
+            *(self._deliver(job) for job in jobs),
+            return_exceptions=True,
+        )
+        self._record_progress()
+        errors = [result for result in results if isinstance(result, Exception)]
+        if errors:
+            raise errors[0]
 
     async def _release_unstarted_jobs(self, jobs: list[DeliveryJob]) -> None:
         released = await self.outbox.release_delivery_claims(

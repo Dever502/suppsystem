@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
 from suppsystem.database import Database
+from suppsystem.runtime_defaults import POSTGRES_POOL_SIZE
 
 
 async def test_sqlite_connections_enable_safety_pragmas(tmp_path: Path) -> None:
@@ -60,3 +61,12 @@ async def test_sqlite_lock_retry_does_not_mask_other_database_errors(tmp_path: P
         await database.dispose()
 
     assert attempts == 1
+
+
+def test_postgres_engine_uses_bounded_runtime_pool() -> None:
+    database = Database("postgresql+asyncpg://user:password@localhost/suppsystem")
+    try:
+        assert database.engine.pool.size() == POSTGRES_POOL_SIZE
+    finally:
+        # Engine construction does not open a connection; avoid requiring an event loop here.
+        database.engine.sync_engine.dispose(close=False)

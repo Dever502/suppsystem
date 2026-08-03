@@ -798,6 +798,68 @@ async def test_reconciliation_is_not_claimed_while_mutation_is_in_flight(
 
 
 @pytest.mark.asyncio
+async def test_reconciliation_batch_preserves_order_within_each_ticket(
+    database: Database,
+) -> None:
+    now = utcnow()
+    async with database.session() as session:
+        session.add(User(id=2, display_name="Second user"))
+        session.add(
+            Ticket(
+                id="ticket-2",
+                user_id=2,
+                topic_id=778,
+                status=TicketStatus.OPEN,
+            )
+        )
+        await session.commit()
+        session.add_all(
+            [
+                ReconciliationOutbox(
+                    id="reconciliation-first",
+                    idempotency_key="reconciliation-first",
+                    kind="telegram_topic",
+                    ticket_id="ticket-1",
+                    payload={"sequence": 1},
+                    next_attempt_at=now,
+                    created_at=now,
+                ),
+                ReconciliationOutbox(
+                    id="reconciliation-second",
+                    idempotency_key="reconciliation-second",
+                    kind="telegram_topic",
+                    ticket_id="ticket-1",
+                    payload={"sequence": 2},
+                    next_attempt_at=now,
+                    created_at=now + timedelta(seconds=1),
+                ),
+                ReconciliationOutbox(
+                    id="reconciliation-independent",
+                    idempotency_key="reconciliation-independent",
+                    kind="telegram_topic",
+                    ticket_id="ticket-2",
+                    payload={"sequence": 1},
+                    next_attempt_at=now,
+                    created_at=now,
+                ),
+            ]
+        )
+        await session.commit()
+
+    repository = DurableWorkRepository(database)
+    first_batch = await repository.claim_reconciliations(limit=4)
+    assert {job.id for job in first_batch} == {
+        "reconciliation-first",
+        "reconciliation-independent",
+    }
+    first = next(job for job in first_batch if job.id == "reconciliation-first")
+    assert await repository.finish_reconciliation(first)
+
+    second_batch = await repository.claim_reconciliations(limit=4)
+    assert [job.id for job in second_batch] == ["reconciliation-second"]
+
+
+@pytest.mark.asyncio
 async def test_panel_queues_and_confirms_applied_gift_after_lost_response(
     database: Database,
 ) -> None:

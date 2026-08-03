@@ -90,7 +90,10 @@ waiting_topic ──> pending ──> processing ──> delivered
 Production PostgreSQL разделяет bootstrap, migration и runtime credentials. Provisioning создаёт
 least-privilege роли, `postgres-migrate` применяет Alembic, а приложение получает только
 `CONNECT`, `USAGE`, DML и необходимые права sequences. Поддержка нескольких экземпляров
-приложения отсутствует.
+приложения отсутствует. Внутри единственного процесса независимые тикеты обрабатываются ограниченно
+параллельно: доставка — до 8 заданий, webhook и reconciliation — до 4. Порядок заданий одного
+тикета защищён очередями БД; Telegram ingress остаётся последовательным. PostgreSQL engine использует
+ограниченный пул: 10 постоянных и до 10 временных соединений.
 
 ## Авторизация и HTTP API
 

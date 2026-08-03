@@ -16,6 +16,7 @@ from suppsystem.config import Settings
 from suppsystem.metrics import MetricsRegistry
 from suppsystem.outbox_repository import OutboxRepository
 from suppsystem.runtime_defaults import (
+    NOTIFICATION_WEBHOOK_CONCURRENCY,
     NOTIFICATION_WEBHOOK_MAX_ATTEMPTS,
     NOTIFICATION_WEBHOOK_POLL_INTERVAL_SECONDS,
     NOTIFICATION_WEBHOOK_TIMEOUT_SECONDS,
@@ -39,9 +40,12 @@ class NotificationWebhookWorker:
         metrics: MetricsRegistry | None = None,
         stale_recovery_interval_seconds: float = 60.0,
         stale_notification_after_seconds: int = 300,
+        concurrency: int = NOTIFICATION_WEBHOOK_CONCURRENCY,
     ) -> None:
         if settings.notification_webhook_url is None:
             raise ValueError("notification_webhook_url is required")
+        if concurrency <= 0:
+            raise ValueError("concurrency must be positive")
         if settings.notification_webhook_secret is None:
             raise ValueError("notification_webhook_secret is required")
         self.outbox = outbox
@@ -53,6 +57,7 @@ class NotificationWebhookWorker:
         self.metrics = metrics
         self.stale_recovery_interval_seconds = stale_recovery_interval_seconds
         self.stale_notification_after_seconds = stale_notification_after_seconds
+        self.concurrency = concurrency
         self._next_stale_recovery_at = 0.0
         self._stopped = asyncio.Event()
 
@@ -63,12 +68,12 @@ class NotificationWebhookWorker:
             try:
                 await self._release_stale_if_due()
                 self._record_progress()
-                jobs = await self.outbox.claim_due_notifications(limit=1)
+                jobs = await self.outbox.claim_due_notifications(limit=self.concurrency)
                 self._record_progress()
                 if not jobs:
                     await self._wait_for_poll_interval()
                     continue
-                await self._deliver(jobs[0])
+                await self._process_claimed_jobs(jobs)
                 self._record_progress()
             except asyncio.CancelledError:
                 raise
@@ -80,6 +85,15 @@ class NotificationWebhookWorker:
                     extra={"event": "notification_webhook_worker_failed"},
                 )
                 await self._wait_for_poll_interval(delay_seconds=5.0)
+
+    async def _process_claimed_jobs(self, jobs: list[NotificationJob]) -> None:
+        results = await asyncio.gather(
+            *(self._deliver(job) for job in jobs),
+            return_exceptions=True,
+        )
+        errors = [result for result in results if isinstance(result, Exception)]
+        if errors:
+            raise errors[0]
 
     def stop(self) -> None:
         self._stopped.set()

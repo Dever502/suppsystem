@@ -600,7 +600,6 @@ async def test_postgres_api_rejects_concurrent_same_key_different_payload(
             support_group_id=-100123,
             api_enabled=True,
             api_admin_token=SecretStr(API_TOKEN),
-            api_operator_telegram_id=101,
         )
         app = create_app(database=database, ticket_service=service, settings=settings)
         headers = {

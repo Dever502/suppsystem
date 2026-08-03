@@ -14,7 +14,8 @@ from aiogram.types import Message, TelegramObject, Update
 from suppsystem.durable_work import DurableWorkRepository
 from suppsystem.runtime_health import RuntimeHealth
 from suppsystem.runtime_supervision import wait_for_event
-from suppsystem.telegram_limits import TelegramInboundRateLimiter, TelegramRateLimiter
+from suppsystem.telegram_limits import TelegramRateLimiter
+from suppsystem.user_message_limits import UserMessageRateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ class DurableTelegramIngressMiddleware(BaseMiddleware):
         wake_worker: Callable[[], None],
         *,
         bot: Bot,
-        inbound_limiter: TelegramInboundRateLimiter,
+        inbound_limiter: UserMessageRateLimiter,
         outbound_limiter: TelegramRateLimiter,
     ) -> None:
         self.repository = repository
@@ -53,10 +54,10 @@ class DurableTelegramIngressMiddleware(BaseMiddleware):
             and message.chat.type == ChatType.PRIVATE
             and message.from_user is not None
         ):
-            decision = await self.inbound_limiter.consume(message.from_user.id)
+            decision = await self.inbound_limiter.consume(f"telegram:{message.from_user.id}")
             if not decision.allowed:
                 await self._reject_rate_limited_message(
-                    message, decision.retry_after_seconds, decision.notify_user
+                    message, decision.retry_after_seconds, decision.notify_client
                 )
                 return None
         payload = event.model_dump(mode="json", exclude_none=True)
@@ -89,10 +90,7 @@ class DurableTelegramIngressMiddleware(BaseMiddleware):
             await self.bot.send_message(
                 chat_id=message.chat.id,
                 text=(
-                    "⚠️ <b>Слишком много сообщений</b>\n\n"
-                    "Последнее сообщение не принято. Уже принятые сообщения сохранены. "
-                    f"Подождите примерно {delay} и повторите его. До окончания паузы "
-                    "новые сообщения также не будут приняты."
+                    f"Вы отправили слишком много сообщений. Следующее можно отправить через {delay}"
                 ),
             )
         except TelegramAPIError:

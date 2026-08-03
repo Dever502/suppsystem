@@ -12,11 +12,11 @@ services:
       - "${POSTGRES_PUBLISH_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-suppsystem}
-      POSTGRES_USER: ${POSTGRES_ADMIN_USER:-postgres}
+      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD must be set}
-      POSTGRES_MIGRATION_USER: ${POSTGRES_MIGRATION_USER:-suppsystem_migrator}
+      POSTGRES_MIGRATION_USER: suppsystem_migrator
       POSTGRES_MIGRATION_PASSWORD: ${POSTGRES_MIGRATION_PASSWORD:?POSTGRES_MIGRATION_PASSWORD must be set}
-      POSTGRES_RUNTIME_USER: ${POSTGRES_RUNTIME_USER:-suppsystem_runtime}
+      POSTGRES_RUNTIME_USER: suppsystem_runtime
       POSTGRES_RUNTIME_PASSWORD: ${POSTGRES_RUNTIME_PASSWORD:?POSTGRES_RUNTIME_PASSWORD must be set}
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -48,11 +48,11 @@ services:
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_DB: ${POSTGRES_DB:-suppsystem}
-      POSTGRES_ADMIN_USER: ${POSTGRES_ADMIN_USER:-postgres}
+      POSTGRES_ADMIN_USER: postgres
       POSTGRES_ADMIN_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD must be set}
-      POSTGRES_MIGRATION_USER: ${POSTGRES_MIGRATION_USER:-suppsystem_migrator}
+      POSTGRES_MIGRATION_USER: suppsystem_migrator
       POSTGRES_MIGRATION_PASSWORD: ${POSTGRES_MIGRATION_PASSWORD:?POSTGRES_MIGRATION_PASSWORD must be set}
-      POSTGRES_RUNTIME_USER: ${POSTGRES_RUNTIME_USER:-suppsystem_runtime}
+      POSTGRES_RUNTIME_USER: suppsystem_runtime
       POSTGRES_RUNTIME_PASSWORD: ${POSTGRES_RUNTIME_PASSWORD:?POSTGRES_RUNTIME_PASSWORD must be set}
 
   postgres-migrate:
@@ -70,7 +70,7 @@ services:
         condition: service_completed_successfully
     command: ["python", "-m", "suppsystem.migrations"]
     environment:
-      MIGRATION_DATABASE_URL: postgresql+asyncpg://${POSTGRES_MIGRATION_USER:-suppsystem_migrator}:${POSTGRES_MIGRATION_PASSWORD:?POSTGRES_MIGRATION_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-suppsystem}
+      MIGRATION_DATABASE_URL: postgresql+asyncpg://suppsystem_migrator:${POSTGRES_MIGRATION_PASSWORD:?POSTGRES_MIGRATION_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-suppsystem}
       POSTGRES_ADMIN_PASSWORD: ""
       POSTGRES_MIGRATION_PASSWORD: ""
       POSTGRES_RUNTIME_PASSWORD: ""
@@ -101,7 +101,7 @@ services:
       postgres-migrate:
         condition: service_completed_successfully
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_RUNTIME_USER:-suppsystem_runtime}:${POSTGRES_RUNTIME_PASSWORD:?POSTGRES_RUNTIME_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-suppsystem}
+      DATABASE_URL: postgresql+asyncpg://suppsystem_runtime:${POSTGRES_RUNTIME_PASSWORD:?POSTGRES_RUNTIME_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-suppsystem}
       MIGRATION_DATABASE_URL: ""
       MIGRATIONS_AT_STARTUP: "false"
       POSTGRES_ADMIN_PASSWORD: ""

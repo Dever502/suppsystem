@@ -141,7 +141,7 @@ def test_alerts_cover_recorded_remnawave_failure_outcomes() -> None:
     )
     rules = alerts["groups"][0]["rules"]
     external_failures = next(
-        rule for rule in rules if rule["alert"] == "SuppsystemExternalRequestFailures"
+        rule for rule in rules if rule["alert"] == "suppsystemExternalRequestFailures"
     )
 
     assert "http_5xx" in external_failures["expr"]

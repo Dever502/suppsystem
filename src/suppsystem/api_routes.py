@@ -16,10 +16,10 @@ from suppsystem.api_schemas import (
     TicketResponse,
     ticket_response,
 )
-from suppsystem.config import Settings
 from suppsystem.database import Database
 from suppsystem.metrics import MetricsRegistry
 from suppsystem.models import Direction, TicketMessage, TicketStatus
+from suppsystem.runtime_defaults import API_OPERATOR_TELEGRAM_ID
 from suppsystem.runtime_health import RuntimeHealth
 from suppsystem.services import TicketService
 
@@ -64,7 +64,6 @@ def register_routes(
     *,
     database: Database,
     ticket_service: TicketService,
-    settings: Settings,
     runtime_health: RuntimeHealth,
     metrics: MetricsRegistry,
 ) -> None:
@@ -98,7 +97,7 @@ def register_routes(
     async def swagger_ui() -> HTMLResponse:
         return get_swagger_ui_html(
             openapi_url="/openapi.json",
-            title="Suppsystem API - Docs",
+            title="suppsystem API - Docs",
         )
 
     @app.get("/openapi.json", include_in_schema=False)
@@ -151,7 +150,7 @@ def register_routes(
         )
         result = await ticket_service.send_operator_message(
             ticket_id=ticket_id,
-            operator_telegram_id=settings.api_operator_telegram_id,
+            operator_telegram_id=API_OPERATOR_TELEGRAM_ID,
             text=request.text,
             idempotency_key=command.storage_key,
             reopen_idempotency_key=(f"api:message-reopen:{ticket_id}:{x_idempotency_key}"),
@@ -179,7 +178,7 @@ def register_routes(
         ticket = await ticket_service.get_ticket(ticket_id)
         changed = await ticket_service.close(
             ticket_id=ticket_id,
-            operator_telegram_id=settings.api_operator_telegram_id,
+            operator_telegram_id=API_OPERATOR_TELEGRAM_ID,
             idempotency_key=command.storage_key,
             notification_text=API_TICKET_CLOSED_TEXT if notify_user else None,
             notification_target_chat_id=ticket.telegram_user_id if notify_user else None,
@@ -206,7 +205,7 @@ def register_routes(
         )
         changed = await ticket_service.reopen(
             ticket_id=ticket_id,
-            operator_telegram_id=settings.api_operator_telegram_id,
+            operator_telegram_id=API_OPERATOR_TELEGRAM_ID,
             idempotency_key=command.storage_key,
             api_idempotency=command,
         )

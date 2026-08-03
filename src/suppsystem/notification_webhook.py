@@ -15,6 +15,11 @@ import httpx
 from suppsystem.config import Settings
 from suppsystem.metrics import MetricsRegistry
 from suppsystem.outbox_repository import OutboxRepository
+from suppsystem.runtime_defaults import (
+    NOTIFICATION_WEBHOOK_MAX_ATTEMPTS,
+    NOTIFICATION_WEBHOOK_POLL_INTERVAL_SECONDS,
+    NOTIFICATION_WEBHOOK_TIMEOUT_SECONDS,
+)
 from suppsystem.runtime_health import RuntimeHealth
 from suppsystem.runtime_supervision import wait_for_event
 from suppsystem.service_types import NotificationJob
@@ -40,7 +45,6 @@ class NotificationWebhookWorker:
         if settings.notification_webhook_secret is None:
             raise ValueError("notification_webhook_secret is required")
         self.outbox = outbox
-        self.settings = settings
         self.url = settings.notification_webhook_url
         self.secret = settings.notification_webhook_secret.get_secret_value()
         self._client = client
@@ -112,7 +116,7 @@ class NotificationWebhookWorker:
                 self.url,
                 content=body,
                 headers=headers,
-                timeout=self.settings.notification_webhook_timeout_seconds,
+                timeout=NOTIFICATION_WEBHOOK_TIMEOUT_SECONDS,
             )
             outcome = f"http_{response.status_code // 100}xx"
         except httpx.HTTPError as error:
@@ -192,7 +196,7 @@ class NotificationWebhookWorker:
             claim_token=job.claim_token,
             error=error,
             retry_after_seconds=retry_after,
-            max_attempts=self.settings.notification_webhook_max_attempts,
+            max_attempts=NOTIFICATION_WEBHOOK_MAX_ATTEMPTS,
         )
         if not changed:
             return
@@ -207,7 +211,7 @@ class NotificationWebhookWorker:
                 "event_type": job.event_type,
                 "destination": job.destination,
                 "attempt_count": job.attempt_count,
-                "max_attempts": self.settings.notification_webhook_max_attempts,
+                "max_attempts": NOTIFICATION_WEBHOOK_MAX_ATTEMPTS,
                 "retry_after_seconds": retry_after,
                 "error_message": error[:300],
             },
@@ -242,9 +246,7 @@ class NotificationWebhookWorker:
     async def _wait_for_poll_interval(self, *, delay_seconds: float | None = None) -> None:
         await wait_for_event(
             self._stopped,
-            self.settings.notification_webhook_poll_interval_seconds
-            if delay_seconds is None
-            else delay_seconds,
+            NOTIFICATION_WEBHOOK_POLL_INTERVAL_SECONDS if delay_seconds is None else delay_seconds,
         )
 
 

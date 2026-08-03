@@ -22,7 +22,8 @@ from suppsystem.runtime_supervision import (
 )
 from suppsystem.telegram_ingress import DurableTelegramIngressMiddleware, TelegramIngressWorker
 from suppsystem.telegram_lifecycle import create_polling_task
-from suppsystem.telegram_limits import TelegramInboundRateLimiter, TelegramRateLimiter
+from suppsystem.telegram_limits import TelegramRateLimiter
+from suppsystem.user_message_limits import UserMessageRateLimiter
 
 
 def _settings() -> Settings:
@@ -238,7 +239,7 @@ async def test_durable_ingress_commits_without_running_handler_then_replays() ->
         repository,
         wake,  # type: ignore[arg-type]
         bot=AsyncMock(),
-        inbound_limiter=TelegramInboundRateLimiter(),
+        inbound_limiter=UserMessageRateLimiter(),
         outbound_limiter=TelegramRateLimiter(0.001),
     )
     update = Update.model_validate({"update_id": 501})

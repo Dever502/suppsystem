@@ -35,21 +35,20 @@ if [ -z "${TEST_POSTGRES_DATABASE_URL:-}" ]; then
     POSTGRES_TEST_PORT=${POSTGRES_TEST_PORT:-55432}
     POSTGRES_PORT=$POSTGRES_TEST_PORT
     POSTGRES_DB=suppsystem_test
-    POSTGRES_ADMIN_USER=suppsystem_test
     POSTGRES_VOLUME_NAME="${compose_project}_postgres_data"
     POSTGRES_ADMIN_PASSWORD=suppsystem-test-only-password
     POSTGRES_MIGRATION_PASSWORD=suppsystem-test-only-password
     POSTGRES_RUNTIME_PASSWORD=suppsystem-test-only-password
     APP_IMAGE=suppsystem-test-unused
     SUPPSYSTEM_ENV_FILE=.env.example
-    export POSTGRES_PORT POSTGRES_DB POSTGRES_ADMIN_USER POSTGRES_VOLUME_NAME
+    export POSTGRES_PORT POSTGRES_DB POSTGRES_VOLUME_NAME
     export POSTGRES_ADMIN_PASSWORD POSTGRES_MIGRATION_PASSWORD
     export POSTGRES_RUNTIME_PASSWORD APP_IMAGE SUPPSYSTEM_ENV_FILE
     export POSTGRES_TEST_PORT
     started_postgres=true
     docker compose --project-name "$compose_project" --file "$compose_file" \
         up --detach --wait --wait-timeout 60 postgres
-    TEST_POSTGRES_DATABASE_URL="postgresql+asyncpg://suppsystem_test:suppsystem-test-only-password@127.0.0.1:${POSTGRES_TEST_PORT}/suppsystem_test"
+    TEST_POSTGRES_DATABASE_URL="postgresql+asyncpg://postgres:suppsystem-test-only-password@127.0.0.1:${POSTGRES_TEST_PORT}/suppsystem_test"
     export TEST_POSTGRES_DATABASE_URL
 fi
 

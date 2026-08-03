@@ -18,6 +18,7 @@ from suppsystem.media_storage import (
 )
 from suppsystem.metrics import MetricsRegistry
 from suppsystem.services import TicketService
+from suppsystem.user_message_limits import UserMessageRateLimiter
 from suppsystem.web_api_schemas import (
     WebAcceptedMessageResponse,
     WebBlockRequest,
@@ -135,6 +136,7 @@ def register_web_routes(
     settings: Settings,
     media_storage: LocalMediaStorage,
     metrics: MetricsRegistry,
+    user_message_limiter: UserMessageRateLimiter,
 ) -> None:
     @app.post(
         "/api/v1/web/messages",
@@ -161,16 +163,35 @@ def register_web_routes(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="photo caption must not exceed 1024 characters",
             )
+        identity_resource = (
+            (message.external_user_id or "").strip()
+            if settings.web_identity_mode == "external_id"
+            else message.email.strip().casefold()
+        )
+        if not identity_resource:
+            if upload is not None:
+                await upload.close()
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="external_user_id is required",
+            )
+        rate_limit = await user_message_limiter.consume(
+            f"web:{settings.web_identity_mode}:{identity_resource}"
+        )
+        if not rate_limit.allowed:
+            if upload is not None:
+                await upload.close()
+            metrics.event("web_ingress", "rate_limited")
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many user messages",
+                headers={"Retry-After": str(rate_limit.retry_after_seconds)},
+            )
         stored_media: StoredMedia | None = None
         try:
             if upload is not None:
                 stored_media = await media_storage.save_upload(upload)
                 metrics.event("web_media", "uploaded")
-            identity_resource = (
-                message.external_user_id
-                if settings.web_identity_mode == "external_id"
-                else message.email.strip().casefold()
-            )
             command = api_idempotency_command(
                 operation="web_message",
                 resource=identity_resource or "missing",

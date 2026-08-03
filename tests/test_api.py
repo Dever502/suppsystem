@@ -6,12 +6,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import Request
 from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 from sqlalchemy import func, select, text
 
-from suppsystem.api import API_TICKET_CLOSED_TEXT, create_app
+from suppsystem.api import API_TICKET_CLOSED_TEXT, client_key_from_request, create_app
 from suppsystem.config import Settings
 from suppsystem.database import Database
 from suppsystem.metrics import MetricsRegistry
@@ -24,10 +25,12 @@ from suppsystem.models import (
     TicketStatus,
     WorkStatus,
 )
+from suppsystem.runtime_defaults import API_AUTH_FAILURE_LIMIT
 from suppsystem.runtime_health import RuntimeHealth
 from suppsystem.services import TicketService, TicketView
 
 API_TOKEN = "0123456789abcdef0123456789abcdef"
+WEB_RATE_TOKEN = "abcdef0123456789abcdef0123456789"
 
 
 @pytest.fixture
@@ -48,7 +51,6 @@ async def api_context(
         support_group_id=-100123,
         api_enabled=True,
         api_admin_token=SecretStr(API_TOKEN),
-        api_operator_telegram_id=999,
     )
     app = create_app(database=database, ticket_service=ticket_service, settings=settings)
     yield app, database, ticket_service, ticket
@@ -467,7 +469,6 @@ async def test_api_message_queues_topic_reconciliation_after_atomic_commit(
         support_group_id=-100123,
         api_enabled=True,
         api_admin_token=SecretStr(API_TOKEN),
-        api_operator_telegram_id=999,
     )
     app = create_app(database=database, ticket_service=ticket_service, settings=settings)
     async with _client(app) as client:
@@ -579,7 +580,6 @@ async def test_api_auth_dependency_is_noop_when_unsafe_auth_disabled(
         support_bot_token=SecretStr("test-token"),
         support_group_id=-100123,
         api_unsafe_disable_auth=True,
-        api_operator_telegram_id=999,
     )
     app = create_app(database=database, ticket_service=ticket_service, settings=settings)
     async with _client(app) as client:
@@ -845,9 +845,7 @@ async def test_api_rate_limit_returns_retry_after(
         support_group_id=-100123,
         api_enabled=True,
         api_admin_token=SecretStr(API_TOKEN),
-        api_operator_telegram_id=999,
-        api_rate_limit_requests=2,
-        api_rate_limit_window_seconds=60,
+        api_requests_per_minute=2,
     )
     app = create_app(database=database, ticket_service=ticket_service, settings=settings)
 
@@ -861,7 +859,7 @@ async def test_api_rate_limit_returns_retry_after(
     assert responses[-1].json()["error"]["code"] == "rate_limited"
 
 
-async def test_api_rate_limit_uses_forwarded_client_for_trusted_proxy(
+async def test_api_rate_limits_are_independent_per_configured_token(
     api_context: tuple[Any, Database, TicketService, TicketView],
 ) -> None:
     _app, database, ticket_service, _ticket = api_context
@@ -870,71 +868,44 @@ async def test_api_rate_limit_uses_forwarded_client_for_trusted_proxy(
         support_group_id=-100123,
         api_enabled=True,
         api_admin_token=SecretStr(API_TOKEN),
-        api_operator_telegram_id=999,
-        api_rate_limit_requests=2,
-        api_rate_limit_window_seconds=60,
-        api_trusted_proxy_ips={"10.0.0.10"},
+        web_api_enabled=True,
+        web_api_token=SecretStr(WEB_RATE_TOKEN),
+        api_requests_per_minute=2,
     )
     app = create_app(database=database, ticket_service=ticket_service, settings=settings)
-    transport = ASGITransport(app=app, client=("10.0.0.10", 12345))
 
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        first_client = [
-            await client.get(
-                "/health",
-                headers={
-                    "X-API-Token": API_TOKEN,
-                    "X-Forwarded-For": f"203.0.113.{index}, 198.51.100.1",
-                },
-            )
-            for index in range(1, 4)
+    async with _client(app) as client:
+        operator_responses = [
+            await client.get("/health", headers={"X-API-Token": API_TOKEN}) for _ in range(3)
         ]
-        second_client = await client.get(
-            "/health",
-            headers={
-                "X-API-Token": API_TOKEN,
-                "X-Forwarded-For": "198.51.100.2",
-            },
-        )
+        web_response = await client.get("/health", headers={"X-API-Token": WEB_RATE_TOKEN})
 
-    assert [response.status_code for response in first_client] == [200, 200, 429]
-    assert second_client.status_code == 200
+    assert [response.status_code for response in operator_responses] == [200, 200, 429]
+    assert web_response.status_code == 200
 
 
-async def test_api_trusted_proxy_walks_forwarded_chain_from_nearest_hop(
-    api_context: tuple[Any, Database, TicketService, TicketView],
-) -> None:
-    _app, database, ticket_service, _ticket = api_context
-    settings = Settings(
-        support_bot_token=SecretStr("test-token"),
-        support_group_id=-100123,
-        api_enabled=True,
-        api_admin_token=SecretStr(API_TOKEN),
-        api_rate_limit_requests=1,
-        api_rate_limit_window_seconds=60,
-        api_trusted_proxy_ips={"10.0.0.0/24"},
+def test_api_trusted_proxy_walks_forwarded_chain_from_nearest_hop() -> None:
+    request = Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/health",
+            "raw_path": b"/health",
+            "query_string": b"",
+            "headers": [
+                (
+                    b"x-forwarded-for",
+                    b"203.0.113.99, 198.51.100.7, 10.0.0.20",
+                )
+            ],
+            "client": ("10.0.0.10", 12345),
+            "server": ("test", 80),
+        }
     )
-    app = create_app(database=database, ticket_service=ticket_service, settings=settings)
-    transport = ASGITransport(app=app, client=("10.0.0.10", 12345))
 
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        first = await client.get(
-            "/health",
-            headers={
-                "X-API-Token": API_TOKEN,
-                "X-Forwarded-For": "203.0.113.99, 198.51.100.7, 10.0.0.20",
-            },
-        )
-        second = await client.get(
-            "/health",
-            headers={
-                "X-API-Token": API_TOKEN,
-                "X-Forwarded-For": "192.0.2.88, 198.51.100.7, 10.0.0.20",
-            },
-        )
-
-    assert first.status_code == 200
-    assert second.status_code == 429
+    assert client_key_from_request(request, frozenset({"10.0.0.0/24"})) == "198.51.100.7"
 
 
 def test_nginx_example_overwrites_untrusted_forwarded_chain() -> None:
@@ -957,19 +928,19 @@ async def test_api_auth_failures_are_rate_limited(
         support_group_id=-100123,
         api_enabled=True,
         api_admin_token=SecretStr(API_TOKEN),
-        api_operator_telegram_id=999,
-        api_rate_limit_requests=100,
-        api_auth_failure_limit=2,
-        api_auth_failure_window_seconds=60,
+        api_requests_per_minute=100,
     )
     app = create_app(database=database, ticket_service=ticket_service, settings=settings)
 
     async with _client(app) as client:
         responses = [
-            await client.get("/health", headers={"X-API-Token": "wrong-token"}) for _ in range(3)
+            await client.get("/health", headers={"X-API-Token": "wrong-token"})
+            for _ in range(API_AUTH_FAILURE_LIMIT + 1)
         ]
 
-    assert [response.status_code for response in responses] == [401, 401, 429]
+    assert [response.status_code for response in responses] == [401] * API_AUTH_FAILURE_LIMIT + [
+        429
+    ]
     assert responses[-1].json()["error"]["code"] == "rate_limited"
 
 

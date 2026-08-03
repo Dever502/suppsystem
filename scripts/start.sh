@@ -86,4 +86,4 @@ fi
 compose pull
 compose up --detach --wait
 compose ps
-echo "Suppsystem started with $mode using immutable image $APP_IMAGE"
+echo "suppsystem started with $mode using immutable image $APP_IMAGE"

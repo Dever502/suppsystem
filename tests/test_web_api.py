@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Literal
 
 import httpx
 import pytest
@@ -30,7 +31,13 @@ WEB_TOKEN = "web-token-with-at-least-thirty-two-characters"
 OPERATOR_TOKEN = "operator-token-with-at-least-thirty-two-chars"
 
 
-async def _context(tmp_path: Path) -> tuple[httpx.AsyncClient, Database, TicketService]:
+async def _context(
+    tmp_path: Path,
+    *,
+    user_messages_per_minute: int = 30,
+    user_messages_per_hour: int = 200,
+    web_identity_mode: Literal["external_id", "email"] = "external_id",
+) -> tuple[httpx.AsyncClient, Database, TicketService]:
     database_url = f"sqlite+aiosqlite:///{tmp_path}/web-api.db"
     await upgrade_database(database_url)
     database = Database(database_url)
@@ -43,6 +50,9 @@ async def _context(tmp_path: Path) -> tuple[httpx.AsyncClient, Database, TicketS
         web_api_enabled=True,
         web_api_token=SecretStr(WEB_TOKEN),
         data_dir=tmp_path,
+        user_messages_per_minute=user_messages_per_minute,
+        user_messages_per_hour=user_messages_per_hour,
+        web_identity_mode=web_identity_mode,
     )
     app = create_app(database=database, ticket_service=service, settings=settings)
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
@@ -124,6 +134,72 @@ async def test_web_message_flow_is_channel_aware_and_idempotent(
             )
         assert delivery_count == 1
         assert message_count == 2
+    finally:
+        await client.aclose()
+        await database.dispose()
+
+
+@pytest.mark.parametrize(
+    ("identity_mode", "first_identity", "same_identity", "other_identity"),
+    (
+        (
+            "external_id",
+            {"external_user_id": "limited-user", "email": "one@example.com"},
+            {"external_user_id": "limited-user", "email": "changed@example.com"},
+            {"external_user_id": "other-user", "email": "other@example.com"},
+        ),
+        (
+            "email",
+            {"email": "Limited@Example.com"},
+            {"email": "limited@example.com"},
+            {"email": "other@example.com"},
+        ),
+    ),
+)
+async def test_web_message_rate_limit_is_per_canonical_identity(
+    tmp_path: Path,
+    identity_mode: Literal["external_id", "email"],
+    first_identity: dict[str, str],
+    same_identity: dict[str, str],
+    other_identity: dict[str, str],
+) -> None:
+    client, database, _service = await _context(
+        tmp_path,
+        user_messages_per_minute=1,
+        user_messages_per_hour=2,
+        web_identity_mode=identity_mode,
+    )
+    try:
+        first = await client.post(
+            "/api/v1/web/messages",
+            headers={
+                "X-API-Token": WEB_TOKEN,
+                "X-Idempotency-Key": "rate-limit-first",
+            },
+            json={**first_identity, "text": "Первое сообщение"},
+        )
+        limited = await client.post(
+            "/api/v1/web/messages",
+            headers={
+                "X-API-Token": WEB_TOKEN,
+                "X-Idempotency-Key": "rate-limit-second",
+            },
+            json={**same_identity, "text": "Лишнее сообщение"},
+        )
+        independent = await client.post(
+            "/api/v1/web/messages",
+            headers={
+                "X-API-Token": WEB_TOKEN,
+                "X-Idempotency-Key": "rate-limit-other",
+            },
+            json={**other_identity, "text": "Сообщение другого пользователя"},
+        )
+
+        assert first.status_code == 200
+        assert limited.status_code == 429
+        assert limited.headers["Retry-After"] == "60"
+        assert limited.json()["error"]["code"] == "rate_limited"
+        assert independent.status_code == 200
     finally:
         await client.aclose()
         await database.dispose()

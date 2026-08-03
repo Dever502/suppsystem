@@ -132,7 +132,6 @@ def settings(data_dir: Path | None = None) -> Settings:
     return Settings(
         support_bot_token=SecretStr("test-token"),
         support_group_id=-100123,
-        delivery_max_attempts=8,
         data_dir=data_dir or Path("./data"),
     )
 

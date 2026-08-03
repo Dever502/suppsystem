@@ -1,6 +1,6 @@
-# Suppsystem
+# suppsystem
 
-Suppsystem — система технической поддержки с Telegram и server-to-server Web API. Обращения из
+suppsystem — система технической поддержки с Telegram и server-to-server Web API. Обращения из
 бота и с сайта попадают в отдельные темы закрытой Forum-группы, где работают операторы. Сообщения,
 фотографии, состояние тикетов и история действий сохраняются и переживают перезапуск.
 
@@ -26,7 +26,7 @@ Suppsystem — система технической поддержки с Teleg
 
 ```text
 Telegram-клиент ── Telegram bot ──┐
-                                  ├── Suppsystem + БД ── Forum-темы операторов
+                                  ├── suppsystem + БД ── Forum-темы операторов
 Backend сайта ───── Web API ──────┘
                                   │
                            Operator API (опционально)

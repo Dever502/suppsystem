@@ -31,7 +31,7 @@ RUN uv sync --frozen --no-dev --no-editable && \
 
 USER app
 
-LABEL org.opencontainers.image.title="Suppsystem" \
+LABEL org.opencontainers.image.title="suppsystem" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.source="https://github.com/Dever502/suppsystem" \
       org.opencontainers.image.version="2.1.0" \

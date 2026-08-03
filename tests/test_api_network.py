@@ -128,11 +128,9 @@ async def test_real_uvicorn_reverse_proxy_security_and_graceful_shutdown(
         support_group_id=-100123,
         api_enabled=True,
         api_admin_token=SecretStr(API_TOKEN),
-        api_operator_telegram_id=101,
         api_host="127.0.0.1",
         api_port=api_port,
-        api_rate_limit_requests=5,
-        api_rate_limit_window_seconds=60,
+        api_requests_per_minute=9,
         api_trusted_proxy_ips=frozenset({"127.0.0.1"}),
     )
     health = RuntimeHealth()

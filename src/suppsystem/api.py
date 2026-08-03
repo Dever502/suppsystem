@@ -22,10 +22,16 @@ from suppsystem.config import Settings
 from suppsystem.database import Database
 from suppsystem.media_storage import LocalMediaStorage
 from suppsystem.metrics import MetricsRegistry
+from suppsystem.runtime_defaults import (
+    API_AUTH_FAILURE_LIMIT,
+    API_AUTH_FAILURE_WINDOW_SECONDS,
+    API_RATE_LIMIT_WINDOW_SECONDS,
+)
 from suppsystem.runtime_health import RuntimeHealth
 from suppsystem.service_types import TicketNotFoundError
 from suppsystem.services import TicketService
 from suppsystem.trace import trace_id_var
+from suppsystem.user_message_limits import UserMessageRateLimiter
 from suppsystem.version import PROJECT_VERSION
 from suppsystem.web_api_routes import register_web_routes
 
@@ -85,6 +91,7 @@ def create_app(
     runtime_health: RuntimeHealth | None = None,
     metrics: MetricsRegistry | None = None,
     media_storage: LocalMediaStorage | None = None,
+    user_message_limiter: UserMessageRateLimiter | None = None,
 ) -> FastAPI:
     if runtime_health is None:
         runtime_health = RuntimeHealth()
@@ -95,14 +102,19 @@ def create_app(
         metrics = MetricsRegistry()
     if media_storage is None:
         media_storage = LocalMediaStorage(settings.data_dir)
+    if user_message_limiter is None:
+        user_message_limiter = UserMessageRateLimiter(
+            per_minute=settings.user_messages_per_minute,
+            per_hour=settings.user_messages_per_hour,
+        )
 
     request_limiter = InMemoryRateLimiter(
-        limit=settings.api_rate_limit_requests,
-        window_seconds=settings.api_rate_limit_window_seconds,
+        limit=settings.api_requests_per_minute,
+        window_seconds=API_RATE_LIMIT_WINDOW_SECONDS,
     )
     auth_failure_limiter = InMemoryRateLimiter(
-        limit=settings.api_auth_failure_limit,
-        window_seconds=settings.api_auth_failure_window_seconds,
+        limit=API_AUTH_FAILURE_LIMIT,
+        window_seconds=API_AUTH_FAILURE_WINDOW_SECONDS,
     )
     operator_contract = settings.api_enabled
 
@@ -113,14 +125,14 @@ def create_app(
         request: Request,
         x_api_token: str | None = Header(default=None, alias="X-API-Token"),
     ) -> None:
-        configured_tokens: tuple[str, ...]
+        configured_tokens: tuple[tuple[str, str], ...]
         is_web_path = request.url.path.startswith("/api/v1/web")
         is_operator_path = request.url.path.startswith("/api/v1/tickets")
         if is_web_path:
             if not settings.web_api_enabled:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
             configured_tokens = (
-                (settings.web_api_token.get_secret_value(),)
+                (("web", settings.web_api_token.get_secret_value()),)
                 if settings.web_api_token is not None
                 else ()
             )
@@ -130,7 +142,7 @@ def create_app(
             if not operator_contract:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
             configured_tokens = (
-                (settings.api_admin_token.get_secret_value(),)
+                (("operator", settings.api_admin_token.get_secret_value()),)
                 if settings.api_admin_token is not None
                 else ()
             )
@@ -138,10 +150,10 @@ def create_app(
             realm = "operator"
         else:
             configured_tokens = tuple(
-                token.get_secret_value()
-                for enabled, token in (
-                    (operator_contract, settings.api_admin_token),
-                    (settings.web_api_enabled, settings.web_api_token),
+                (token_realm, token.get_secret_value())
+                for token_realm, enabled, token in (
+                    ("operator", operator_contract, settings.api_admin_token),
+                    ("web", settings.web_api_enabled, settings.web_api_token),
                 )
                 if enabled and token is not None
             )
@@ -149,14 +161,22 @@ def create_app(
             realm = "common"
 
         if unsafe_auth:
+            allowed, retry_after = await request_limiter.consume("request:operator-unsafe")
+            if not allowed:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many requests",
+                    headers={"Retry-After": str(retry_after)},
+                )
             return
-        key = f"auth:{realm}:{client_key(request)}"
-        authenticated = x_api_token is not None and any(
-            secrets.compare_digest(x_api_token, configured_token)
-            for configured_token in configured_tokens
-        )
-        if not authenticated:
-            allowed, retry_after = await auth_failure_limiter.consume(key)
+        auth_key = f"auth:{realm}:{client_key(request)}"
+        matched_realms = [
+            token_realm
+            for token_realm, configured_token in configured_tokens
+            if x_api_token is not None and secrets.compare_digest(x_api_token, configured_token)
+        ]
+        if not matched_realms:
+            allowed, retry_after = await auth_failure_limiter.consume(auth_key)
             if not allowed:
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -164,10 +184,17 @@ def create_app(
                     headers={"Retry-After": str(retry_after)},
                 )
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
-        await auth_failure_limiter.reset(key)
+        await auth_failure_limiter.reset(auth_key)
+        allowed, retry_after = await request_limiter.consume(f"request:{matched_realms[0]}")
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many requests",
+                headers={"Retry-After": str(retry_after)},
+            )
 
     app = FastAPI(
-        title="Suppsystem API",
+        title="suppsystem API",
         version=PROJECT_VERSION,
         docs_url=None,
         redoc_url=None,
@@ -196,7 +223,7 @@ def create_app(
         )
 
     @app.middleware("http")
-    async def trace_audit_and_rate_limit(
+    async def trace_audit(
         request: Request,
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
@@ -204,36 +231,27 @@ def create_app(
         trace_token = trace_id_var.set(trace_id)
         started_at = time.monotonic()
         try:
-            allowed, retry_after = await request_limiter.consume(f"request:{client_key(request)}")
-            if not allowed:
-                response: Response = error_response(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    code="rate_limited",
-                    message="Too many requests",
-                    headers={"Retry-After": str(retry_after)},
+            try:
+                response = await call_next(request)
+            except Exception:
+                logger.exception(
+                    "Unhandled API request error",
+                    extra={
+                        "event": "api_request_unhandled_error",
+                        "http_method": request.method,
+                        "http_path": request.url.path,
+                    },
                 )
-            else:
-                try:
-                    response = await call_next(request)
-                except Exception:
-                    logger.exception(
-                        "Unhandled API request error",
-                        extra={
-                            "event": "api_request_unhandled_error",
-                            "http_method": request.method,
-                            "http_path": request.url.path,
-                        },
-                    )
-                    record_event(
-                        "api_request_unhandled_error",
-                        http_method=request.method,
-                        http_path=request.url.path,
-                    )
-                    response = error_response(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        code="internal_error",
-                        message="Internal server error",
-                    )
+                record_event(
+                    "api_request_unhandled_error",
+                    http_method=request.method,
+                    http_path=request.url.path,
+                )
+                response = error_response(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    code="internal_error",
+                    message="Internal server error",
+                )
             response.headers["X-Trace-ID"] = trace_id
             component = (
                 "web_api"
@@ -325,7 +343,6 @@ def create_app(
         app,
         database=database,
         ticket_service=ticket_service,
-        settings=settings,
         runtime_health=runtime_health,
         metrics=metrics,
     )
@@ -336,6 +353,7 @@ def create_app(
             settings=settings,
             media_storage=media_storage,
             metrics=metrics,
+            user_message_limiter=user_message_limiter,
         )
 
     def custom_openapi() -> dict[str, Any]:

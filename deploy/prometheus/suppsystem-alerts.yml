@@ -1,52 +1,52 @@
 groups:
   - name: suppsystem
     rules:
-      - alert: SuppsystemFailedDeliveryJobs
+      - alert: suppsystemFailedDeliveryJobs
         expr: suppsystem_failed_jobs{queue="delivery"} > 0
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: Suppsystem has failed Telegram delivery jobs
+          summary: suppsystem has failed Telegram delivery jobs
           description: "{{ $value }} delivery jobs are failed. Check suppsystem logs and the outbox runbook."
 
-      - alert: SuppsystemFailedNotificationJobs
+      - alert: suppsystemFailedNotificationJobs
         expr: suppsystem_failed_jobs{queue="notification"} > 0
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: Suppsystem has failed notification webhook jobs
+          summary: suppsystem has failed notification webhook jobs
           description: "{{ $value }} notification jobs are failed. Check webhook receiver health and retry policy."
 
-      - alert: SuppsystemOldDeliveryQueue
+      - alert: suppsystemOldDeliveryQueue
         expr: suppsystem_queue_oldest_age_seconds{queue="delivery"} > 300
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: Suppsystem delivery queue is old
+          summary: suppsystem delivery queue is old
           description: "Oldest delivery job is older than 5 minutes. Check Telegram API errors and delivery worker progress."
 
-      - alert: SuppsystemOldNotificationQueue
+      - alert: suppsystemOldNotificationQueue
         expr: suppsystem_queue_oldest_age_seconds{queue="notification"} > 300
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: Suppsystem notification queue is old
+          summary: suppsystem notification queue is old
           description: "Oldest notification job is older than 5 minutes. Check receiver availability and Retry-After responses."
 
-      - alert: SuppsystemWorkerHeartbeatStale
+      - alert: suppsystemWorkerHeartbeatStale
         expr: suppsystem_heartbeat_age_seconds > 60
         for: 2m
         labels:
           severity: critical
         annotations:
-          summary: Suppsystem worker heartbeat is stale
+          summary: suppsystem worker heartbeat is stale
           description: "{{ $labels.component }} heartbeat is stale. Check /ready, container health and worker logs."
 
-      - alert: SuppsystemPanelUnknownOutcome
+      - alert: suppsystemPanelUnknownOutcome
         expr: suppsystem_panel_unknown > 0
         for: 1m
         labels:
@@ -55,11 +55,11 @@ groups:
           summary: Remnawave action outcome requires manual reconciliation
           description: "{{ $value }} Remnawave actions have unknown outcome. Do not repeat mutations before manual reconciliation."
 
-      - alert: SuppsystemExternalRequestFailures
+      - alert: suppsystemExternalRequestFailures
         expr: increase(suppsystem_events_total{outcome=~"failed|retry|unknown|unexpected_response|http_5xx|request_error"}[15m]) > 0
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: Suppsystem external integration failures detected
+          summary: suppsystem external integration failures detected
           description: "External integration failures or retries increased in the last 15 minutes. Check component and outcome labels."

@@ -15,6 +15,7 @@ from suppsystem.audit import record_event
 from suppsystem.config import Settings
 from suppsystem.models import Direction
 from suppsystem.outbox_repository import OutboxRepository
+from suppsystem.runtime_defaults import DELIVERY_MAX_ATTEMPTS, DELIVERY_POLL_INTERVAL_SECONDS
 from suppsystem.runtime_health import RuntimeHealth
 from suppsystem.runtime_supervision import wait_for_event
 from suppsystem.service_types import DeliveryJob
@@ -214,9 +215,7 @@ class DeliveryWorker:
             claim_token=job.claim_token,
             error=error,
             retry_after_seconds=retry_after_seconds,
-            max_attempts=(
-                self.settings.delivery_max_attempts if max_attempts is None else max_attempts
-            ),
+            max_attempts=(DELIVERY_MAX_ATTEMPTS if max_attempts is None else max_attempts),
         )
         return self._claim_transition_applied(job, payload, transition=transition, applied=retried)
 
@@ -330,18 +329,18 @@ class DeliveryWorker:
                     "event": "delivery_retry_scheduled",
                     **self._delivery_context(job, payload),
                     "retry_after_seconds": retry_after,
-                    "max_attempts": self.settings.delivery_max_attempts,
+                    "max_attempts": DELIVERY_MAX_ATTEMPTS,
                     "error_kind": "telegram_retry_after",
                     "error_message": str(error),
                 },
             )
-            if job.attempt_count >= self.settings.delivery_max_attempts:
+            if job.attempt_count >= DELIVERY_MAX_ATTEMPTS:
                 logger.error(
                     "Delivery exhausted after Telegram flood control",
                     extra={
                         "event": "delivery_exhausted",
                         **self._delivery_context(job, payload),
-                        "max_attempts": self.settings.delivery_max_attempts,
+                        "max_attempts": DELIVERY_MAX_ATTEMPTS,
                         "error_kind": "telegram_retry_after",
                     },
                 )
@@ -473,18 +472,18 @@ class DeliveryWorker:
                     "event": "delivery_retry_scheduled",
                     **self._delivery_context(job, payload),
                     "retry_after_seconds": retry_after,
-                    "max_attempts": self.settings.delivery_max_attempts,
+                    "max_attempts": DELIVERY_MAX_ATTEMPTS,
                     "error_kind": "telegram_api_error",
                     "error_message": str(error)[:300],
                 },
             )
-            if job.attempt_count >= self.settings.delivery_max_attempts:
+            if job.attempt_count >= DELIVERY_MAX_ATTEMPTS:
                 logger.error(
                     "Delivery exhausted after Telegram API errors",
                     extra={
                         "event": "delivery_exhausted",
                         **self._delivery_context(job, payload),
-                        "max_attempts": self.settings.delivery_max_attempts,
+                        "max_attempts": DELIVERY_MAX_ATTEMPTS,
                         "error_kind": "telegram_api_error",
                     },
                 )
@@ -500,13 +499,13 @@ class DeliveryWorker:
             )
             if not await self._retry_delivery(job, payload, "unexpected delivery failure", 30):
                 return
-            if job.attempt_count >= self.settings.delivery_max_attempts:
+            if job.attempt_count >= DELIVERY_MAX_ATTEMPTS:
                 logger.error(
                     "Delivery exhausted after unexpected error",
                     extra={
                         "event": "delivery_exhausted",
                         **self._delivery_context(job, payload),
-                        "max_attempts": self.settings.delivery_max_attempts,
+                        "max_attempts": DELIVERY_MAX_ATTEMPTS,
                         "error_kind": "unexpected_error",
                     },
                 )
@@ -565,7 +564,5 @@ class DeliveryWorker:
     async def _wait_for_poll_interval(self, *, delay_seconds: float | None = None) -> None:
         await wait_for_event(
             self._stopped,
-            self.settings.delivery_poll_interval_seconds
-            if delay_seconds is None
-            else delay_seconds,
+            DELIVERY_POLL_INTERVAL_SECONDS if delay_seconds is None else delay_seconds,
         )

@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, Mock
 from aiogram.types import Update
 
 from suppsystem.telegram_ingress import DurableTelegramIngressMiddleware
-from suppsystem.telegram_limits import TelegramInboundRateLimiter, TelegramRateLimiter
+from suppsystem.telegram_limits import TelegramRateLimiter
+from suppsystem.user_message_limits import UserMessageRateLimiter
 
 
 class Clock:
@@ -22,54 +23,54 @@ class Clock:
 
 async def test_inbound_limiter_allows_burst_then_throttles_without_extending_block() -> None:
     clock = Clock()
-    limiter = TelegramInboundRateLimiter(
+    limiter = UserMessageRateLimiter(
         per_minute=3,
         per_hour=5,
         monotonic=clock.monotonic,
     )
 
     for _ in range(3):
-        assert (await limiter.consume(42)).allowed is True
+        assert (await limiter.consume("telegram:42")).allowed is True
 
-    first_rejection = await limiter.consume(42)
-    repeated_rejection = await limiter.consume(42)
+    first_rejection = await limiter.consume("telegram:42")
+    repeated_rejection = await limiter.consume("telegram:42")
 
     assert first_rejection.allowed is False
     assert first_rejection.retry_after_seconds == 60
-    assert first_rejection.notify_user is True
+    assert first_rejection.notify_client is True
     assert repeated_rejection.allowed is False
     assert repeated_rejection.retry_after_seconds == 60
-    assert repeated_rejection.notify_user is False
+    assert repeated_rejection.notify_client is False
 
     clock.advance(61)
-    assert (await limiter.consume(42)).allowed is True
-    assert (await limiter.consume(42)).allowed is True
+    assert (await limiter.consume("telegram:42")).allowed is True
+    assert (await limiter.consume("telegram:42")).allowed is True
 
-    hourly_rejection = await limiter.consume(42)
+    hourly_rejection = await limiter.consume("telegram:42")
     assert hourly_rejection.allowed is False
     assert hourly_rejection.retry_after_seconds == 3539
-    assert hourly_rejection.notify_user is True
+    assert hourly_rejection.notify_client is True
 
-    assert (await limiter.consume(99)).allowed is True
+    assert (await limiter.consume("telegram:99")).allowed is True
 
     clock.advance(3540)
-    assert (await limiter.consume(42)).allowed is True
+    assert (await limiter.consume("telegram:42")).allowed is True
 
 
 async def test_rejected_attempts_do_not_consume_more_capacity() -> None:
     clock = Clock()
-    limiter = TelegramInboundRateLimiter(
+    limiter = UserMessageRateLimiter(
         per_minute=1,
         per_hour=2,
         monotonic=clock.monotonic,
     )
 
-    assert (await limiter.consume(42)).allowed is True
+    assert (await limiter.consume("telegram:42")).allowed is True
     for _ in range(100):
-        assert (await limiter.consume(42)).allowed is False
+        assert (await limiter.consume("telegram:42")).allowed is False
 
     clock.advance(61)
-    assert (await limiter.consume(42)).allowed is True
+    assert (await limiter.consume("telegram:42")).allowed is True
 
 
 async def test_middleware_drops_excess_private_messages_before_persistence() -> None:
@@ -88,7 +89,7 @@ async def test_middleware_drops_excess_private_messages_before_persistence() -> 
         repository,  # type: ignore[arg-type]
         wake,
         bot=bot,
-        inbound_limiter=TelegramInboundRateLimiter(per_minute=1, per_hour=2),
+        inbound_limiter=UserMessageRateLimiter(per_minute=1, per_hour=2),
         outbound_limiter=TelegramRateLimiter(0.001),
     )
 
@@ -120,4 +121,6 @@ async def test_middleware_drops_excess_private_messages_before_persistence() -> 
     assert repository.saved == [1]
     assert wake.call_count == 1
     assert bot.send_message.await_count == 1
-    assert "Последнее сообщение не принято" in bot.send_message.await_args.kwargs["text"]
+    assert bot.send_message.await_args.kwargs["text"] == (
+        "Вы отправили слишком много сообщений. Следующее можно отправить через 1 мин."
+    )

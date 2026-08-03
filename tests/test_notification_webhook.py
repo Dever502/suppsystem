@@ -15,6 +15,7 @@ from suppsystem.database import Database
 from suppsystem.models import NotificationOutbox, NotificationStatus
 from suppsystem.notification_webhook import NotificationWebhookWorker, parse_retry_after
 from suppsystem.outbox_repository import OutboxRepository
+from suppsystem.runtime_defaults import NOTIFICATION_WEBHOOK_MAX_ATTEMPTS
 from suppsystem.services import NotificationJob, TicketService
 
 
@@ -69,7 +70,6 @@ def settings() -> Settings:
         notification_webhook_enabled=True,
         notification_webhook_url="https://receiver.example/support",
         notification_webhook_secret=SecretStr("0123456789abcdef0123456789abcdef"),
-        notification_webhook_max_attempts=3,
     )
 
 
@@ -252,7 +252,7 @@ async def test_notification_webhook_retries_5xx() -> None:
 
     assert service.delivered == []
     assert service.retries[0]["notification_id"] == "notification-1"
-    assert service.retries[0]["max_attempts"] == 3
+    assert service.retries[0]["max_attempts"] == NOTIFICATION_WEBHOOK_MAX_ATTEMPTS
 
 
 @pytest.mark.asyncio

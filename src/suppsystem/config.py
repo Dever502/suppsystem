@@ -152,21 +152,14 @@ class Settings(BaseSettings):
     migration_database_url: str | None = None
     migrations_at_startup: bool = True
     log_level: str = "INFO"
-    delivery_poll_interval_seconds: float = 1.0
-    telegram_min_request_interval_seconds: float = 0.05
-    telegram_inbound_rate_limit_per_minute: int = 30
-    telegram_inbound_rate_limit_per_hour: int = 150
-    delivery_max_attempts: int = 8
+    user_messages_per_minute: int = 30
+    user_messages_per_hour: int = 200
     api_enabled: bool = False
     api_host: str = "0.0.0.0"
     api_port: int = 8080
     api_admin_token: SecretStr | None = None
     api_unsafe_disable_auth: bool = False
-    api_operator_telegram_id: int = 0
-    api_rate_limit_requests: int = 120
-    api_rate_limit_window_seconds: float = 60.0
-    api_auth_failure_limit: int = 10
-    api_auth_failure_window_seconds: float = 60.0
+    api_requests_per_minute: int = 6000
     api_trusted_proxy_ips: frozenset[str] = Field(default_factory=frozenset)
     web_api_enabled: bool = False
     web_api_token: SecretStr | None = None
@@ -174,15 +167,10 @@ class Settings(BaseSettings):
     remnawave_enabled: bool = False
     remnawave_base_url: str | None = None
     remnawave_api_token: SecretStr | None = None
-    remnawave_timeout_seconds: float = 5.0
-    remnawave_reconcile_delay_seconds: float = 10.0
     remnawave_revoke_link_telegram_notification: bool = True
     notification_webhook_enabled: bool = False
     notification_webhook_url: str | None = None
     notification_webhook_secret: SecretStr | None = None
-    notification_webhook_timeout_seconds: float = 5.0
-    notification_webhook_max_attempts: int = 8
-    notification_webhook_poll_interval_seconds: float = 1.0
 
     @field_validator("admin_telegram_ids", mode="before")
     @classmethod
@@ -257,27 +245,14 @@ class Settings(BaseSettings):
         if self.remnawave_enabled:
             assert self.remnawave_api_token is not None
             validate_enabled_secret("REMNAWAVE_API_TOKEN", self.remnawave_api_token)
-        if self.remnawave_timeout_seconds <= 0:
-            raise ValueError("REMNAWAVE_TIMEOUT_SECONDS must be positive")
-        if self.delivery_poll_interval_seconds <= 0:
-            raise ValueError("DELIVERY_POLL_INTERVAL_SECONDS must be positive")
-        if self.telegram_min_request_interval_seconds <= 0:
-            raise ValueError("TELEGRAM_MIN_REQUEST_INTERVAL_SECONDS must be positive")
-        if self.telegram_inbound_rate_limit_per_minute <= 0:
-            raise ValueError("TELEGRAM_INBOUND_RATE_LIMIT_PER_MINUTE must be positive")
-        if self.telegram_inbound_rate_limit_per_hour < self.telegram_inbound_rate_limit_per_minute:
+        if self.user_messages_per_minute <= 0:
+            raise ValueError("USER_MESSAGES_PER_MINUTE must be positive")
+        if self.user_messages_per_hour < self.user_messages_per_minute:
             raise ValueError(
-                "TELEGRAM_INBOUND_RATE_LIMIT_PER_HOUR must be greater than or equal to "
-                "TELEGRAM_INBOUND_RATE_LIMIT_PER_MINUTE"
+                "USER_MESSAGES_PER_HOUR must be greater than or equal to USER_MESSAGES_PER_MINUTE"
             )
-        if self.delivery_max_attempts <= 0:
-            raise ValueError("DELIVERY_MAX_ATTEMPTS must be positive")
-        if self.api_rate_limit_requests <= 0 or self.api_rate_limit_window_seconds <= 0:
-            raise ValueError("API rate limit settings must be positive")
-        if self.api_auth_failure_limit <= 0 or self.api_auth_failure_window_seconds <= 0:
-            raise ValueError("API auth failure limit settings must be positive")
-        if self.remnawave_reconcile_delay_seconds < 0:
-            raise ValueError("REMNAWAVE_RECONCILE_DELAY_SECONDS must not be negative")
+        if self.api_requests_per_minute <= 0:
+            raise ValueError("API_REQUESTS_PER_MINUTE must be positive")
         if self.notification_webhook_enabled and (
             not self.notification_webhook_url or not self.notification_webhook_secret
         ):
@@ -288,12 +263,6 @@ class Settings(BaseSettings):
         if self.notification_webhook_enabled:
             assert self.notification_webhook_secret is not None
             validate_enabled_secret("NOTIFICATION_WEBHOOK_SECRET", self.notification_webhook_secret)
-        if self.notification_webhook_timeout_seconds <= 0:
-            raise ValueError("NOTIFICATION_WEBHOOK_TIMEOUT_SECONDS must be positive")
-        if self.notification_webhook_max_attempts <= 0:
-            raise ValueError("NOTIFICATION_WEBHOOK_MAX_ATTEMPTS must be positive")
-        if self.notification_webhook_poll_interval_seconds <= 0:
-            raise ValueError("NOTIFICATION_WEBHOOK_POLL_INTERVAL_SECONDS must be positive")
         return self
 
 

@@ -1,4 +1,4 @@
-"""Suppsystem."""
+"""suppsystem."""
 
 from suppsystem.version import PROJECT_VERSION
 

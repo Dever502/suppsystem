@@ -1,9 +1,7 @@
 # Example HTTPS reverse proxy for the optional Operator and Web Support APIs.
 # Replace support.example.invalid and certificate paths before use.
-# Keep the suppsystem API published on loopback:
-#   API_ENABLED=true
-#   API_PUBLISH_HOST=127.0.0.1
-#   API_PORT=8080
+# Compose publishes the suppsystem API on 127.0.0.1:8080 by default.
+# Enable API_ENABLED and/or WEB_API_ENABLED in the suppsystem environment.
 
 server {
     listen 80;
@@ -29,7 +27,7 @@ server {
         # This is the public trust boundary: discard any client-supplied chain.
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto https;
-        # Set API_TRUSTED_PROXY_IPS to this proxy address in suppsystem env.
+        # Advanced: trust this proxy through API_TRUSTED_PROXY_IPS when client IPs are required.
         proxy_read_timeout 30s;
         proxy_send_timeout 30s;
     }

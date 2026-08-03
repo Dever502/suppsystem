@@ -73,11 +73,12 @@ def test_revoke_link_telegram_notification_is_enabled_by_default_and_can_be_disa
     )
 
 
-def test_inbound_telegram_rate_limits_are_gentle_by_default() -> None:
+def test_unified_rate_limits_have_high_traffic_defaults() -> None:
     configured = settings()
 
-    assert configured.telegram_inbound_rate_limit_per_minute == 30
-    assert configured.telegram_inbound_rate_limit_per_hour == 150
+    assert configured.user_messages_per_minute == 30
+    assert configured.user_messages_per_hour == 200
+    assert configured.api_requests_per_minute == 6000
 
 
 def test_admin_ids_accept_comma_separated_values() -> None:
@@ -90,12 +91,12 @@ def test_configuration_error_formatter_is_operator_readable() -> None:
     from suppsystem.__main__ import format_configuration_error
 
     with pytest.raises(ValidationError) as captured:
-        settings(delivery_poll_interval_seconds=0)
+        settings(user_messages_per_minute=0)
 
     message = format_configuration_error(captured.value)
 
     assert message.startswith("Configuration error:\n")
-    assert "DELIVERY_POLL_INTERVAL_SECONDS" in message
+    assert "USER_MESSAGES_PER_MINUTE" in message
     assert "/opt/suppsystem/.env" in message
     assert "Traceback" not in message
     assert "pydantic_core" not in message
@@ -249,15 +250,13 @@ def test_secret_validation_error_does_not_contain_the_secret() -> None:
 @pytest.mark.parametrize(
     "overrides",
     (
-        {"delivery_poll_interval_seconds": 0},
-        {"telegram_min_request_interval_seconds": 0},
-        {"telegram_inbound_rate_limit_per_minute": 0},
-        {"telegram_inbound_rate_limit_per_hour": 0},
+        {"user_messages_per_minute": 0},
+        {"user_messages_per_hour": 0},
+        {"api_requests_per_minute": 0},
         {
-            "telegram_inbound_rate_limit_per_minute": 31,
-            "telegram_inbound_rate_limit_per_hour": 30,
+            "user_messages_per_minute": 31,
+            "user_messages_per_hour": 30,
         },
-        {"delivery_max_attempts": 0},
     ),
 )
 def test_runtime_tuning_values_must_be_positive(overrides: dict[str, object]) -> None:

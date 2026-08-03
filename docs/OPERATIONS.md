@@ -42,13 +42,12 @@ SQLite и heartbeat хранятся в volume `suppsystem_data`. Удалени
 
 Добавьте три разных URL-safe пароля длиной не менее 16 символов:
 
+Имена ролей фиксированы: `postgres`, `suppsystem_migrator` и `suppsystem_runtime`.
+
 ```dotenv
 POSTGRES_DB=suppsystem
-POSTGRES_ADMIN_USER=postgres
 POSTGRES_ADMIN_PASSWORD=replace-with-random-password-1
-POSTGRES_MIGRATION_USER=suppsystem_migrator
 POSTGRES_MIGRATION_PASSWORD=replace-with-random-password-2
-POSTGRES_RUNTIME_USER=suppsystem_runtime
 POSTGRES_RUNTIME_PASSWORD=replace-with-random-password-3
 ```
 
@@ -76,36 +75,38 @@ POSTGRES_RUNTIME_PASSWORD=replace-with-random-password-3
 | `MIGRATION_DATABASE_URL` | `DATABASE_URL` | отдельный URL для миграций |
 | `MIGRATIONS_AT_STARTUP` | `true` | PostgreSQL Compose меняет на `false` |
 | `LOG_LEVEL` | `INFO` | уровень логирования |
-| `TELEGRAM_INBOUND_RATE_LIMIT_PER_MINUTE` | `30` | burst-лимит личных сообщений |
-| `TELEGRAM_INBOUND_RATE_LIMIT_PER_HOUR` | `150` | длительный лимит на пользователя |
+| `USER_MESSAGES_PER_MINUTE` | `30` | burst-лимит сообщений одного клиента |
+| `USER_MESSAGES_PER_HOUR` | `200` | часовой лимит сообщений одного клиента |
+| `API_REQUESTS_PER_MINUTE` | `6000` | минутная квота отдельно для каждого API token |
 
-Лимит действует только на личные сообщения клиентов, не сокращает текст и сбрасывается при рестарте.
-Интервалы доставки и предел повторов уже имеют безопасные значения. Не уменьшайте их без
-измерений: это повышает риск Telegram rate limit и конкуренции SQLite.
+Пользовательский лимит одинаков для Telegram и Web: в Telegram клиент определяется по ID,
+в Web — по выбранному каноническому идентификатору. Текст и фото считаются одним сообщением;
+разные клиенты не делят квоту. API-квота применяется отдельно к каждому валидному API token.
+Все лимиты process-local и сбрасываются при рестарте.
 
 ### Operator API
 
 | Переменная | По умолчанию | Назначение |
 | --- | --- | --- |
 | `API_ENABLED` | `false` | включает API |
-| `API_HOST` | `0.0.0.0` | bind внутри контейнера |
-| `API_PUBLISH_HOST` | `127.0.0.1` | публикация Docker-порта на host |
-| `API_PORT` | `8080` | порт |
 | `API_ADMIN_TOKEN` | пусто | `X-API-Token`, минимум 32 символа |
-| `API_TRUSTED_PROXY_IPS` | пусто | доверенные proxy IP/CIDR |
+
+По умолчанию Compose публикует API на `127.0.0.1:8080`. `API_HOST`, `API_PUBLISH_HOST`,
+`API_PORT` и `API_TRUSTED_PROXY_IPS` остаются расширенными настройками.
 
 Пустой `ADMIN_TELEGRAM_IDS` допустим только при `API_ENABLED=true`: в этом случае работа
 операторов идёт только через API. Оставляйте публикацию на loopback и используйте HTTPS reverse
 proxy. Каждая мутация требует
 `X-Idempotency-Key`: точный повтор возвращает сохранённый ответ, другой payload с тем же ключом —
-`409 Conflict`. Rate limit и защита токена process-local и сбрасываются при рестарте.
+`409 Conflict`. API-квота считается отдельно для Operator token; строгая защита от перебора
+token остаётся по IP.
 
 Пример reverse proxy: [`deploy/nginx/suppsystem-api.conf.example`](../deploy/nginx/suppsystem-api.conf.example).
 
 ### Web Support API
 
 Web API предназначен только для backend сайта. Не передавайте token в браузер и не включайте
-CORS. Он использует тот же bind/port и общий process-local rate limit, но отдельный credential:
+CORS. Он использует тот же bind/port, но отдельные credential и API-квоту:
 
 | Переменная | По умолчанию | Назначение |
 | --- | --- | --- |
@@ -159,7 +160,6 @@ retention.
 | `REMNAWAVE_ENABLED` | `false` | включает Remnawave |
 | `REMNAWAVE_BASE_URL` | пусто | HTTPS origin панели без `/api` |
 | `REMNAWAVE_API_TOKEN` | пусто | API token, минимум 32 символа |
-| `REMNAWAVE_RECONCILE_DELAY_SECONDS` | `10` | задержка перед сверкой timeout |
 | `REMNAWAVE_REVOKE_LINK_TELEGRAM_NOTIFICATION` | `true` | отправлять новую ссылку клиенту |
 | `NOTIFICATION_WEBHOOK_ENABLED` | `false` | включает webhook-доставку |
 | `NOTIFICATION_WEBHOOK_URL` | пусто | HTTPS endpoint |

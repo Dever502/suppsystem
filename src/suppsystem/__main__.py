@@ -27,15 +27,21 @@ from suppsystem.notification_webhook import NotificationWebhookWorker
 from suppsystem.panel import PanelService
 from suppsystem.reconciliation import ReconciliationWorker
 from suppsystem.remnawave import RemnawaveClient
+from suppsystem.runtime_defaults import (
+    REMNAWAVE_RECONCILE_DELAY_SECONDS,
+    REMNAWAVE_TIMEOUT_SECONDS,
+    TELEGRAM_MIN_REQUEST_INTERVAL_SECONDS,
+)
 from suppsystem.runtime_health import RuntimeHealth
 from suppsystem.runtime_supervision import shutdown_runtime, supervise_ingress
 from suppsystem.services import TicketService
 from suppsystem.telegram_adapter import TelegramSupportAdapter
 from suppsystem.telegram_ingress import DurableTelegramIngressMiddleware, TelegramIngressWorker
 from suppsystem.telegram_lifecycle import create_polling_task
-from suppsystem.telegram_limits import TelegramInboundRateLimiter, TelegramRateLimiter
+from suppsystem.telegram_limits import TelegramRateLimiter
 from suppsystem.telegram_system_topics import TelegramSystemTopicService
 from suppsystem.trace import TraceMiddleware
+from suppsystem.user_message_limits import UserMessageRateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -111,9 +117,9 @@ async def validate_support_group(bot: Bot, support_group_id: int) -> None:
     if is_forum is not True:
         errors.append("SUPPORT_GROUP_ID must point to a forum group with topics enabled")
     if member_status not in {"administrator", "creator"}:
-        errors.append("Suppsystem bot must be an administrator in SUPPORT_GROUP_ID")
+        errors.append("suppsystem bot must be an administrator in SUPPORT_GROUP_ID")
     if member_status == "administrator" and can_manage_topics is not True:
-        errors.append("Suppsystem bot must have permission to manage topics")
+        errors.append("suppsystem bot must have permission to manage topics")
 
     extra: dict[str, object] = {
         "event": "support_group_preflight",
@@ -176,12 +182,12 @@ async def run() -> None:
             RemnawaveClient(
                 base_url=settings.remnawave_base_url,
                 api_token=settings.remnawave_api_token,
-                timeout_seconds=settings.remnawave_timeout_seconds,
+                timeout_seconds=REMNAWAVE_TIMEOUT_SECONDS,
                 client=http_client,
                 metrics=metrics,
             ),
             database=database,
-            reconcile_delay_seconds=settings.remnawave_reconcile_delay_seconds,
+            reconcile_delay_seconds=REMNAWAVE_RECONCILE_DELAY_SECONDS,
             support_group_id=settings.support_group_id,
             revoke_link_telegram_notification=(
                 settings.remnawave_revoke_link_telegram_notification
@@ -215,7 +221,11 @@ async def run() -> None:
         await http_client.aclose()
         await database.dispose()
         raise
-    limiter = TelegramRateLimiter(settings.telegram_min_request_interval_seconds)
+    limiter = TelegramRateLimiter(TELEGRAM_MIN_REQUEST_INTERVAL_SECONDS)
+    user_message_limiter = UserMessageRateLimiter(
+        per_minute=settings.user_messages_per_minute,
+        per_hour=settings.user_messages_per_hour,
+    )
     system_topics = TelegramSystemTopicService(
         bot=bot,
         database=database,
@@ -232,10 +242,7 @@ async def run() -> None:
             durable_work,
             ingress_worker.wake,
             bot=bot,
-            inbound_limiter=TelegramInboundRateLimiter(
-                per_minute=settings.telegram_inbound_rate_limit_per_minute,
-                per_hour=settings.telegram_inbound_rate_limit_per_hour,
-            ),
+            inbound_limiter=user_message_limiter,
             outbound_limiter=limiter,
         )
     )
@@ -258,6 +265,7 @@ async def run() -> None:
                 settings=settings,
                 runtime_health=runtime_health,
                 metrics=metrics,
+                user_message_limiter=user_message_limiter,
             ),
             settings,
             runtime_health,
@@ -311,7 +319,7 @@ async def run() -> None:
     )
 
     try:
-        logger.info("Starting Suppsystem")
+        logger.info("Starting suppsystem")
         await supervise_ingress(polling_task, api_task, dispatcher.stop_polling)
     finally:
         await shutdown_runtime(

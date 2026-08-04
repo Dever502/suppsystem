@@ -1095,6 +1095,56 @@ async def test_only_bot_status_topic_rename_messages_are_deleted(
         assert bot.delete_calls == [{"chat_id": -100123, "message_id": 51}]
 
 
+@pytest.mark.parametrize(
+    ("actor_id", "topic_id", "expected_deleted"),
+    [
+        (42, 888, True),
+        (7, 888, False),
+        (42, 777, False),
+    ],
+)
+async def test_only_bot_quick_response_pin_service_message_is_deleted(
+    actor_id: int, topic_id: int, expected_deleted: bool
+) -> None:
+    class FakeDeleteBot:
+        id = 42
+
+        def __init__(self) -> None:
+            self.delete_calls: list[dict[str, int]] = []
+
+        async def delete_message(self, **kwargs: int) -> None:
+            self.delete_calls.append(kwargs)
+
+    class FakeLimiter:
+        def __init__(self) -> None:
+            self.wait_calls = 0
+
+        async def wait(self) -> None:
+            self.wait_calls += 1
+
+    message = SimpleNamespace(
+        forum_topic_edited=None,
+        pinned_message=SimpleNamespace(message_id=50),
+        from_user=SimpleNamespace(id=actor_id, is_bot=actor_id == 42),
+        chat=SimpleNamespace(id=-100123),
+        message_id=51,
+        message_thread_id=topic_id,
+    )
+    bot = FakeDeleteBot()
+    limiter = FakeLimiter()
+    adapter = object.__new__(TelegramSupportAdapter)
+    adapter.bot = bot  # type: ignore[assignment]
+    adapter.limiter = limiter  # type: ignore[assignment]
+    adapter.quick_replies_topic_id = 888
+
+    await adapter.handle_group_message(message)  # type: ignore[arg-type]
+
+    assert bool(bot.delete_calls) is expected_deleted
+    assert limiter.wait_calls == int(expected_deleted)
+    if expected_deleted:
+        assert bot.delete_calls == [{"chat_id": -100123, "message_id": 51}]
+
+
 async def test_admin_can_resolve_inconclusive_panel_action() -> None:
     calls: list[dict[str, object]] = []
 

@@ -72,24 +72,41 @@ class TelegramOperatorHandlers(
                 },
             )
 
-    async def _handle_topic_rename_service_message(self, message: Message) -> bool:
+    async def _handle_topic_service_message(self, message: Message) -> bool:
         topic_edit = getattr(message, "forum_topic_edited", None)
-        if topic_edit is None:
-            return False
+        pinned_message = getattr(message, "pinned_message", None)
         actor = message.from_user
-        new_name = topic_edit.name
         quick_response_topic_id = getattr(self, "quick_replies_topic_id", None)
         quick_response_topic = (
             quick_response_topic_id is not None
             and message.message_thread_id == quick_response_topic_id
         )
-        if (
-            actor is None
-            or actor.id != self.bot.id
-            or new_name is None
-            or (not new_name.startswith(("🔴 ", "🟢 ")) and not quick_response_topic)
-        ):
+        bot_quick_response_pin = (
+            quick_response_topic
+            and pinned_message is not None
+            and actor is not None
+            and actor.id == self.bot.id
+        )
+        if topic_edit is None and pinned_message is None:
+            return False
+
+        bot_topic_rename = False
+        if topic_edit is not None:
+            new_name = topic_edit.name
+            bot_topic_rename = (
+                actor is not None
+                and actor.id == self.bot.id
+                and new_name is not None
+                and (new_name.startswith(("🔴 ", "🟢 ")) or quick_response_topic)
+            )
+        if not bot_topic_rename and not bot_quick_response_pin:
             return True
+
+        service_event = (
+            "quick_response_pin_service_message"
+            if bot_quick_response_pin
+            else "topic_rename_service_message"
+        )
         try:
             await self.limiter.wait()
             await self.bot.delete_message(
@@ -98,10 +115,10 @@ class TelegramOperatorHandlers(
             )
         except TelegramAPIError:
             logger.warning(
-                "Unable to remove bot topic rename service message",
+                "Unable to remove bot topic service message",
                 exc_info=True,
                 extra={
-                    "event": "topic_rename_service_message_delete_failed",
+                    "event": f"{service_event}_delete_failed",
                     "chat_id": message.chat.id,
                     "message_id": message.message_id,
                     "topic_id": message.message_thread_id,
@@ -109,9 +126,9 @@ class TelegramOperatorHandlers(
             )
         else:
             logger.info(
-                "Removed bot topic rename service message",
+                "Removed bot topic service message",
                 extra={
-                    "event": "topic_rename_service_message_deleted",
+                    "event": f"{service_event}_deleted",
                     "chat_id": message.chat.id,
                     "message_id": message.message_id,
                     "topic_id": message.message_thread_id,
@@ -120,7 +137,7 @@ class TelegramOperatorHandlers(
         return True
 
     async def handle_group_message(self, message: Message) -> None:
-        if await self._handle_topic_rename_service_message(message):
+        if await self._handle_topic_service_message(message):
             return
         if message.from_user is None or message.from_user.is_bot:
             return

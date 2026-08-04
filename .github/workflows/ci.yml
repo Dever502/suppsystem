@@ -208,7 +208,7 @@ jobs:
             "$IMAGE_TAG" \
             -c 'set -eu
               cd /app
-              test "$(python -c "import suppsystem; print(suppsystem.__version__)")" = "3.0.0"
+              test "$(python -c "import suppsystem; print(suppsystem.__version__)")" = "3.5.0"
               test -f /app/alembic.ini
               test -f /app/migrations/env.py
               python -c "from hashlib import sha256; from pathlib import Path; assert sha256(Path(\"/app/LICENSE\").read_bytes()).hexdigest() == \"d81f7122bd70d76feebbd3634701488586b0bcc21b8bd90e1e1edf0acc4e8be7\""

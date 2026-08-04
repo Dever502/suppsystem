@@ -26,7 +26,7 @@ COPY --chown=app:app src ./src
 COPY --chown=app:app migrations ./migrations
 
 RUN uv sync --frozen --no-dev --no-editable && \
-    python -c "import suppsystem; assert suppsystem.__version__ == '3.0.0'" && \
+    python -c "import suppsystem; assert suppsystem.__version__ == '3.5.0'" && \
     mkdir /app/data && \
     chown app:app /app/data
 
@@ -35,7 +35,7 @@ USER app
 LABEL org.opencontainers.image.title="suppsystem" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.source="https://github.com/Dever502/suppsystem" \
-      org.opencontainers.image.version="3.0.0" \
+      org.opencontainers.image.version="3.5.0" \
       org.opencontainers.image.created="$BUILD_DATE" \
       org.opencontainers.image.revision="$VCS_REF"
 

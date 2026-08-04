@@ -113,7 +113,7 @@ async def test_explicit_upgrade_target_ignores_ambient_database_url(
 
     await upgrade_database(explicit_url)
 
-    assert await current_revision(explicit_url) == "0017_flat_quick_responses"
+    assert await current_revision(explicit_url) == "0018_quick_response_status"
     assert not ambient_path.exists()
 
 
@@ -130,12 +130,12 @@ async def test_explicit_downgrade_target_ignores_ambient_database_url(
     await downgrade_to_revision(explicit_url, "0009_ticket_last_activity")
 
     assert await current_revision(explicit_url) == "0009_ticket_last_activity"
-    assert await current_revision(ambient_url) == "0017_flat_quick_responses"
+    assert await current_revision(ambient_url) == "0018_quick_response_status"
 
     await upgrade_database(explicit_url)
 
-    assert await current_revision(explicit_url) == "0017_flat_quick_responses"
-    assert await current_revision(ambient_url) == "0017_flat_quick_responses"
+    assert await current_revision(explicit_url) == "0018_quick_response_status"
+    assert await current_revision(ambient_url) == "0018_quick_response_status"
 
 
 async def test_alembic_cli_still_uses_ambient_database_url(
@@ -148,7 +148,7 @@ async def test_alembic_cli_still_uses_ambient_database_url(
 
     await asyncio.to_thread(command.upgrade, config, "head")
 
-    assert await current_revision(ambient_url) == "0017_flat_quick_responses"
+    assert await current_revision(ambient_url) == "0018_quick_response_status"
 
 
 def test_alembic_config_accepts_percent_encoded_credentials() -> None:
@@ -233,7 +233,7 @@ async def test_upgrade_head_creates_query_indexes(tmp_path: Path) -> None:
         "published_message_id",
         "state",
         "invalid_until",
-        "warning_message_id",
+        "status_message_id",
     } <= quick_response_columns
     assert "quick_replies" not in table_names
     assert "quick_reply_groups" not in table_names

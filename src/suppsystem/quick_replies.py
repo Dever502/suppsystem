@@ -29,7 +29,7 @@ class QuickResponseView:
     published_message_id: int | None
     state: str
     invalid_until: datetime | None
-    warning_message_id: int | None
+    status_message_id: int | None
     created_at: datetime
     updated_at: datetime
 
@@ -59,7 +59,7 @@ def _view(response: QuickResponse) -> QuickResponseView:
         published_message_id=response.published_message_id,
         state=response.state,
         invalid_until=_as_utc(response.invalid_until),
-        warning_message_id=response.warning_message_id,
+        status_message_id=response.status_message_id,
         created_at=response.created_at,
         updated_at=response.updated_at,
     )
@@ -193,24 +193,30 @@ class QuickReplyService:
         raise RuntimeError("unreachable quick response upsert state")
 
     @retry_sqlite_locks
-    async def attach_warning(self, response_id: int, warning_message_id: int) -> bool:
+    async def attach_status_message(
+        self,
+        response_id: int,
+        status_message_id: int,
+        *,
+        expected_state: str,
+    ) -> bool:
         async with self.database.session() as session:
             response = await session.get(QuickResponse, response_id)
-            if response is None or response.state != QUICK_RESPONSE_PENDING_DELETION:
+            if response is None or response.state != expected_state:
                 return False
-            if response.warning_message_id is not None:
-                return response.warning_message_id == warning_message_id
-            response.warning_message_id = warning_message_id
+            if response.status_message_id is not None:
+                return response.status_message_id == status_message_id
+            response.status_message_id = status_message_id
             await session.commit()
             return True
 
     @retry_sqlite_locks
-    async def clear_warning(self, response_id: int, warning_message_id: int) -> bool:
+    async def clear_status_message(self, response_id: int, status_message_id: int) -> bool:
         async with self.database.session() as session:
             response = await session.get(QuickResponse, response_id)
-            if response is None or response.warning_message_id != warning_message_id:
+            if response is None or response.status_message_id != status_message_id:
                 return False
-            response.warning_message_id = None
+            response.status_message_id = None
             await session.commit()
             return True
 

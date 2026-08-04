@@ -71,7 +71,14 @@ async def test_pending_response_preserves_deadline_and_can_become_valid(
         )
         assert pending.state == QUICK_RESPONSE_PENDING_DELETION
         assert pending.invalid_until == deadline
-        assert await service.attach_warning(pending.id, 900) is True
+        assert (
+            await service.attach_status_message(
+                pending.id,
+                900,
+                expected_state=QUICK_RESPONSE_PENDING_DELETION,
+            )
+            is True
+        )
 
         corrected = await service.save_valid(
             text="Текст #1 #2",
@@ -82,8 +89,8 @@ async def test_pending_response_preserves_deadline_and_can_become_valid(
         assert corrected.id == pending.id
         assert corrected.state == QUICK_RESPONSE_VALID
         assert corrected.invalid_until is None
-        assert corrected.warning_message_id == 900
-        assert await service.clear_warning(corrected.id, 900) is True
+        assert corrected.status_message_id == 900
+        assert await service.clear_status_message(corrected.id, 900) is True
         assert (
             await service.delete_if_still_pending(
                 pending.id,

@@ -7,13 +7,14 @@ from datetime import UTC, datetime, timedelta
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
-from aiogram.types import Message, ReactionTypeEmoji
+from aiogram.types import Message, ReplyParameters
 
 from suppsystem.authorization import AuthorizationService
 from suppsystem.config import Settings
 from suppsystem.quick_replies import (
     QUICK_RESPONSE_MAX_TAGS,
     QUICK_RESPONSE_PENDING_DELETION,
+    QUICK_RESPONSE_VALID,
     QuickReplyService,
     QuickResponseView,
 )
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 QUICK_RESPONSE_DELETE_DELAY_SECONDS = 300
 QUICK_RESPONSE_TOPIC_REFRESH_INTERVAL_SECONDS = 60.0
+QUICK_RESPONSE_SAVED_TEXT = "[SAVE]"
 QUICK_RESPONSE_WARNING_TEXT = (
     "⚠️ Неправильное количество тегов. Укажите не более 4 тегов, "
     "иначе сообщение будет удалено через 5 минут."
@@ -77,25 +79,6 @@ class TelegramQuickReplyHandlers:
                 tags.append(entity.extract_from(text))
         return tags
 
-    async def _set_valid_reaction(self, message_id: int, *, valid: bool) -> None:
-        try:
-            await self.limiter.wait()
-            await self.bot.set_message_reaction(
-                chat_id=self.settings.support_group_id,
-                message_id=message_id,
-                reaction=[ReactionTypeEmoji(emoji="✅")] if valid else [],
-            )
-        except TelegramAPIError:
-            logger.warning(
-                "Unable to update quick response reaction",
-                exc_info=True,
-                extra={
-                    "event": "quick_response_reaction_failed",
-                    "message_id": message_id,
-                    "valid": valid,
-                },
-            )
-
     async def _delete_message(self, message_id: int) -> bool:
         try:
             await self.limiter.wait()
@@ -127,6 +110,71 @@ class TelegramQuickReplyHandlers:
             )
             return False
         return True
+
+    async def _edit_status_message(self, message_id: int, text: str) -> bool:
+        try:
+            await self.limiter.wait()
+            await self.bot.edit_message_text(
+                chat_id=self.settings.support_group_id,
+                message_id=message_id,
+                text=text,
+                parse_mode=None,
+            )
+        except TelegramBadRequest as error:
+            if _message_not_modified(error):
+                return True
+            if _message_missing(error):
+                return False
+            logger.warning(
+                "Unable to update quick response status",
+                exc_info=True,
+                extra={
+                    "event": "quick_response_status_update_failed",
+                    "message_id": message_id,
+                },
+            )
+        except TelegramAPIError:
+            logger.warning(
+                "Unable to update quick response status",
+                exc_info=True,
+                extra={
+                    "event": "quick_response_status_update_failed",
+                    "message_id": message_id,
+                },
+            )
+        return True
+
+    async def _sync_status_reply(
+        self,
+        message: Message,
+        response: QuickResponseView,
+        text: str,
+    ) -> QuickResponseView:
+        assert self.quick_reply_service is not None
+        status_message_id = response.status_message_id
+        if status_message_id is not None:
+            if await self._edit_status_message(status_message_id, text):
+                return response
+            await self.quick_reply_service.clear_status_message(
+                response.id,
+                status_message_id,
+            )
+
+        status = await message.reply(text, parse_mode=None)
+        attached = await self.quick_reply_service.attach_status_message(
+            response.id,
+            status.message_id,
+            expected_state=response.state,
+        )
+        if not attached:
+            await self._delete_message(status.message_id)
+        return (
+            await self.quick_reply_service.get_by_source(
+                source_chat_id=message.chat.id,
+                source_message_id=message.message_id,
+            )
+            or response
+        )
 
     def _cancel_expiration(self, response_id: int) -> None:
         task = self._quick_response_tasks.pop(response_id, None)
@@ -170,8 +218,8 @@ class TelegramQuickReplyHandlers:
                         return
                     original_deleted = await self._delete_message(source_message_id)
                     warning_deleted = (
-                        current.warning_message_id is None
-                        or await self._delete_message(current.warning_message_id)
+                        current.status_message_id is None
+                        or await self._delete_message(current.status_message_id)
                     )
                     if original_deleted and warning_deleted:
                         await service.delete_if_still_pending(
@@ -200,7 +248,6 @@ class TelegramQuickReplyHandlers:
         self,
         message: Message,
         tags: list[str],
-        previous: QuickResponseView | None,
     ) -> None:
         assert self.quick_reply_service is not None
         assert message.from_user is not None
@@ -214,13 +261,7 @@ class TelegramQuickReplyHandlers:
             source_message_id=message.message_id,
         )
         self._cancel_expiration(response.id)
-        if previous is not None and previous.warning_message_id is not None:
-            if await self._delete_message(previous.warning_message_id):
-                await self.quick_reply_service.clear_warning(
-                    response.id,
-                    previous.warning_message_id,
-                )
-        await self._set_valid_reaction(message.message_id, valid=True)
+        await self._sync_status_reply(message, response, QUICK_RESPONSE_SAVED_TEXT)
 
     async def _reject_response(
         self,
@@ -247,24 +288,12 @@ class TelegramQuickReplyHandlers:
             source_message_id=message.message_id,
             invalid_until=invalid_until,
         )
-        await self._set_valid_reaction(message.message_id, valid=False)
+        response = await self._sync_status_reply(
+            message,
+            response,
+            QUICK_RESPONSE_WARNING_TEXT,
+        )
         self._schedule_expiration(response)
-        if response.warning_message_id is None:
-            warning = await message.reply(QUICK_RESPONSE_WARNING_TEXT, parse_mode=None)
-            attached = await self.quick_reply_service.attach_warning(
-                response.id,
-                warning.message_id,
-            )
-            if attached:
-                response = (
-                    await self.quick_reply_service.get_by_source(
-                        source_chat_id=message.chat.id,
-                        source_message_id=message.message_id,
-                    )
-                    or response
-                )
-            else:
-                await self._delete_message(warning.message_id)
 
     async def handle_quick_reply_topic_message(
         self,
@@ -292,7 +321,7 @@ class TelegramQuickReplyHandlers:
             )
             tags = self._hashtags(message)
             if len(tags) <= QUICK_RESPONSE_MAX_TAGS:
-                await self._accept_response(message, tags, previous)
+                await self._accept_response(message, tags)
             else:
                 await self._reject_response(message, tags, previous)
         return True
@@ -354,6 +383,20 @@ class TelegramQuickReplyHandlers:
                 response.id,
                 published.message_id,
             )
+            status = await self.bot.send_message(
+                chat_id=self.settings.support_group_id,
+                message_thread_id=self.quick_replies_topic_id,
+                text=QUICK_RESPONSE_SAVED_TEXT,
+                reply_parameters=ReplyParameters(message_id=published.message_id),
+                parse_mode=None,
+            )
+            attached = await self.quick_reply_service.attach_status_message(
+                response.id,
+                status.message_id,
+                expected_state=QUICK_RESPONSE_VALID,
+            )
+            if not attached:
+                await self._delete_message(status.message_id)
 
     async def _cleanup_legacy_messages(self, instruction_message_id: int) -> None:
         assert self.quick_reply_service is not None
@@ -368,15 +411,15 @@ class TelegramQuickReplyHandlers:
         if cleaned:
             await self.quick_reply_service.finish_legacy_cleanup(self.settings.support_group_id)
 
-    async def _cleanup_valid_warnings(self) -> None:
+    async def _clear_valid_status_messages(self) -> None:
         assert self.quick_reply_service is not None
         for response in await self.quick_reply_service.list_valid():
-            if response.warning_message_id is None:
+            if response.status_message_id is None:
                 continue
-            if await self._delete_message(response.warning_message_id):
-                await self.quick_reply_service.clear_warning(
+            if await self._delete_message(response.status_message_id):
+                await self.quick_reply_service.clear_status_message(
                     response.id,
-                    response.warning_message_id,
+                    response.status_message_id,
                 )
 
     async def _cancel_all_expirations(self) -> None:
@@ -395,9 +438,9 @@ class TelegramQuickReplyHandlers:
         await self._cancel_all_expirations()
         assert self.quick_reply_service is not None
         await self.quick_reply_service.discard_all_pending()
+        await self._clear_valid_status_messages()
         instruction_message_id = await self._send_instruction()
         await self._restore_valid_responses(all_responses=True)
-        await self._cleanup_valid_warnings()
         await self._cleanup_legacy_messages(instruction_message_id)
         logger.warning(
             "Recreated quick response topic and restored saved responses",
@@ -423,6 +466,7 @@ class TelegramQuickReplyHandlers:
             if topic_was_replaced:
                 await self._cancel_all_expirations()
                 await service.discard_all_pending()
+                await self._clear_valid_status_messages()
             instruction_id = await service.instruction_message_id(self.settings.support_group_id)
             if instruction_id is None or topic_was_replaced:
                 try:
@@ -458,7 +502,6 @@ class TelegramQuickReplyHandlers:
                 await self._pin_instruction(instruction_id)
 
             await self._cleanup_legacy_messages(instruction_id)
-            await self._cleanup_valid_warnings()
             await self._restore_valid_responses(all_responses=topic_was_replaced)
 
     async def restore_pending_quick_response_expirations(self) -> None:

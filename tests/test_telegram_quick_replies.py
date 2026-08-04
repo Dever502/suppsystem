@@ -22,6 +22,7 @@ from suppsystem.quick_replies import (
 )
 from suppsystem.telegram_quick_replies import (
     QUICK_RESPONSE_INSTRUCTION_TEXT,
+    QUICK_RESPONSE_SAVED_TEXT,
     QUICK_RESPONSE_WARNING_TEXT,
     QuickResponseTopicRefreshWorker,
     TelegramQuickReplyHandlers,
@@ -70,7 +71,7 @@ def _message(
     text: str,
     message_id: int = 301,
     topic_id: int = 777,
-    warning_message_id: int = 901,
+    status_message_id: int = 901,
 ) -> AsyncMock:
     message = AsyncMock(spec=Message)
     message.message_id = message_id
@@ -84,13 +85,12 @@ def _message(
     )
     message.text = text
     message.entities = _hashtags(text)
-    message.reply = AsyncMock(return_value=SimpleNamespace(message_id=warning_message_id))
+    message.reply = AsyncMock(return_value=SimpleNamespace(message_id=status_message_id))
     return message
 
 
 def _bot() -> SimpleNamespace:
     return SimpleNamespace(
-        set_message_reaction=AsyncMock(),
         delete_message=AsyncMock(),
         send_message=AsyncMock(return_value=SimpleNamespace(message_id=501)),
         edit_message_text=AsyncMock(),
@@ -111,7 +111,7 @@ def _harness(service: QuickReplyService, bot: SimpleNamespace) -> QuickReplyHarn
     return harness
 
 
-async def test_valid_quick_response_is_saved_unchanged_and_reacted(
+async def test_valid_quick_response_is_saved_unchanged(
     tmp_path: Path,
 ) -> None:
     database = Database(f"sqlite+aiosqlite:///{tmp_path}/valid-quick-response.db")
@@ -133,9 +133,8 @@ async def test_valid_quick_response_is_saved_unchanged_and_reacted(
         assert saved.state == QUICK_RESPONSE_VALID
         assert saved.text == message.text
         assert saved.tags == ("#TikTok", "#Android", "#VPN", "#Инструкция")
-        message.reply.assert_not_awaited()
-        reaction = bot.set_message_reaction.await_args.kwargs["reaction"]
-        assert [item.emoji for item in reaction] == ["✅"]
+        assert saved.status_message_id == 901
+        message.reply.assert_awaited_once_with(QUICK_RESPONSE_SAVED_TEXT, parse_mode=None)
     finally:
         await harness.shutdown_quick_reply_runtime()
         await database.dispose()
@@ -161,7 +160,7 @@ async def test_invalid_response_gets_exact_warning_and_edit_makes_it_valid(
         )
         assert pending is not None
         assert pending.state == QUICK_RESPONSE_PENDING_DELETION
-        assert pending.warning_message_id == 901
+        assert pending.status_message_id == 901
         message.reply.assert_awaited_once_with(
             QUICK_RESPONSE_WARNING_TEXT,
             parse_mode=None,
@@ -177,9 +176,14 @@ async def test_invalid_response_gets_exact_warning_and_edit_makes_it_valid(
         )
         assert corrected is not None
         assert corrected.state == QUICK_RESPONSE_VALID
-        assert corrected.warning_message_id is None
-        bot.delete_message.assert_awaited_with(chat_id=-100123, message_id=901)
-        assert bot.set_message_reaction.await_args.kwargs["reaction"][0].emoji == "✅"
+        assert corrected.status_message_id == 901
+        bot.edit_message_text.assert_awaited_with(
+            chat_id=-100123,
+            message_id=901,
+            text=QUICK_RESPONSE_SAVED_TEXT,
+            parse_mode=None,
+        )
+        assert message.reply.await_count == 1
     finally:
         await harness.shutdown_quick_reply_runtime()
         await database.dispose()
@@ -305,6 +309,7 @@ async def test_deleted_topic_is_recreated_and_valid_responses_are_restored(
             side_effect=[
                 SimpleNamespace(message_id=501),
                 SimpleNamespace(message_id=502),
+                SimpleNamespace(message_id=503),
             ]
         )
         harness = _harness(service, bot)
@@ -318,8 +323,10 @@ async def test_deleted_topic_is_recreated_and_valid_responses_are_restored(
         assert [item.kwargs["message_thread_id"] for item in bot.send_message.await_args_list] == [
             888,
             888,
+            888,
         ]
         assert bot.send_message.await_args_list[1].kwargs["text"] == "Сохранённый ответ #VPN"
+        assert bot.send_message.await_args_list[2].kwargs["text"] == QUICK_RESPONSE_SAVED_TEXT
         restored = await service.get_by_source(
             source_chat_id=-100123,
             source_message_id=401,
@@ -327,6 +334,7 @@ async def test_deleted_topic_is_recreated_and_valid_responses_are_restored(
         assert restored is not None
         assert restored.id == saved.id
         assert restored.published_message_id == 502
+        assert restored.status_message_id == 503
         assert await service.instruction_message_id(-100123) == 501
     finally:
         await harness.shutdown_quick_reply_runtime()
@@ -356,6 +364,7 @@ async def test_topic_recovered_before_adapter_start_restores_responses(
             side_effect=[
                 SimpleNamespace(message_id=501),
                 SimpleNamespace(message_id=502),
+                SimpleNamespace(message_id=503),
             ]
         )
         harness = _harness(service, bot)
@@ -367,10 +376,12 @@ async def test_topic_recovered_before_adapter_start_restores_responses(
         assert [item.kwargs["message_thread_id"] for item in bot.send_message.await_args_list] == [
             888,
             888,
+            888,
         ]
         assert bot.send_message.await_args_list[1].kwargs["text"] == (
             "Ответ переживёт рестарт #VPN"
         )
+        assert bot.send_message.await_args_list[2].kwargs["text"] == QUICK_RESPONSE_SAVED_TEXT
         assert await service.instruction_topic_id(-100123) == 888
     finally:
         await harness.shutdown_quick_reply_runtime()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 
@@ -29,6 +30,7 @@ def _dashboard_message_missing(error: TelegramBadRequest) -> bool:
 
 STATISTICS_CALLBACK_PREFIX = "suppsystem_stats"
 PERIOD_LABELS = {"today": "Сегодня", "7d": "7 дней", "30d": "30 дней"}
+STATISTICS_REFRESH_INTERVAL_SECONDS = 60.0
 
 
 def statistics_keyboard(period: str) -> InlineKeyboardMarkup:
@@ -48,12 +50,6 @@ def statistics_keyboard(period: str) -> InlineKeyboardMarkup:
                 )
             ],
             [button("today"), button("7d"), button("30d")],
-            [
-                InlineKeyboardButton(
-                    text="🔄 Обновить",
-                    callback_data=f"{STATISTICS_CALLBACK_PREFIX}:refresh:{period}",
-                )
-            ],
         ]
     )
 
@@ -160,3 +156,31 @@ class TelegramStatisticsDashboard:
             message_id=state.message_id,
         )
         await callback.answer("Статистика обновлена.", show_alert=False)
+
+
+class StatisticsDashboardRefreshWorker:
+    def __init__(
+        self,
+        dashboard: TelegramStatisticsDashboard,
+        *,
+        interval_seconds: float = STATISTICS_REFRESH_INTERVAL_SECONDS,
+    ) -> None:
+        self.dashboard = dashboard
+        self.interval_seconds = interval_seconds
+        self._stopping = asyncio.Event()
+
+    def stop(self) -> None:
+        self._stopping.set()
+
+    async def run(self) -> None:
+        while not self._stopping.is_set():
+            try:
+                await asyncio.wait_for(self._stopping.wait(), timeout=self.interval_seconds)
+            except TimeoutError:
+                try:
+                    await self.dashboard.ensure_statistics_dashboard()
+                except Exception:
+                    logger.exception(
+                        "Unable to refresh statistics dashboard",
+                        extra={"event": "statistics_dashboard_refresh_failed"},
+                    )

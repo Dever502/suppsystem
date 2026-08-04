@@ -39,6 +39,7 @@ from suppsystem.telegram_adapter import TelegramSupportAdapter
 from suppsystem.telegram_ingress import DurableTelegramIngressMiddleware, TelegramIngressWorker
 from suppsystem.telegram_lifecycle import create_polling_task
 from suppsystem.telegram_limits import TelegramRateLimiter
+from suppsystem.telegram_statistics import StatisticsDashboardRefreshWorker
 from suppsystem.telegram_system_topics import TelegramSystemTopicService
 from suppsystem.trace import TraceMiddleware
 from suppsystem.user_message_limits import UserMessageRateLimiter
@@ -256,6 +257,7 @@ async def run() -> None:
     dispatcher.include_router(adapter.router)
     await adapter.recover_waiting_topics_after_restart()
     await adapter.ensure_statistics_dashboard()
+    statistics_worker = StatisticsDashboardRefreshWorker(adapter)
 
     if settings.api_enabled or settings.web_api_enabled:
         api_server = ApiServer(
@@ -311,6 +313,9 @@ async def run() -> None:
     )
     worker_task = asyncio.create_task(delivery_worker.run(), name="delivery-worker")
     heartbeat_task = asyncio.create_task(heartbeat.run(), name="heartbeat")
+    statistics_worker_task = asyncio.create_task(
+        statistics_worker.run(), name="statistics-dashboard-refresh-worker"
+    )
     api_task = api_server.start() if api_server is not None else None
     polling_task = create_polling_task(
         dispatcher,
@@ -332,6 +337,7 @@ async def run() -> None:
                 reconciliation_worker_task,
                 worker_task,
                 heartbeat_task,
+                statistics_worker_task,
                 *((notification_worker_task,) if notification_worker_task is not None else ()),
             ),
             stop_workers=(
@@ -339,6 +345,7 @@ async def run() -> None:
                 reconciliation_worker.stop,
                 delivery_worker.stop,
                 heartbeat.stop,
+                statistics_worker.stop,
                 *((notification_worker.stop,) if notification_worker is not None else ()),
             ),
             close_resources=(bot.session.close, http_client.aclose, database.dispose),

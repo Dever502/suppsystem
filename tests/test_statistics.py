@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from suppsystem.models import Direction, Ticket, TicketChannel, TicketMessage, T
 from suppsystem.statistics import StatisticsService, period_start
 from suppsystem.telegram_limits import TelegramRateLimiter
 from suppsystem.telegram_statistics import (
+    StatisticsDashboardRefreshWorker,
     TelegramStatisticsDashboard,
     statistics_keyboard,
     statistics_text,
@@ -134,8 +136,27 @@ async def test_statistics_are_channel_aware_and_exclude_ratings_from_inbound(
         keyboard = statistics_keyboard("today")
         assert keyboard.inline_keyboard[0][0].text == "📊 Статистика"
         assert keyboard.inline_keyboard[1][0].text.startswith("Сегодня")
+        assert len(keyboard.inline_keyboard) == 2
+        assert all(
+            button.text != "🔄 Обновить" for row in keyboard.inline_keyboard for button in row
+        )
     finally:
         await database.dispose()
+
+
+async def test_statistics_dashboard_refresh_worker_updates_and_stops() -> None:
+    refreshed = asyncio.Event()
+
+    async def ensure_dashboard() -> None:
+        refreshed.set()
+
+    dashboard = SimpleNamespace(ensure_statistics_dashboard=ensure_dashboard)
+    worker = StatisticsDashboardRefreshWorker(dashboard, interval_seconds=0.01)  # type: ignore[arg-type]
+    task = asyncio.create_task(worker.run())
+
+    await asyncio.wait_for(refreshed.wait(), timeout=1)
+    worker.stop()
+    await asyncio.wait_for(task, timeout=1)
 
 
 def test_statistics_periods_use_moscow_calendar_boundaries() -> None:

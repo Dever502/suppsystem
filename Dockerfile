@@ -8,6 +8,7 @@ ARG VCS_REF=unknown
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
+    UV_NO_CACHE=1 \
     UV_LINK_MODE=copy \
     PATH="/app/.venv/bin:$PATH" \
     DATA_DIR=/app/data

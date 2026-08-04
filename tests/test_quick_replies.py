@@ -1,180 +1,167 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-
-import pytest
 
 from suppsystem.database import Database
 from suppsystem.quick_replies import (
-    QuickReplyGroupNameConflictError,
-    QuickReplyGroupNotFoundError,
+    QUICK_RESPONSE_PENDING_DELETION,
+    QUICK_RESPONSE_VALID,
     QuickReplyService,
-    QuickReplyTitleConflictError,
 )
+from suppsystem.web_models import SystemSetting
 
 
-async def _create_group(
-    service: QuickReplyService,
-    *,
-    name: str,
-    source_message_id: int,
-):
-    return await service.create_group(
-        name=name,
-        operator_telegram_id=7,
-        operator_display_name="Operator",
-        operator_username="operator",
-        source_chat_id=-100123,
-        source_message_id=source_message_id,
-    )
+def _operator_fields() -> dict[str, object]:
+    return {
+        "operator_telegram_id": 7,
+        "operator_display_name": "Operator",
+        "operator_username": "operator",
+        "source_chat_id": -100123,
+    }
 
 
-async def test_quick_reply_groups_are_shared_normalized_and_idempotent(
+async def test_quick_response_is_created_and_updated_by_source_message(
     tmp_path: Path,
 ) -> None:
-    database = Database(f"sqlite+aiosqlite:///{tmp_path}/quick-reply-groups.db")
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/quick-responses.db")
     await database.create_schema_for_tests()
     try:
         service = QuickReplyService(database)
-        created = await _create_group(
-            service,
-            name="  НЕ   РАБОТАЕТ AI  ",
-            source_message_id=101,
+        created = await service.save_valid(
+            text="Переустановите TikTok #TikTok",
+            tags=["#TikTok"],
+            source_message_id=301,
+            **_operator_fields(),  # type: ignore[arg-type]
         )
 
-        assert created.created is True
-        assert created.group.name == "НЕ РАБОТАЕТ AI"
+        assert created.state == QUICK_RESPONSE_VALID
+        assert created.tags == ("#TikTok",)
+        assert created.published_message_id == 301
 
-        duplicate = await _create_group(
-            service,
-            name="Другое название",
-            source_message_id=101,
+        updated = await service.save_valid(
+            text="Обновите TikTok #TikTok #Android",
+            tags=["#TikTok", "#Android"],
+            source_message_id=301,
+            **_operator_fields(),  # type: ignore[arg-type]
         )
-        assert duplicate.created is False
-        assert duplicate.group.id == created.group.id
 
-        with pytest.raises(QuickReplyGroupNameConflictError):
-            await _create_group(
-                service,
-                name=" не работает ai ",
-                source_message_id=102,
-            )
-
-        second = await _create_group(
-            service,
-            name="Оплата",
-            source_message_id=103,
-        )
-        groups, total = await service.list_groups(offset=1, limit=1)
-        assert total == 2
-        assert [group.id for group in groups] == [second.group.id]
-
-        fetched = await service.get_active_group_by_name("  не РАБОТАЕТ   ai ")
-        assert fetched is not None
-        assert fetched.id == created.group.id
-
-        assert await service.mark_group_published(created.group.id, 901) is True
-        assert await service.mark_group_published(created.group.id, 902) is False
-        published = await service.get_active_group(created.group.id)
-        assert published is not None
-        assert published.published_message_id == 901
+        assert updated.id == created.id
+        assert updated.text == "Обновите TikTok #TikTok #Android"
+        assert updated.tags == ("#TikTok", "#Android")
+        assert [item.id for item in await service.list_valid()] == [created.id]
     finally:
         await database.dispose()
 
 
-async def test_quick_replies_are_scoped_to_groups_and_published_once(
+async def test_pending_response_preserves_deadline_and_can_become_valid(
     tmp_path: Path,
 ) -> None:
-    database = Database(f"sqlite+aiosqlite:///{tmp_path}/quick-replies.db")
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/pending-response.db")
     await database.create_schema_for_tests()
     try:
         service = QuickReplyService(database)
-        ai_group = (await _create_group(service, name="AI", source_message_id=201)).group
-        billing_group = (await _create_group(service, name="Оплата", source_message_id=202)).group
-
-        first = await service.create(
-            group_id=ai_group.id,
-            title="  AI   не отвечает  ",
-            text="  Перезапустите приложение.  ",
-            operator_telegram_id=7,
-            operator_display_name="Operator",
-            operator_username="operator",
-            source_chat_id=-100123,
-            source_message_id=301,
+        deadline = datetime.now(UTC) + timedelta(minutes=5)
+        pending = await service.save_pending_deletion(
+            text="Текст #1 #2 #3 #4 #5",
+            tags=["#1", "#2", "#3", "#4", "#5"],
+            source_message_id=302,
+            invalid_until=deadline,
+            **_operator_fields(),  # type: ignore[arg-type]
         )
-        assert first.created is True
-        assert first.reply.group_id == ai_group.id
-        assert first.reply.title == "AI не отвечает"
-        assert first.reply.text == "Перезапустите приложение."
+        assert pending.state == QUICK_RESPONSE_PENDING_DELETION
+        assert pending.invalid_until == deadline
+        assert await service.attach_warning(pending.id, 900) is True
 
-        duplicate = await service.create(
-            group_id=billing_group.id,
-            title="Другое название",
-            text="Другой текст",
-            operator_telegram_id=8,
-            operator_display_name=None,
-            operator_username=None,
-            source_chat_id=-100123,
-            source_message_id=301,
+        corrected = await service.save_valid(
+            text="Текст #1 #2",
+            tags=["#1", "#2"],
+            source_message_id=302,
+            **_operator_fields(),  # type: ignore[arg-type]
         )
-        assert duplicate.created is False
-        assert duplicate.reply.id == first.reply.id
-
-        with pytest.raises(QuickReplyTitleConflictError):
-            await service.create(
-                group_id=ai_group.id,
-                title=" ai НЕ отвечает ",
-                text="Конфликтующий текст",
-                operator_telegram_id=8,
-                operator_display_name=None,
-                operator_username=None,
-                source_chat_id=-100123,
-                source_message_id=302,
+        assert corrected.id == pending.id
+        assert corrected.state == QUICK_RESPONSE_VALID
+        assert corrected.invalid_until is None
+        assert corrected.warning_message_id == 900
+        assert await service.clear_warning(corrected.id, 900) is True
+        assert (
+            await service.delete_if_still_pending(
+                pending.id,
+                invalid_until=deadline,
             )
+            is None
+        )
+    finally:
+        await database.dispose()
 
-        same_title_other_group = await service.create(
-            group_id=billing_group.id,
-            title="AI не отвечает",
-            text="Ответ для оплаты",
-            operator_telegram_id=8,
-            operator_display_name=None,
-            operator_username=None,
-            source_chat_id=-100123,
+
+async def test_pending_response_is_deleted_only_for_matching_deadline(
+    tmp_path: Path,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/pending-delete.db")
+    await database.create_schema_for_tests()
+    try:
+        service = QuickReplyService(database)
+        deadline = datetime.now(UTC) + timedelta(minutes=5)
+        pending = await service.save_pending_deletion(
+            text="Текст #1 #2 #3 #4 #5",
+            tags=["#1", "#2", "#3", "#4", "#5"],
             source_message_id=303,
+            invalid_until=deadline,
+            **_operator_fields(),  # type: ignore[arg-type]
         )
-        assert same_title_other_group.created is True
 
-        with pytest.raises(QuickReplyGroupNotFoundError):
-            await service.create(
-                group_id=9999,
-                title="Не сохранится",
-                text="Нет группы",
-                operator_telegram_id=7,
-                operator_display_name=None,
-                operator_username=None,
-                source_chat_id=-100123,
-                source_message_id=304,
+        assert (
+            await service.delete_if_still_pending(
+                pending.id,
+                invalid_until=deadline + timedelta(seconds=1),
             )
-
-        ai_replies, ai_total = await service.list_active(
-            group_id=ai_group.id,
-            offset=0,
-            limit=10,
+            is None
         )
-        billing_replies, billing_total = await service.list_active(
-            group_id=billing_group.id,
-            offset=0,
-            limit=10,
+        deleted = await service.delete_if_still_pending(
+            pending.id,
+            invalid_until=deadline,
         )
-        assert ai_total == 1
-        assert [reply.id for reply in ai_replies] == [first.reply.id]
-        assert billing_total == 1
-        assert [reply.id for reply in billing_replies] == [same_title_other_group.reply.id]
+        assert deleted is not None
+        assert (
+            await service.get_by_source(
+                source_chat_id=-100123,
+                source_message_id=303,
+            )
+            is None
+        )
+    finally:
+        await database.dispose()
 
-        assert await service.mark_published(first.reply.id, 911) is True
-        assert await service.mark_published(first.reply.id, 912) is False
-        published = await service.get_active(first.reply.id)
-        assert published is not None
-        assert published.published_message_id == 911
+
+async def test_instruction_and_legacy_cleanup_state_is_durable(tmp_path: Path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/quick-response-settings.db")
+    await database.create_schema_for_tests()
+    try:
+        service = QuickReplyService(database)
+        async with database.session() as session:
+            session.add(
+                SystemSetting(
+                    key="telegram_quick_reply_menu:-100123",
+                    value="800",
+                )
+            )
+            session.add(
+                SystemSetting(
+                    key="telegram_quick_reply_legacy:0",
+                    value="801",
+                )
+            )
+            await session.commit()
+
+        assert await service.legacy_message_ids(-100123) == [800, 801]
+        await service.save_instruction_message_id(-100123, 900, 777)
+        assert await service.instruction_message_id(-100123) == 900
+        assert await service.instruction_topic_id(-100123) == 777
+
+        await service.finish_legacy_cleanup(-100123)
+        assert await service.legacy_message_ids(-100123) == []
+        assert await service.instruction_message_id(-100123) == 900
+        assert await service.instruction_topic_id(-100123) == 777
     finally:
         await database.dispose()

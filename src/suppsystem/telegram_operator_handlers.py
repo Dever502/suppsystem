@@ -46,6 +46,17 @@ class TelegramOperatorHandlers(
     panel_commands: TelegramPanelCommandHandler
     media_storage: LocalMediaStorage
 
+    async def handle_edited_group_message(self, message: Message) -> None:
+        actor = message.from_user
+        if (
+            actor is None
+            or actor.is_bot
+            or message.message_thread_id is None
+            or not self.authorization.is_admin(actor.id)
+        ):
+            return
+        await self.handle_quick_reply_topic_message(message)
+
     async def _delete_operator_media_if_unlinked(self, stored_media: StoredMedia) -> None:
         try:
             await self.ticket_service.get_media(stored_media.id)
@@ -67,11 +78,16 @@ class TelegramOperatorHandlers(
             return False
         actor = message.from_user
         new_name = topic_edit.name
+        quick_response_topic_id = getattr(self, "quick_replies_topic_id", None)
+        quick_response_topic = (
+            quick_response_topic_id is not None
+            and message.message_thread_id == quick_response_topic_id
+        )
         if (
             actor is None
             or actor.id != self.bot.id
             or new_name is None
-            or not new_name.startswith(("🔴 ", "🟢 "))
+            or (not new_name.startswith(("🔴 ", "🟢 ")) and not quick_response_topic)
         ):
             return True
         try:

@@ -41,7 +41,7 @@ from suppsystem.telegram_adapter import TelegramSupportAdapter
 from suppsystem.telegram_ingress import DurableTelegramIngressMiddleware, TelegramIngressWorker
 from suppsystem.telegram_lifecycle import create_polling_task
 from suppsystem.telegram_limits import TelegramRateLimiter
-from suppsystem.telegram_quick_replies import QuickReplyMenuRefreshWorker
+from suppsystem.telegram_quick_replies import QuickResponseTopicRefreshWorker
 from suppsystem.telegram_statistics import StatisticsDashboardRefreshWorker
 from suppsystem.telegram_system_topics import (
     QUICK_REPLIES_TOPIC,
@@ -117,7 +117,7 @@ async def validate_support_group(bot: Bot, support_group_id: int) -> None:
     is_forum = getattr(chat, "is_forum", None)
     member_status = _telegram_value(getattr(member, "status", "unknown"))
     can_manage_topics = getattr(member, "can_manage_topics", None)
-    supports_inline_queries = getattr(bot_user, "supports_inline_queries", None)
+    can_delete_messages = getattr(member, "can_delete_messages", None)
     errors: list[str] = []
 
     if chat_type != "supergroup":
@@ -128,6 +128,8 @@ async def validate_support_group(bot: Bot, support_group_id: int) -> None:
         errors.append("suppsystem bot must be an administrator in SUPPORT_GROUP_ID")
     if member_status == "administrator" and can_manage_topics is not True:
         errors.append("suppsystem bot must have permission to manage topics")
+    if member_status == "administrator" and can_delete_messages is not True:
+        errors.append("suppsystem bot must have permission to delete messages")
 
     extra: dict[str, object] = {
         "event": "support_group_preflight",
@@ -137,9 +139,9 @@ async def validate_support_group(bot: Bot, support_group_id: int) -> None:
         "chat_title": getattr(chat, "title", None),
         "is_forum": is_forum,
         "bot_id": bot_user.id,
-        "supports_inline_queries": supports_inline_queries,
         "member_status": member_status,
         "can_manage_topics": can_manage_topics,
+        "can_delete_messages": can_delete_messages,
     }
     if errors:
         logger.error(
@@ -147,12 +149,6 @@ async def validate_support_group(bot: Bot, support_group_id: int) -> None:
             extra={**extra, "preflight_errors": errors},
         )
         raise RuntimeError("Invalid Telegram support group configuration: " + "; ".join(errors))
-
-    if supports_inline_queries is not True:
-        logger.warning(
-            "Telegram Inline Mode is disabled; quick reply group buttons will not work",
-            extra={**extra, "event": "telegram_inline_mode_disabled"},
-        )
 
     logger.info("Configured support group passed preflight checks", extra=extra)
 
@@ -248,6 +244,10 @@ async def run() -> None:
         limiter=limiter,
     )
     quick_replies_topic_id = await system_topics.ensure(QUICK_REPLIES_TOPIC)
+    quick_replies_topic_id = await system_topics.reconcile_name(
+        QUICK_REPLIES_TOPIC,
+        quick_replies_topic_id,
+    )
     quick_reply_service = QuickReplyService(database)
     dispatcher = Dispatcher()
     ingress_worker = TelegramIngressWorker(
@@ -275,9 +275,10 @@ async def run() -> None:
     adapter.recover_quick_replies_topic = partial(system_topics.recover, QUICK_REPLIES_TOPIC)
     dispatcher.include_router(adapter.router)
     await adapter.recover_waiting_topics_after_restart()
-    await adapter.ensure_quick_reply_menu()
+    await adapter.ensure_quick_response_topic()
+    await adapter.restore_pending_quick_response_expirations()
     await adapter.ensure_statistics_dashboard()
-    quick_reply_menu_worker = QuickReplyMenuRefreshWorker(adapter)
+    quick_response_topic_worker = QuickResponseTopicRefreshWorker(adapter)
     statistics_worker = StatisticsDashboardRefreshWorker(adapter)
 
     if settings.api_enabled or settings.web_api_enabled:
@@ -337,8 +338,8 @@ async def run() -> None:
     statistics_worker_task = asyncio.create_task(
         statistics_worker.run(), name="statistics-dashboard-refresh-worker"
     )
-    quick_reply_menu_worker_task = asyncio.create_task(
-        quick_reply_menu_worker.run(), name="quick-reply-menu-refresh-worker"
+    quick_response_topic_worker_task = asyncio.create_task(
+        quick_response_topic_worker.run(), name="quick-response-topic-refresh-worker"
     )
     api_task = api_server.start() if api_server is not None else None
     polling_task = create_polling_task(
@@ -362,7 +363,7 @@ async def run() -> None:
                 worker_task,
                 heartbeat_task,
                 statistics_worker_task,
-                quick_reply_menu_worker_task,
+                quick_response_topic_worker_task,
                 *((notification_worker_task,) if notification_worker_task is not None else ()),
             ),
             stop_workers=(
@@ -371,11 +372,11 @@ async def run() -> None:
                 delivery_worker.stop,
                 heartbeat.stop,
                 statistics_worker.stop,
-                quick_reply_menu_worker.stop,
+                quick_response_topic_worker.stop,
                 *((notification_worker.stop,) if notification_worker is not None else ()),
             ),
             close_resources=(
-                adapter.shutdown_quick_reply_sessions,
+                adapter.shutdown_quick_reply_runtime,
                 bot.session.close,
                 http_client.aclose,
                 database.dispose,

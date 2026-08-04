@@ -88,6 +88,27 @@ def _message_update(
     )
 
 
+def _edited_message_update(
+    *,
+    update_id: int,
+    chat_id: int,
+    user_id: int,
+    text: str,
+    message_thread_id: int,
+) -> Update:
+    return Update(
+        update_id=update_id,
+        edited_message=Message(
+            message_id=update_id,
+            date=datetime.now(UTC),
+            chat=Chat(id=chat_id, type=ChatType.SUPERGROUP),
+            from_user=User(id=user_id, is_bot=False, first_name="Router Test"),
+            text=text,
+            message_thread_id=message_thread_id,
+        ),
+    )
+
+
 async def test_router_registers_and_routes_private_and_authorized_group_boundaries() -> None:
     session = RecordingSession()
     bot = Bot(token=f"123456:{'A' * 35}", session=session)
@@ -107,8 +128,9 @@ async def test_router_registers_and_routes_private_and_authorized_group_boundari
     dispatcher.include_router(adapter.router)
 
     assert len(adapter.router.message.handlers) == 3
-    assert len(adapter.router.callback_query.handlers) == 3
-    assert len(adapter.router.inline_query.handlers) == 1
+    assert len(adapter.router.edited_message.handlers) == 1
+    assert len(adapter.router.callback_query.handlers) == 2
+    assert len(adapter.router.inline_query.handlers) == 0
 
     await dispatcher.feed_update(
         bot,
@@ -149,6 +171,19 @@ async def test_router_registers_and_routes_private_and_authorized_group_boundari
             chat_type=ChatType.SUPERGROUP,
             user_id=3,
             text="Сообщение в чужой группе",
+            message_thread_id=777,
+        ),
+    )
+
+    assert session.requests == []
+
+    await dispatcher.feed_update(
+        bot,
+        _edited_message_update(
+            update_id=4,
+            chat_id=settings.support_group_id,
+            user_id=2,
+            text="Изменённый ответ в клиентской теме",
             message_thread_id=777,
         ),
     )

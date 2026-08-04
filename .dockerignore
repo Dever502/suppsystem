@@ -5,6 +5,7 @@
 .mypy_cache
 .pytest_cache
 .ruff_cache
+.trivy-cache
 .uv-cache
 .venv
 .docker

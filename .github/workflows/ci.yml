@@ -12,16 +12,20 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
 env:
   PYTHON_VERSION: "3.12"
   UV_VERSION: "0.11.27"
   IMAGE_NAME: ghcr.io/dever502/suppsystem
 
 jobs:
-  verify:
-    name: Verify
+  quality:
+    name: Static quality and policy checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - name: Check out source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -29,12 +33,48 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - name: Install uv
-        run: python -m pip install "uv==$UV_VERSION"
+      - name: Install uv and restore dependency cache
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
       - name: Install dependencies
         run: uv sync --frozen --all-groups
-      - name: Run verification suite
-        run: sh scripts/verify.sh
+      - name: Run static quality and policy checks
+        env:
+          UV_NO_SYNC: "1"
+        run: sh scripts/check_quality.sh
+
+  tests:
+    name: Tests and coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTEST_WORKERS: "4"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install uv and restore dependency cache
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+      - name: Install dependencies
+        run: uv sync --frozen --all-groups
+      - name: Run tests with coverage
+        env:
+          UV_NO_SYNC: "1"
+        run: sh scripts/test_unit.sh
 
   postgres_matrix:
     name: PostgreSQL 16 matrix
@@ -64,18 +104,27 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - name: Install uv
-        run: python -m pip install "uv==$UV_VERSION"
+      - name: Install uv and restore dependency cache
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
       - name: Install dependencies
         run: uv sync --frozen --all-groups
       - name: Run PostgreSQL tests
+        env:
+          UV_NO_SYNC: "1"
         run: sh scripts/test_postgres.sh
 
   build_image:
     name: Build, scan, and publish image
     if: github.event_name == 'push'
     needs:
-      - verify
+      - quality
+      - tests
       - postgres_matrix
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -126,6 +175,8 @@ jobs:
           provenance: false
           push: false
           tags: ${{ steps.metadata.outputs.tags }}
+          cache-from: type=gha,scope=suppsystem-image
+          cache-to: type=gha,mode=max,scope=suppsystem-image
       - name: Export candidate for socketless scanners
         env:
           IMAGE_TAG: ${{ steps.metadata.outputs.image_tag }}
@@ -133,6 +184,20 @@ jobs:
           set -euo pipefail
           docker image save --output suppsystem-image.tar "$IMAGE_TAG"
           chmod 0644 suppsystem-image.tar
+      - name: Prepare Trivy database cache key
+        id: trivy_cache_key
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .trivy-cache/db
+          printf 'date=%s\n' "$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+      - name: Restore Trivy vulnerability database cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: .trivy-cache/db
+          key: trivy-db-${{ runner.os }}-v0.70.0-${{ steps.trivy_cache_key.outputs.date }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-v0.70.0-
       - name: Smoke-test candidate image
         env:
           IMAGE_TAG: ${{ steps.metadata.outputs.image_tag }}
@@ -149,27 +214,45 @@ jobs:
               python -c "from hashlib import sha256; from pathlib import Path; assert sha256(Path(\"/app/LICENSE\").read_bytes()).hexdigest() == \"d81f7122bd70d76feebbd3634701488586b0bcc21b8bd90e1e1edf0acc4e8be7\""
               python -m suppsystem.migrations
               python -c "import sqlite3; from alembic.config import Config; from alembic.script import ScriptDirectory; current = sqlite3.connect(\"/tmp/suppsystem-smoke.db\").execute(\"SELECT version_num FROM alembic_version\").fetchone()[0]; assert [current] == ScriptDirectory.from_config(Config(\"/app/alembic.ini\")).get_heads()"'
-      - name: Create Trivy report
+      - name: Create Trivy report and CycloneDX SBOM in parallel
+        shell: bash
         run: |
+          set -uo pipefail
+          trivy_status=0
+          syft_status=0
+          runner_uid=$(id -u)
+          runner_gid=$(id -g)
+
           docker run --rm \
-            --volume "$PWD:/work" \
+            --user "$runner_uid:$runner_gid" \
+            --env HOME=/tmp \
+            --security-opt no-new-privileges \
+            --volume "$PWD:/work:ro" \
+            --volume "$PWD/.trivy-cache:/cache" \
             --workdir /work \
             aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e \
-            image --input suppsystem-image.tar --format json --output trivy.json
-      - name: Create CycloneDX SBOM
-        run: |
+            --cache-dir /cache image --input suppsystem-image.tar --format json > trivy.json &
+          trivy_pid=$!
+
           docker run --rm \
+            --user "$runner_uid:$runner_gid" \
+            --env HOME=/tmp \
+            --security-opt no-new-privileges \
             --volume "$PWD:/work:ro" \
             --workdir /work \
             anchore/syft:v1.44.0-debug@sha256:6dd8fb28e1b799e7cadaff6be2ec6d555757c4eeec0c0e48162f20b042ffa1ff \
-            "docker-archive:/work/suppsystem-image.tar" -o cyclonedx-json > sbom.cdx.json
+            "docker-archive:/work/suppsystem-image.tar" -o cyclonedx-json > sbom.cdx.json &
+          syft_pid=$!
+
+          wait "$trivy_pid" || trivy_status=$?
+          wait "$syft_pid" || syft_status=$?
+          if (( trivy_status != 0 || syft_status != 0 )); then
+            printf 'Security report generation failed: trivy=%s syft=%s\n' \
+              "$trivy_status" "$syft_status" >&2
+            exit 1
+          fi
       - name: Enforce HIGH and CRITICAL vulnerability gate
-        run: |
-          docker run --rm \
-            --volume "$PWD:/work:ro" \
-            --workdir /work \
-            aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e \
-            image --input suppsystem-image.tar --exit-code 1 --severity HIGH,CRITICAL
+        run: python3 scripts/check_trivy_report.py trivy.json
       - name: Publish verified image
         id: publish
         shell: bash

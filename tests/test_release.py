@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -18,8 +19,8 @@ def test_ci_keeps_verification_socketless_and_excludes_private_cd() -> None:
     ci, text = _ci()
 
     jobs = ci["jobs"]
-    assert {"verify", "postgres_matrix", "build_image"} <= jobs.keys()
-    assert jobs["build_image"]["needs"] == ["verify", "postgres_matrix"]
+    assert {"quality", "tests", "postgres_matrix", "build_image"} <= jobs.keys()
+    assert jobs["build_image"]["needs"] == ["quality", "tests", "postgres_matrix"]
     assert jobs["build_image"]["if"] == "github.event_name == 'push'"
     assert jobs["build_image"]["permissions"] == {
         "attestations": "write",
@@ -31,6 +32,17 @@ def test_ci_keeps_verification_socketless_and_excludes_private_cd() -> None:
     assert "self-hosted" not in text
     assert "scripts/deploy.sh" not in text
     assert ".gitlab-ci.yml" not in text
+    assert "cancel-in-progress" in ci["concurrency"]
+    assert "python -m pip install" not in text
+    assert text.count("astral-sh/setup-uv@") == 3
+    assert ci["jobs"]["tests"]["env"]["PYTEST_WORKERS"] == "4"
+    for job_name in ("quality", "tests", "postgres_matrix"):
+        command_step = next(
+            step
+            for step in ci["jobs"][job_name]["steps"]
+            if step.get("run", "").startswith("sh scripts/")
+        )
+        assert command_step["env"]["UV_NO_SYNC"] == "1"
     action_references = [
         line.split("@", 1)[1].split()[0]
         for line in text.splitlines()
@@ -43,6 +55,7 @@ def test_ci_keeps_verification_socketless_and_excludes_private_cd() -> None:
 
 def test_ci_build_scan_sbom_and_evidence_share_one_immutable_image() -> None:
     ci, text = _ci()
+    trivy_gate = (ROOT / "scripts" / "check_trivy_report.py").read_text(encoding="utf-8")
     steps = ci["jobs"]["build_image"]["steps"]
     rendered_steps = "\n".join(str(step) for step in steps)
     step_names = [step["name"] for step in steps]
@@ -51,6 +64,8 @@ def test_ci_build_scan_sbom_and_evidence_share_one_immutable_image() -> None:
     assert "docker/build-push-action@" in build["uses"]
     assert build["with"]["load"] is True
     assert build["with"]["push"] is False
+    assert build["with"]["cache-from"] == "type=gha,scope=suppsystem-image"
+    assert build["with"]["cache-to"] == "type=gha,mode=max,scope=suppsystem-image"
     assert step_names.index("Enforce HIGH and CRITICAL vulnerability gate") < step_names.index(
         "Publish verified image"
     )
@@ -58,12 +73,30 @@ def test_ci_build_scan_sbom_and_evidence_share_one_immutable_image() -> None:
     assert "IMAGE_REFERENCE=%s" in text
     assert "suppsystem-image.tar" in text
     assert "chmod 0644 suppsystem-image.tar" in text
-    assert "HIGH,CRITICAL" in rendered_steps
     assert "--ignore-unfixed" not in text
     assert "aquasec/trivy:0.70.0@sha256:" in text
+    assert text.count("aquasec/trivy:0.70.0@sha256:") == 1
+    assert "scripts/check_trivy_report.py trivy.json" in text
+    assert 'frozenset({"HIGH", "CRITICAL"})' in trivy_gate
     assert "anchore/syft:v1.44.0-debug@sha256:" in text
     assert "docker-archive:/work/suppsystem-image.tar" in text
     assert "SYFT_REGISTRY_AUTH_PASSWORD" not in text
+    cache = next(step for step in steps if "actions/cache@" in step.get("uses", ""))
+    assert cache["with"]["path"] == ".trivy-cache/db"
+    assert "v0.70.0" in cache["with"]["key"]
+    reports = next(
+        step
+        for step in steps
+        if step["name"] == "Create Trivy report and CycloneDX SBOM in parallel"
+    )
+    assert 'wait "$trivy_pid"' in reports["run"]
+    assert 'wait "$syft_pid"' in reports["run"]
+    assert "trivy_status != 0 || syft_status != 0" in reports["run"]
+    assert reports["run"].count("--security-opt no-new-privileges") == 2
+    assert reports["run"].count('--volume "$PWD:/work:ro"') == 2
+    assert '--volume "$PWD/.trivy-cache:/cache"' in reports["run"]
+    assert "--cache-dir /cache" in reports["run"]
+    subprocess.run(["bash", "-n", "-c", reports["run"]], check=True)
     assert "suppsystem.migrations" in rendered_steps
     license_digest = sha256((ROOT / "LICENSE").read_bytes()).hexdigest()
     assert "/app/LICENSE" in text and license_digest in text
@@ -74,8 +107,10 @@ def test_ci_build_scan_sbom_and_evidence_share_one_immutable_image() -> None:
 
 def test_runtime_and_postgres_images_are_digest_pinned() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
     compose_files = ("compose.production.postgres.yaml",)
 
+    assert ".trivy-cache" in dockerignore
     assert all("@sha256:" in line for line in dockerfile.splitlines() if line.startswith("FROM "))
     assert "python:3.12.13-alpine3.24@sha256:" in dockerfile
     assert "python:3.12.13-slim-" not in dockerfile
@@ -150,8 +185,15 @@ def test_alerts_cover_recorded_remnawave_failure_outcomes() -> None:
 
 def test_verification_enforces_coverage_threshold() -> None:
     verify = (ROOT / "scripts/verify.sh").read_text(encoding="utf-8")
+    unit_tests = (ROOT / "scripts/test_unit.sh").read_text(encoding="utf-8")
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
     assert "pytest-cov" in pyproject
-    assert "--cov=suppsystem" in verify
-    assert "--cov-fail-under=" in verify
+    assert "pytest-xdist" in pyproject
+    assert "scripts/check_quality.sh" in verify
+    assert "scripts/test_unit.sh" in verify
+    assert '-n "$workers"' in unit_tests
+    assert "--dist load" in unit_tests
+    assert '-m "not postgres"' in unit_tests
+    assert "--cov=suppsystem" in unit_tests
+    assert "--cov-fail-under=" in unit_tests

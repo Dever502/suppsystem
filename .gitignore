@@ -7,6 +7,7 @@ __pycache__/
 .coverage
 .mypy_cache/
 .ruff_cache/
+.trivy-cache/
 data/
 *.db
 *.db-shm

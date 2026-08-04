@@ -1,111 +1,67 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
-from typing import cast
+from datetime import UTC, datetime
 
-from sqlalchemy import case, func, select, update
-from sqlalchemy.engine import CursorResult
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from suppsystem.database import Database, retry_sqlite_locks
-from suppsystem.models import QuickReply, QuickReplyGroup
+from suppsystem.models import QuickResponse
 from suppsystem.web_models import SystemSetting
 
-QUICK_REPLY_GROUP_NAME_MAX_LENGTH = 64
-QUICK_REPLY_TITLE_MAX_LENGTH = 64
-QUICK_REPLY_TEXT_MAX_LENGTH = 3500
-
-
-class QuickReplyGroupNameConflictError(Exception):
-    pass
-
-
-class QuickReplyGroupNotFoundError(Exception):
-    pass
-
-
-class QuickReplyTitleConflictError(Exception):
-    pass
+QUICK_RESPONSE_TEXT_MAX_LENGTH = 4096
+QUICK_RESPONSE_MAX_TAGS = 4
+QUICK_RESPONSE_VALID = "valid"
+QUICK_RESPONSE_PENDING_DELETION = "pending_deletion"
 
 
 @dataclass(frozen=True)
-class QuickReplyGroupView:
+class QuickResponseView:
     id: int
-    name: str
-    created_by_telegram_id: int
-    created_by_display_name: str | None
-    created_by_username: str | None
-    published_message_id: int | None
-    active: bool
-    created_at: datetime
-    reply_count: int = 0
-
-
-@dataclass(frozen=True)
-class QuickReplyView:
-    id: int
-    group_id: int
-    title: str
     text: str
+    tags: tuple[str, ...]
     created_by_telegram_id: int
     created_by_display_name: str | None
     created_by_username: str | None
+    source_chat_id: int
+    source_message_id: int
     published_message_id: int | None
-    active: bool
+    state: str
+    invalid_until: datetime | None
+    warning_message_id: int | None
     created_at: datetime
-
-
-@dataclass(frozen=True)
-class QuickReplyGroupCreateResult:
-    group: QuickReplyGroupView
-    created: bool
-
-
-@dataclass(frozen=True)
-class QuickReplyCreateResult:
-    reply: QuickReplyView
-    created: bool
+    updated_at: datetime
 
 
 def utf16_code_units(value: str) -> int:
     return sum(2 if ord(character) > 0xFFFF else 1 for character in value)
 
 
-def normalize_quick_reply_name(value: str) -> str:
-    return " ".join(value.split()).casefold()
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
-def normalize_quick_reply_title(title: str) -> str:
-    return normalize_quick_reply_name(title)
-
-
-def _group_view(group: QuickReplyGroup, *, reply_count: int = 0) -> QuickReplyGroupView:
-    return QuickReplyGroupView(
-        id=group.id,
-        name=group.name,
-        created_by_telegram_id=group.created_by_telegram_id,
-        created_by_display_name=group.created_by_display_name,
-        created_by_username=group.created_by_username,
-        published_message_id=group.published_message_id,
-        active=group.active,
-        created_at=group.created_at,
-        reply_count=reply_count,
-    )
-
-
-def _view(reply: QuickReply) -> QuickReplyView:
-    return QuickReplyView(
-        id=reply.id,
-        group_id=reply.group_id,
-        title=reply.title,
-        text=reply.text,
-        created_by_telegram_id=reply.created_by_telegram_id,
-        created_by_display_name=reply.created_by_display_name,
-        created_by_username=reply.created_by_username,
-        published_message_id=reply.published_message_id,
-        active=reply.active,
-        created_at=reply.created_at,
+def _view(response: QuickResponse) -> QuickResponseView:
+    return QuickResponseView(
+        id=response.id,
+        text=response.text,
+        tags=tuple(response.tags),
+        created_by_telegram_id=response.created_by_telegram_id,
+        created_by_display_name=response.created_by_display_name,
+        created_by_username=response.created_by_username,
+        source_chat_id=response.source_chat_id,
+        source_message_id=response.source_message_id,
+        published_message_id=response.published_message_id,
+        state=response.state,
+        invalid_until=_as_utc(response.invalid_until),
+        warning_message_id=response.warning_message_id,
+        created_at=response.created_at,
+        updated_at=response.updated_at,
     )
 
 
@@ -113,313 +69,245 @@ class QuickReplyService:
     def __init__(self, database: Database) -> None:
         self.database = database
 
-    @retry_sqlite_locks
-    async def create_group(
+    async def get_by_source(
         self,
         *,
-        name: str,
-        operator_telegram_id: int,
-        operator_display_name: str | None,
-        operator_username: str | None,
         source_chat_id: int,
         source_message_id: int,
-    ) -> QuickReplyGroupCreateResult:
-        clean_name = " ".join(name.split())
-        if (
-            not clean_name
-            or "|" in clean_name
-            or utf16_code_units(clean_name) > QUICK_REPLY_GROUP_NAME_MAX_LENGTH
-        ):
-            raise ValueError("invalid quick reply group name")
-        normalized_name = normalize_quick_reply_name(clean_name)
-
+    ) -> QuickResponseView | None:
         async with self.database.session() as session:
-            existing = await session.scalar(
-                select(QuickReplyGroup).where(
-                    QuickReplyGroup.source_chat_id == source_chat_id,
-                    QuickReplyGroup.source_message_id == source_message_id,
+            response = await session.scalar(
+                select(QuickResponse).where(
+                    QuickResponse.source_chat_id == source_chat_id,
+                    QuickResponse.source_message_id == source_message_id,
                 )
             )
-            if existing is not None:
-                return QuickReplyGroupCreateResult(group=_group_view(existing), created=False)
-            if await session.scalar(
-                select(QuickReplyGroup.id).where(QuickReplyGroup.normalized_name == normalized_name)
-            ):
-                raise QuickReplyGroupNameConflictError(clean_name)
-
-            group = QuickReplyGroup(
-                name=clean_name,
-                normalized_name=normalized_name,
-                created_by_telegram_id=operator_telegram_id,
-                created_by_display_name=operator_display_name,
-                created_by_username=operator_username,
-                source_chat_id=source_chat_id,
-                source_message_id=source_message_id,
-            )
-            session.add(group)
-            try:
-                await session.flush()
-                result = QuickReplyGroupCreateResult(
-                    group=_group_view(group),
-                    created=True,
-                )
-                await session.commit()
-                return result
-            except IntegrityError:
-                await session.rollback()
-                existing = await session.scalar(
-                    select(QuickReplyGroup).where(
-                        QuickReplyGroup.source_chat_id == source_chat_id,
-                        QuickReplyGroup.source_message_id == source_message_id,
-                    )
-                )
-                if existing is not None:
-                    return QuickReplyGroupCreateResult(
-                        group=_group_view(existing),
-                        created=False,
-                    )
-                if await session.scalar(
-                    select(QuickReplyGroup.id).where(
-                        QuickReplyGroup.normalized_name == normalized_name
-                    )
-                ):
-                    raise QuickReplyGroupNameConflictError(clean_name) from None
-                raise
-
-    async def list_groups(
-        self, *, offset: int, limit: int
-    ) -> tuple[list[QuickReplyGroupView], int]:
-        async with self.database.session() as session:
-            total = int(
-                await session.scalar(
-                    select(func.count())
-                    .select_from(QuickReplyGroup)
-                    .where(QuickReplyGroup.active.is_(True))
-                )
-                or 0
-            )
-            rows = list(
-                (
-                    await session.execute(
-                        select(
-                            QuickReplyGroup,
-                            func.count(QuickReply.id),
-                        )
-                        .outerjoin(
-                            QuickReply,
-                            (QuickReply.group_id == QuickReplyGroup.id)
-                            & QuickReply.active.is_(True),
-                        )
-                        .where(QuickReplyGroup.active.is_(True))
-                        .group_by(QuickReplyGroup.id)
-                        .order_by(
-                            case(
-                                (
-                                    QuickReplyGroup.normalized_name == "общее",
-                                    0,
-                                ),
-                                else_=1,
-                            ),
-                            QuickReplyGroup.normalized_name,
-                            QuickReplyGroup.id,
-                        )
-                        .offset(offset)
-                        .limit(limit)
-                    )
-                ).all()
-            )
-        return [
-            _group_view(group, reply_count=int(reply_count)) for group, reply_count in rows
-        ], total
-
-    async def get_active_group(self, group_id: int) -> QuickReplyGroupView | None:
-        async with self.database.session() as session:
-            group = await session.scalar(
-                select(QuickReplyGroup).where(
-                    QuickReplyGroup.id == group_id,
-                    QuickReplyGroup.active.is_(True),
-                )
-            )
-        return _group_view(group) if group is not None else None
-
-    async def get_active_group_by_name(self, name: str) -> QuickReplyGroupView | None:
-        normalized_name = normalize_quick_reply_name(name)
-        async with self.database.session() as session:
-            group = await session.scalar(
-                select(QuickReplyGroup).where(
-                    QuickReplyGroup.normalized_name == normalized_name,
-                    QuickReplyGroup.active.is_(True),
-                )
-            )
-        return _group_view(group) if group is not None else None
+        return _view(response) if response is not None else None
 
     @retry_sqlite_locks
-    async def create(
+    async def save_valid(
         self,
         *,
-        group_id: int,
-        title: str,
         text: str,
+        tags: list[str],
         operator_telegram_id: int,
         operator_display_name: str | None,
         operator_username: str | None,
         source_chat_id: int,
         source_message_id: int,
-    ) -> QuickReplyCreateResult:
-        clean_title = " ".join(title.split())
-        clean_text = text.strip()
-        if not clean_title or utf16_code_units(clean_title) > QUICK_REPLY_TITLE_MAX_LENGTH:
-            raise ValueError("invalid quick reply title")
-        if not clean_text or utf16_code_units(clean_text) > QUICK_REPLY_TEXT_MAX_LENGTH:
-            raise ValueError("invalid quick reply text")
-        normalized_title = normalize_quick_reply_title(clean_title)
+    ) -> QuickResponseView:
+        return await self._upsert(
+            text=text,
+            tags=tags,
+            operator_telegram_id=operator_telegram_id,
+            operator_display_name=operator_display_name,
+            operator_username=operator_username,
+            source_chat_id=source_chat_id,
+            source_message_id=source_message_id,
+            state=QUICK_RESPONSE_VALID,
+            invalid_until=None,
+        )
 
+    @retry_sqlite_locks
+    async def save_pending_deletion(
+        self,
+        *,
+        text: str,
+        tags: list[str],
+        operator_telegram_id: int,
+        operator_display_name: str | None,
+        operator_username: str | None,
+        source_chat_id: int,
+        source_message_id: int,
+        invalid_until: datetime,
+    ) -> QuickResponseView:
+        return await self._upsert(
+            text=text,
+            tags=tags,
+            operator_telegram_id=operator_telegram_id,
+            operator_display_name=operator_display_name,
+            operator_username=operator_username,
+            source_chat_id=source_chat_id,
+            source_message_id=source_message_id,
+            state=QUICK_RESPONSE_PENDING_DELETION,
+            invalid_until=invalid_until,
+        )
+
+    async def _upsert(
+        self,
+        *,
+        text: str,
+        tags: list[str],
+        operator_telegram_id: int,
+        operator_display_name: str | None,
+        operator_username: str | None,
+        source_chat_id: int,
+        source_message_id: int,
+        state: str,
+        invalid_until: datetime | None,
+    ) -> QuickResponseView:
+        if not text.strip() or utf16_code_units(text) > QUICK_RESPONSE_TEXT_MAX_LENGTH:
+            raise ValueError("invalid quick response text")
+        if state not in {QUICK_RESPONSE_VALID, QUICK_RESPONSE_PENDING_DELETION}:
+            raise ValueError("invalid quick response state")
+
+        for attempt in range(2):
+            async with self.database.session() as session:
+                response = await session.scalar(
+                    select(QuickResponse).where(
+                        QuickResponse.source_chat_id == source_chat_id,
+                        QuickResponse.source_message_id == source_message_id,
+                    )
+                )
+                if response is None:
+                    response = QuickResponse(
+                        text=text,
+                        tags=list(tags),
+                        created_by_telegram_id=operator_telegram_id,
+                        created_by_display_name=operator_display_name,
+                        created_by_username=operator_username,
+                        source_chat_id=source_chat_id,
+                        source_message_id=source_message_id,
+                        published_message_id=source_message_id,
+                        state=state,
+                        invalid_until=invalid_until,
+                    )
+                    session.add(response)
+                else:
+                    response.text = text
+                    response.tags = list(tags)
+                    response.created_by_telegram_id = operator_telegram_id
+                    response.created_by_display_name = operator_display_name
+                    response.created_by_username = operator_username
+                    response.published_message_id = source_message_id
+                    response.state = state
+                    response.invalid_until = invalid_until
+                try:
+                    await session.commit()
+                except IntegrityError:
+                    await session.rollback()
+                    if attempt == 0:
+                        continue
+                    raise
+                return _view(response)
+        raise RuntimeError("unreachable quick response upsert state")
+
+    @retry_sqlite_locks
+    async def attach_warning(self, response_id: int, warning_message_id: int) -> bool:
         async with self.database.session() as session:
-            existing = await session.scalar(
-                select(QuickReply).where(
-                    QuickReply.source_chat_id == source_chat_id,
-                    QuickReply.source_message_id == source_message_id,
-                )
-            )
-            if existing is not None:
-                return QuickReplyCreateResult(reply=_view(existing), created=False)
-            if (
-                await session.scalar(
-                    select(QuickReplyGroup.id).where(
-                        QuickReplyGroup.id == group_id,
-                        QuickReplyGroup.active.is_(True),
-                    )
-                )
-                is None
-            ):
-                raise QuickReplyGroupNotFoundError(group_id)
-            if await session.scalar(
-                select(QuickReply.id).where(
-                    QuickReply.group_id == group_id,
-                    QuickReply.normalized_title == normalized_title,
-                )
-            ):
-                raise QuickReplyTitleConflictError(clean_title)
+            response = await session.get(QuickResponse, response_id)
+            if response is None or response.state != QUICK_RESPONSE_PENDING_DELETION:
+                return False
+            if response.warning_message_id is not None:
+                return response.warning_message_id == warning_message_id
+            response.warning_message_id = warning_message_id
+            await session.commit()
+            return True
 
-            reply = QuickReply(
-                group_id=group_id,
-                title=clean_title,
-                normalized_title=normalized_title,
-                text=clean_text,
-                created_by_telegram_id=operator_telegram_id,
-                created_by_display_name=operator_display_name,
-                created_by_username=operator_username,
-                source_chat_id=source_chat_id,
-                source_message_id=source_message_id,
-            )
-            session.add(reply)
-            try:
-                await session.flush()
-                result = QuickReplyCreateResult(reply=_view(reply), created=True)
-                await session.commit()
-                return result
-            except IntegrityError:
-                await session.rollback()
-                existing = await session.scalar(
-                    select(QuickReply).where(
-                        QuickReply.source_chat_id == source_chat_id,
-                        QuickReply.source_message_id == source_message_id,
-                    )
-                )
-                if existing is not None:
-                    return QuickReplyCreateResult(reply=_view(existing), created=False)
-                if await session.scalar(
-                    select(QuickReply.id).where(
-                        QuickReply.group_id == group_id,
-                        QuickReply.normalized_title == normalized_title,
-                    )
-                ):
-                    raise QuickReplyTitleConflictError(clean_title) from None
-                raise
-
-    async def list_active(
-        self, *, group_id: int, offset: int, limit: int
-    ) -> tuple[list[QuickReplyView], int]:
+    @retry_sqlite_locks
+    async def clear_warning(self, response_id: int, warning_message_id: int) -> bool:
         async with self.database.session() as session:
-            total = int(
-                await session.scalar(
-                    select(func.count())
-                    .select_from(QuickReply)
-                    .where(
-                        QuickReply.group_id == group_id,
-                        QuickReply.active.is_(True),
-                    )
-                )
-                or 0
-            )
-            replies = list(
+            response = await session.get(QuickResponse, response_id)
+            if response is None or response.warning_message_id != warning_message_id:
+                return False
+            response.warning_message_id = None
+            await session.commit()
+            return True
+
+    async def list_valid(self) -> list[QuickResponseView]:
+        async with self.database.session() as session:
+            responses = list(
                 (
                     await session.scalars(
-                        select(QuickReply)
-                        .where(
-                            QuickReply.group_id == group_id,
-                            QuickReply.active.is_(True),
-                        )
-                        .order_by(
-                            QuickReply.normalized_title,
-                            QuickReply.id,
-                        )
-                        .offset(offset)
-                        .limit(limit)
+                        select(QuickResponse)
+                        .where(QuickResponse.state == QUICK_RESPONSE_VALID)
+                        .order_by(QuickResponse.id)
                     )
                 ).all()
             )
-        return [_view(reply) for reply in replies], total
+        return [_view(response) for response in responses]
 
-    async def get_active(self, reply_id: int) -> QuickReplyView | None:
+    async def list_pending_deletion(self) -> list[QuickResponseView]:
         async with self.database.session() as session:
-            reply = await session.scalar(
-                select(QuickReply).where(
-                    QuickReply.id == reply_id,
-                    QuickReply.active.is_(True),
-                )
+            responses = list(
+                (
+                    await session.scalars(
+                        select(QuickResponse)
+                        .where(QuickResponse.state == QUICK_RESPONSE_PENDING_DELETION)
+                        .order_by(QuickResponse.invalid_until, QuickResponse.id)
+                    )
+                ).all()
             )
-        return _view(reply) if reply is not None else None
-
-    @retry_sqlite_locks
-    async def mark_group_published(self, group_id: int, message_id: int) -> bool:
-        async with self.database.session() as session:
-            result = await session.execute(
-                update(QuickReplyGroup)
-                .where(
-                    QuickReplyGroup.id == group_id,
-                    QuickReplyGroup.published_message_id.is_(None),
-                )
-                .values(published_message_id=message_id)
-            )
-            changed = cast(CursorResult[object], result).rowcount == 1
-            await session.commit()
-            return changed
+        return [_view(response) for response in responses]
 
     @retry_sqlite_locks
-    async def mark_published(self, reply_id: int, message_id: int) -> bool:
+    async def delete_if_still_pending(
+        self,
+        response_id: int,
+        *,
+        invalid_until: datetime,
+    ) -> QuickResponseView | None:
         async with self.database.session() as session:
-            result = await session.execute(
-                update(QuickReply)
-                .where(
-                    QuickReply.id == reply_id,
-                    QuickReply.published_message_id.is_(None),
-                )
-                .values(published_message_id=message_id)
-            )
-            changed = cast(CursorResult[object], result).rowcount == 1
+            response = await session.get(QuickResponse, response_id)
+            if (
+                response is None
+                or response.state != QUICK_RESPONSE_PENDING_DELETION
+                or _as_utc(response.invalid_until) != _as_utc(invalid_until)
+            ):
+                return None
+            view = _view(response)
+            await session.delete(response)
             await session.commit()
-            return changed
+            return view
+
+    @retry_sqlite_locks
+    async def discard_all_pending(self) -> list[QuickResponseView]:
+        async with self.database.session() as session:
+            responses = list(
+                (
+                    await session.scalars(
+                        select(QuickResponse).where(
+                            QuickResponse.state == QUICK_RESPONSE_PENDING_DELETION
+                        )
+                    )
+                ).all()
+            )
+            views = [_view(response) for response in responses]
+            if responses:
+                await session.execute(
+                    delete(QuickResponse).where(
+                        QuickResponse.state == QUICK_RESPONSE_PENDING_DELETION
+                    )
+                )
+                await session.commit()
+            return views
+
+    @retry_sqlite_locks
+    async def mark_published(self, response_id: int, message_id: int) -> None:
+        async with self.database.session() as session:
+            response = await session.get(QuickResponse, response_id)
+            if response is None:
+                return
+            response.published_message_id = message_id
+            await session.commit()
 
     @staticmethod
-    def _menu_setting_key(support_group_id: int) -> str:
+    def _instruction_setting_key(support_group_id: int) -> str:
+        return f"telegram_quick_response_instruction:{support_group_id}"
+
+    @staticmethod
+    def _instruction_topic_setting_key(support_group_id: int) -> str:
+        return f"telegram_quick_response_instruction_topic:{support_group_id}"
+
+    @staticmethod
+    def _legacy_menu_setting_key(support_group_id: int) -> str:
         return f"telegram_quick_reply_menu:{support_group_id}"
 
-    async def menu_message_id(self, support_group_id: int) -> int | None:
+    async def instruction_message_id(self, support_group_id: int) -> int | None:
         async with self.database.session() as session:
             setting = await session.get(
                 SystemSetting,
-                self._menu_setting_key(support_group_id),
+                self._instruction_setting_key(support_group_id),
             )
         if setting is None:
             return None
@@ -430,12 +318,72 @@ class QuickReplyService:
         return message_id if message_id > 0 else None
 
     @retry_sqlite_locks
-    async def save_menu_message_id(self, support_group_id: int, message_id: int) -> None:
+    async def save_instruction_message_id(
+        self,
+        support_group_id: int,
+        message_id: int,
+        topic_id: int,
+    ) -> None:
         async with self.database.session() as session:
-            key = self._menu_setting_key(support_group_id)
+            key = self._instruction_setting_key(support_group_id)
             setting = await session.get(SystemSetting, key)
             if setting is None:
                 session.add(SystemSetting(key=key, value=str(message_id)))
             else:
                 setting.value = str(message_id)
+            topic_key = self._instruction_topic_setting_key(support_group_id)
+            topic_setting = await session.get(SystemSetting, topic_key)
+            if topic_setting is None:
+                session.add(SystemSetting(key=topic_key, value=str(topic_id)))
+            else:
+                topic_setting.value = str(topic_id)
+            await session.commit()
+
+    async def instruction_topic_id(self, support_group_id: int) -> int | None:
+        async with self.database.session() as session:
+            setting = await session.get(
+                SystemSetting,
+                self._instruction_topic_setting_key(support_group_id),
+            )
+        if setting is None:
+            return None
+        try:
+            topic_id = int(setting.value)
+        except ValueError:
+            return None
+        return topic_id if topic_id > 0 else None
+
+    async def legacy_message_ids(self, support_group_id: int) -> list[int]:
+        prefix = "telegram_quick_reply_legacy:"
+        async with self.database.session() as session:
+            settings = list(
+                (
+                    await session.scalars(
+                        select(SystemSetting).where(
+                            (SystemSetting.key == self._legacy_menu_setting_key(support_group_id))
+                            | SystemSetting.key.startswith(prefix)
+                        )
+                    )
+                ).all()
+            )
+        message_ids: set[int] = set()
+        for setting in settings:
+            try:
+                message_id = int(setting.value)
+            except ValueError:
+                continue
+            if message_id > 0:
+                message_ids.add(message_id)
+        return sorted(message_ids)
+
+    @retry_sqlite_locks
+    async def finish_legacy_cleanup(self, support_group_id: int) -> None:
+        prefix = "telegram_quick_reply_legacy:"
+        async with self.database.session() as session:
+            await session.execute(
+                delete(SystemSetting).where(
+                    (SystemSetting.key == self._legacy_menu_setting_key(support_group_id))
+                    | SystemSetting.key.startswith(prefix)
+                )
+            )
             await session.commit()

@@ -4,31 +4,27 @@ import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
+from aiogram.enums import MessageEntityType
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.methods import EditMessageText, SendMessage
-from aiogram.types import Message
+from aiogram.methods import EditMessageText
+from aiogram.types import Message, MessageEntity
 from pydantic import SecretStr
 
 from suppsystem.authorization import AuthorizationService
 from suppsystem.config import Settings
 from suppsystem.database import Database
 from suppsystem.quick_replies import (
-    QuickReplyGroupView,
+    QUICK_RESPONSE_PENDING_DELETION,
+    QUICK_RESPONSE_VALID,
     QuickReplyService,
-    QuickReplyView,
-    utf16_code_units,
 )
 from suppsystem.telegram_quick_replies import (
-    QuickReplyMenuRefreshWorker,
+    QUICK_RESPONSE_INSTRUCTION_TEXT,
+    QUICK_RESPONSE_WARNING_TEXT,
+    QuickResponseTopicRefreshWorker,
     TelegramQuickReplyHandlers,
-)
-from suppsystem.telegram_quick_reply_views import (
-    inline_reply_description,
-    parse_add_answer_argument,
-    parse_add_group_argument,
-    parse_inline_group_query,
 )
 
 
@@ -52,630 +48,376 @@ def _settings() -> Settings:
     )
 
 
-def _operator(user_id: int = 7) -> SimpleNamespace:
-    return SimpleNamespace(
-        id=user_id,
+def _hashtags(text: str) -> list[MessageEntity]:
+    entities: list[MessageEntity] = []
+    cursor = 0
+    for part in text.split():
+        offset = text.index(part, cursor)
+        cursor = offset + len(part)
+        if part.startswith("#"):
+            entities.append(
+                MessageEntity(
+                    type=MessageEntityType.HASHTAG,
+                    offset=offset,
+                    length=len(part),
+                )
+            )
+    return entities
+
+
+def _message(
+    *,
+    text: str,
+    message_id: int = 301,
+    topic_id: int = 777,
+    warning_message_id: int = 901,
+) -> AsyncMock:
+    message = AsyncMock(spec=Message)
+    message.message_id = message_id
+    message.message_thread_id = topic_id
+    message.chat = SimpleNamespace(id=-100123)
+    message.from_user = SimpleNamespace(
+        id=7,
         is_bot=False,
         full_name="Operator",
         username="operator",
     )
-
-
-def _group(*, name: str = "AI", reply_count: int = 0) -> QuickReplyGroupView:
-    return QuickReplyGroupView(
-        id=1,
-        name=name,
-        created_by_telegram_id=7,
-        created_by_display_name="Operator",
-        created_by_username="operator",
-        published_message_id=None,
-        active=True,
-        created_at=datetime(2026, 8, 4, 12, 0, tzinfo=UTC),
-        reply_count=reply_count,
-    )
-
-
-def _reply(
-    *,
-    text: str,
-    reply_id: int = 11,
-    title: str = "AI не отвечает",
-) -> QuickReplyView:
-    return QuickReplyView(
-        id=reply_id,
-        group_id=1,
-        title=title,
-        text=text,
-        created_by_telegram_id=7,
-        created_by_display_name="Operator",
-        created_by_username="operator",
-        published_message_id=None,
-        active=True,
-        created_at=datetime(2026, 8, 4, 12, 0, tzinfo=UTC),
-    )
-
-
-def _panel_message(message_id: int) -> AsyncMock:
-    message = AsyncMock(spec=Message)
-    message.message_id = message_id
-    message.message_thread_id = 777
-    message.chat = SimpleNamespace(id=-100123)
-    message.edit_text = AsyncMock()
+    message.text = text
+    message.entities = _hashtags(text)
+    message.reply = AsyncMock(return_value=SimpleNamespace(message_id=warning_message_id))
     return message
 
 
-def _harness(
-    service: QuickReplyService | SimpleNamespace,
-    bot: SimpleNamespace,
-) -> QuickReplyHarness:
+def _bot() -> SimpleNamespace:
+    return SimpleNamespace(
+        set_message_reaction=AsyncMock(),
+        delete_message=AsyncMock(),
+        send_message=AsyncMock(return_value=SimpleNamespace(message_id=501)),
+        edit_message_text=AsyncMock(),
+        pin_chat_message=AsyncMock(),
+    )
+
+
+def _harness(service: QuickReplyService, bot: SimpleNamespace) -> QuickReplyHarness:
     harness = QuickReplyHarness()
     harness.bot = bot
     harness.settings = _settings()
     harness.authorization = AuthorizationService(harness.settings)
     harness.limiter = FakeLimiter()  # type: ignore[assignment]
-    harness.quick_reply_service = service  # type: ignore[assignment]
+    harness.quick_reply_service = service
     harness.quick_replies_topic_id = 777
-    harness.initialize_quick_reply_sessions()
+    harness.recover_quick_replies_topic = None
+    harness.initialize_quick_reply_runtime()
     return harness
 
 
-def test_add_group_parser_accepts_one_short_plain_text_line() -> None:
-    assert parse_add_group_argument("  НЕ   РАБОТАЕТ AI  ") == "НЕ РАБОТАЕТ AI"
-    assert parse_add_group_argument("") is None
-    assert parse_add_group_argument("AI\nДругое") is None
-    assert parse_add_group_argument("AI | Другое") is None
-    assert parse_add_group_argument("😀" * 33) is None
-
-
-def test_add_answer_parser_requires_group_title_and_multiline_text() -> None:
-    assert parse_add_answer_argument("AI | AI не отвечает\nПерезапустите приложение.") == (
-        "AI",
-        "AI не отвечает",
-        "Перезапустите приложение.",
-    )
-    assert parse_add_answer_argument("AI не отвечает\nТекст") is None
-    assert parse_add_answer_argument("AI | Только заголовок") is None
-    assert parse_add_answer_argument("| Заголовок\nТекст") is None
-    assert parse_add_answer_argument("AI |\nТекст") is None
-    assert parse_add_answer_argument(f"{'😀' * 33} | Заголовок\nТекст") is None
-    assert parse_add_answer_argument(f"AI | {'😀' * 33}\nТекст") is None
-    assert parse_add_answer_argument(f"AI | Заголовок\n{'😀' * 1751}") is None
-
-
-def test_inline_query_marker_and_description_are_strict_and_compact() -> None:
-    assert parse_inline_group_query("qr-group-17") == 17
-    assert parse_inline_group_query("  qr-group-17 ignored  ") == 17
-    assert parse_inline_group_query("qr-group-0") is None
-    assert parse_inline_group_query("qr-group-nope") is None
-    assert parse_inline_group_query("other-17") is None
-    assert inline_reply_description("  Строка 1\n\nСтрока   2  ") == "Строка 1 Строка 2"
-    assert inline_reply_description("123456", limit=5) == "1234…"
-
-    label = QuickReplyHarness._group_button_text(_group(name="😀" * 32, reply_count=123))
-    assert utf16_code_units(label) <= 64
-    assert label.endswith(" · 123")
-
-
-def test_inline_result_sends_clean_text_and_safe_controls() -> None:
-    short = QuickReplyHarness._inline_reply_result(
-        7,
-        1,
-        _reply(text="Короткий ответ"),
-    )
-    assert short.title == "AI не отвечает"
-    assert short.description == "Короткий ответ"
-    assert short.input_message_content.message_text == "Короткий ответ"
-    assert short.input_message_content.parse_mode is None
-    short_rows = short.reply_markup.inline_keyboard
-    assert short_rows[0][0].copy_text is not None
-    assert short_rows[0][0].copy_text.text == "Короткий ответ"
-    assert short_rows[0][1].callback_data == "suppsystem_answers:delete:7"
-    assert short_rows[1][0].switch_inline_query_current_chat == "qr-group-1"
-
-    long = QuickReplyHarness._inline_reply_result(
-        7,
-        1,
-        _reply(text="😀" * 129),
-    )
-    long_rows = long.reply_markup.inline_keyboard
-    assert len(long_rows[0]) == 1
-    assert long_rows[0][0].callback_data == "suppsystem_answers:delete:7"
-
-
-async def test_inline_query_is_personal_authorized_and_paginated() -> None:
-    service = SimpleNamespace(
-        get_active_group=AsyncMock(return_value=_group(reply_count=2)),
-        list_active=AsyncMock(
-            return_value=(
-                [_reply(text="Перезапустите приложение.")],
-                2,
-            )
-        ),
-    )
-    harness = _harness(service, SimpleNamespace())
-
-    query = SimpleNamespace(
-        from_user=_operator(),
-        query="qr-group-1",
-        offset="",
-        answer=AsyncMock(),
-    )
-    await harness.handle_quick_reply_inline_query(query)
-
-    results = query.answer.await_args.args[0]
-    assert len(results) == 1
-    assert results[0].title == "AI не отвечает"
-    query.answer.assert_awaited_once_with(
-        results,
-        cache_time=0,
-        is_personal=True,
-        next_offset="1",
-    )
-    service.list_active.assert_awaited_once_with(group_id=1, offset=0, limit=20)
-
-    unauthorized = SimpleNamespace(
-        from_user=_operator(8),
-        query="qr-group-1",
-        offset="",
-        answer=AsyncMock(),
-    )
-    await harness.handle_quick_reply_inline_query(unauthorized)
-    unauthorized.answer.assert_awaited_once_with(
-        [],
-        cache_time=0,
-        is_personal=True,
-        next_offset="",
-    )
-
-    invalid = SimpleNamespace(
-        from_user=_operator(),
-        query="",
-        offset="",
-        answer=AsyncMock(),
-    )
-    await harness.handle_quick_reply_inline_query(invalid)
-    invalid.answer.assert_awaited_once_with(
-        [],
-        cache_time=0,
-        is_personal=True,
-        next_offset="",
-    )
-
-
-async def test_groups_and_answers_publish_once_and_shared_menu_opens_inline(
+async def test_valid_quick_response_is_saved_unchanged_and_reacted(
     tmp_path: Path,
 ) -> None:
-    database = Database(f"sqlite+aiosqlite:///{tmp_path}/telegram-quick-replies.db")
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/valid-quick-response.db")
     await database.create_schema_for_tests()
+    harness = QuickReplyHarness()
     try:
         service = QuickReplyService(database)
-        bot = SimpleNamespace(
-            send_message=AsyncMock(
-                side_effect=[
-                    SimpleNamespace(message_id=501),
-                    SimpleNamespace(message_id=502),
-                    SimpleNamespace(message_id=503),
-                ]
-            ),
-            edit_message_text=AsyncMock(),
-            delete_message=AsyncMock(),
-            pin_chat_message=AsyncMock(),
-        )
+        bot = _bot()
         harness = _harness(service, bot)
-        operator = _operator()
+        message = _message(text="Переустановите TikTok #TikTok #Android #VPN #Инструкция")
 
-        group_command = SimpleNamespace(
-            from_user=operator,
-            chat=SimpleNamespace(id=-100123),
-            message_id=101,
+        assert await harness.handle_quick_reply_topic_message(message) is True
+
+        saved = await service.get_by_source(
+            source_chat_id=-100123,
+            source_message_id=301,
+        )
+        assert saved is not None
+        assert saved.state == QUICK_RESPONSE_VALID
+        assert saved.text == message.text
+        assert saved.tags == ("#TikTok", "#Android", "#VPN", "#Инструкция")
+        message.reply.assert_not_awaited()
+        reaction = bot.set_message_reaction.await_args.kwargs["reaction"]
+        assert [item.emoji for item in reaction] == ["✅"]
+    finally:
+        await harness.shutdown_quick_reply_runtime()
+        await database.dispose()
+
+
+async def test_invalid_response_gets_exact_warning_and_edit_makes_it_valid(
+    tmp_path: Path,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/corrected-quick-response.db")
+    await database.create_schema_for_tests()
+    harness = QuickReplyHarness()
+    try:
+        service = QuickReplyService(database)
+        bot = _bot()
+        harness = _harness(service, bot)
+        message = _message(text="Текст #1 #2 #3 #4 #5")
+
+        await harness.handle_quick_reply_topic_message(message)
+
+        pending = await service.get_by_source(
+            source_chat_id=-100123,
+            source_message_id=301,
+        )
+        assert pending is not None
+        assert pending.state == QUICK_RESPONSE_PENDING_DELETION
+        assert pending.warning_message_id == 901
+        message.reply.assert_awaited_once_with(
+            QUICK_RESPONSE_WARNING_TEXT,
+            parse_mode=None,
+        )
+
+        message.text = "Исправленный текст #1 #2 #3 #4"
+        message.entities = _hashtags(message.text)
+        await harness.handle_quick_reply_topic_message(message)
+
+        corrected = await service.get_by_source(
+            source_chat_id=-100123,
+            source_message_id=301,
+        )
+        assert corrected is not None
+        assert corrected.state == QUICK_RESPONSE_VALID
+        assert corrected.warning_message_id is None
+        bot.delete_message.assert_awaited_with(chat_id=-100123, message_id=901)
+        assert bot.set_message_reaction.await_args.kwargs["reaction"][0].emoji == "✅"
+    finally:
+        await harness.shutdown_quick_reply_runtime()
+        await database.dispose()
+
+
+async def test_invalid_response_and_warning_are_deleted_after_deadline(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "suppsystem.telegram_quick_replies.QUICK_RESPONSE_DELETE_DELAY_SECONDS",
+        0,
+    )
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/expired-quick-response.db")
+    await database.create_schema_for_tests()
+    harness = QuickReplyHarness()
+    try:
+        service = QuickReplyService(database)
+        bot = _bot()
+        harness = _harness(service, bot)
+        message = _message(text="Текст #1 #2 #3 #4 #5")
+
+        await harness.handle_quick_reply_topic_message(message)
+        await asyncio.sleep(0.05)
+
+        assert (
+            await service.get_by_source(
+                source_chat_id=-100123,
+                source_message_id=301,
+            )
+            is None
+        )
+        assert bot.delete_message.await_args_list == [
+            call(chat_id=-100123, message_id=301),
+            call(chat_id=-100123, message_id=901),
+        ]
+    finally:
+        await harness.shutdown_quick_reply_runtime()
+        await database.dispose()
+
+
+async def test_message_outside_quick_response_topic_is_not_consumed(
+    tmp_path: Path,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/other-topic.db")
+    await database.create_schema_for_tests()
+    harness = QuickReplyHarness()
+    try:
+        service = QuickReplyService(database)
+        harness = _harness(service, _bot())
+
+        assert (
+            await harness.handle_quick_reply_topic_message(
+                _message(text="Обычный ответ", topic_id=778)
+            )
+            is False
+        )
+        assert await service.list_valid() == []
+    finally:
+        await harness.shutdown_quick_reply_runtime()
+        await database.dispose()
+
+
+async def test_instruction_is_plain_pinned_message_without_buttons(
+    tmp_path: Path,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/quick-response-instruction.db")
+    await database.create_schema_for_tests()
+    harness = QuickReplyHarness()
+    try:
+        service = QuickReplyService(database)
+        bot = _bot()
+        harness = _harness(service, bot)
+
+        await harness.ensure_quick_response_topic()
+
+        bot.send_message.assert_awaited_once_with(
+            chat_id=-100123,
             message_thread_id=777,
-            text="/addgroup AI",
-            caption=None,
-            reply=AsyncMock(),
+            text=QUICK_RESPONSE_INSTRUCTION_TEXT,
+            parse_mode=None,
         )
-        assert await harness.handle_quick_reply_topic_message(group_command, "/addgroup") is True
-        assert bot.send_message.await_count == 1
-        assert "Группа готовых ответов" in bot.send_message.await_args.kwargs["text"]
-
-        groups, groups_total = await service.list_groups(offset=0, limit=10)
-        assert groups_total == 1
-        assert groups[0].name == "AI"
-        assert groups[0].published_message_id == 501
-
-        assert await harness.handle_quick_reply_topic_message(group_command, "/addgroup") is True
-        assert bot.send_message.await_count == 1
-
-        answer_command = SimpleNamespace(
-            from_user=operator,
-            chat=group_command.chat,
-            message_id=102,
-            message_thread_id=777,
-            text="/addanswer AI | AI не отвечает\nПерезапустите приложение.",
-            caption=None,
-            reply=AsyncMock(),
-        )
-        assert await harness.handle_quick_reply_topic_message(answer_command, "/addanswer") is True
-        assert bot.send_message.await_count == 2
-        publication = bot.send_message.await_args.kwargs
-        assert publication["message_thread_id"] == 777
-        assert "📁 AI" in publication["text"]
-        assert "AI не отвечает" in publication["text"]
-        assert "Перезапустите приложение." in publication["text"]
-
-        stored, total = await service.list_active(
-            group_id=groups[0].id,
-            offset=0,
-            limit=10,
-        )
-        assert total == 1
-        assert stored[0].published_message_id == 502
-
-        answers_command = SimpleNamespace(
-            from_user=operator,
-            chat=group_command.chat,
-            message_id=103,
-            message_thread_id=777,
-            text="/answers",
-            caption=None,
-            reply=AsyncMock(),
-        )
-        assert await harness.handle_quick_reply_topic_message(answers_command, "/answers") is True
-        assert bot.send_message.await_count == 3
-        menu = bot.send_message.await_args.kwargs
-        assert menu["message_thread_id"] == 777
-        assert "список ответов откроется только у вас" in menu["text"]
-        group_row = menu["reply_markup"].inline_keyboard[0]
-        assert group_row[0].text == "📁 AI · 1"
-        assert group_row[0].switch_inline_query_current_chat == "qr-group-1"
-        assert group_row[0].callback_data is None
-        assert group_row[1].callback_data == "suppsystem_answers:add:1:0"
-        assert menu["reply_markup"].inline_keyboard[-1][0].callback_data == (
-            "suppsystem_answers:new:0"
-        )
-        assert await service.menu_message_id(-100123) == 503
         bot.pin_chat_message.assert_awaited_once_with(
             chat_id=-100123,
-            message_id=503,
+            message_id=501,
             disable_notification=True,
         )
-
-        wrong_topic = SimpleNamespace(message_thread_id=778)
-        assert await harness.handle_quick_reply_topic_message(wrong_topic, "") is False
+        assert await service.instruction_message_id(-100123) == 501
     finally:
+        await harness.shutdown_quick_reply_runtime()
         await database.dispose()
 
 
-async def test_quick_reply_callbacks_protect_shared_and_personal_controls(
+async def test_deleted_topic_is_recreated_and_valid_responses_are_restored(
     tmp_path: Path,
 ) -> None:
-    database = Database(f"sqlite+aiosqlite:///{tmp_path}/quick-reply-callbacks.db")
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/quick-response-recovery.db")
     await database.create_schema_for_tests()
+    harness = QuickReplyHarness()
     try:
         service = QuickReplyService(database)
-        await service.save_menu_message_id(-100123, 500)
-        bot = SimpleNamespace(
-            delete_message=AsyncMock(),
-            send_message=AsyncMock(),
-        )
-        harness = _harness(service, bot)
-
-        unauthorized = SimpleNamespace(
-            from_user=_operator(8),
-            data="suppsystem_answers:menupage:0",
-            message=_panel_message(500),
-            answer=AsyncMock(),
-        )
-        await harness.handle_quick_reply_callback(unauthorized)
-        unauthorized.answer.assert_awaited_once_with("Недостаточно прав.", show_alert=True)
-
-        stale = SimpleNamespace(
-            from_user=_operator(),
-            data="suppsystem_answers:menupage:0",
-            message=_panel_message(499),
-            answer=AsyncMock(),
-        )
-        await harness.handle_quick_reply_callback(stale)
-        stale.answer.assert_awaited_once_with(
-            "Панель устарела. Используйте актуальную закреплённую.",
-            show_alert=True,
-        )
-
-        menu_message = _panel_message(500)
-        shared = SimpleNamespace(
-            from_user=_operator(),
-            data="suppsystem_answers:menupage:0",
-            message=menu_message,
-            answer=AsyncMock(),
-        )
-        await harness.handle_quick_reply_callback(shared)
-        menu_message.edit_text.assert_awaited_once()
-        shared.answer.assert_awaited_once_with()
-
-        wrong_owner = SimpleNamespace(
-            from_user=_operator(),
-            data="suppsystem_answers:delete:8",
-            message=_panel_message(700),
-            answer=AsyncMock(),
-        )
-        await harness.handle_quick_reply_callback(wrong_owner)
-        wrong_owner.answer.assert_awaited_once_with(
-            "Эта панель открыта другим оператором.",
-            show_alert=True,
-        )
-
-        personal_message = _panel_message(701)
-        delete = SimpleNamespace(
-            from_user=_operator(),
-            data="suppsystem_answers:delete:7",
-            message=personal_message,
-            answer=AsyncMock(),
-        )
-        await harness.handle_quick_reply_callback(delete)
-        bot.delete_message.assert_awaited_once_with(
-            chat_id=-100123,
-            message_id=701,
-        )
-        delete.answer.assert_awaited_once_with()
-    finally:
-        await harness.shutdown_quick_reply_sessions()
-        await database.dispose()
-
-
-async def test_quick_reply_menu_is_persisted_refreshed_and_pinned(
-    tmp_path: Path,
-) -> None:
-    database = Database(f"sqlite+aiosqlite:///{tmp_path}/quick-reply-menu.db")
-    await database.create_schema_for_tests()
-    try:
-        service = QuickReplyService(database)
-        group = await service.create_group(
-            name="AI",
+        saved = await service.save_valid(
+            text="Сохранённый ответ #VPN",
+            tags=["#VPN"],
             operator_telegram_id=7,
             operator_display_name="Operator",
             operator_username="operator",
             source_chat_id=-100123,
             source_message_id=401,
         )
-        await service.create(
-            group_id=group.group.id,
-            title="AI не отвечает",
-            text="Перезапустите приложение.",
-            operator_telegram_id=7,
-            operator_display_name="Operator",
-            operator_username="operator",
-            source_chat_id=-100123,
-            source_message_id=402,
+        await service.save_instruction_message_id(-100123, 500, 777)
+        missing_topic = TelegramBadRequest(
+            method=EditMessageText(
+                chat_id=-100123,
+                message_id=500,
+                text=QUICK_RESPONSE_INSTRUCTION_TEXT,
+            ),
+            message="Bad Request: message thread not found",
         )
-        bot = SimpleNamespace(
-            edit_message_text=AsyncMock(),
-            send_message=AsyncMock(return_value=SimpleNamespace(message_id=501)),
-            pin_chat_message=AsyncMock(),
-            delete_message=AsyncMock(),
+        bot = _bot()
+        bot.edit_message_text = AsyncMock(side_effect=missing_topic)
+        bot.send_message = AsyncMock(
+            side_effect=[
+                SimpleNamespace(message_id=501),
+                SimpleNamespace(message_id=502),
+            ]
         )
         harness = _harness(service, bot)
+        recover = AsyncMock(return_value=888)
+        harness.recover_quick_replies_topic = recover
 
-        await harness.ensure_quick_reply_menu()
+        await harness.ensure_quick_response_topic()
 
-        bot.send_message.assert_awaited_once()
-        created = bot.send_message.await_args.kwargs
-        assert created["message_thread_id"] == 777
-        group_row = created["reply_markup"].inline_keyboard[0]
-        assert group_row[0].text == "📁 AI · 1"
-        assert group_row[0].switch_inline_query_current_chat == "qr-group-1"
-        assert group_row[1].text == "➕"
-        assert group_row[1].callback_data == "suppsystem_answers:add:1:0"
-        assert created["reply_markup"].inline_keyboard[-1][0].text == ("➕ Создать новую группу")
-        assert await service.menu_message_id(-100123) == 501
-        bot.pin_chat_message.assert_awaited_once_with(
-            chat_id=-100123,
-            message_id=501,
-            disable_notification=True,
+        recover.assert_awaited_once_with(777)
+        assert harness.quick_replies_topic_id == 888
+        assert [item.kwargs["message_thread_id"] for item in bot.send_message.await_args_list] == [
+            888,
+            888,
+        ]
+        assert bot.send_message.await_args_list[1].kwargs["text"] == "Сохранённый ответ #VPN"
+        restored = await service.get_by_source(
+            source_chat_id=-100123,
+            source_message_id=401,
         )
-
-        await harness.ensure_quick_reply_menu()
-
-        assert bot.send_message.await_count == 1
-        bot.edit_message_text.assert_awaited_once()
-        assert bot.edit_message_text.await_args.kwargs["message_id"] == 501
-        assert bot.pin_chat_message.await_count == 2
+        assert restored is not None
+        assert restored.id == saved.id
+        assert restored.published_message_id == 502
+        assert await service.instruction_message_id(-100123) == 501
     finally:
+        await harness.shutdown_quick_reply_runtime()
         await database.dispose()
 
 
-async def test_deleted_quick_reply_topic_is_recreated_with_a_new_menu(
+async def test_topic_recovered_before_adapter_start_restores_responses(
     tmp_path: Path,
 ) -> None:
-    database = Database(f"sqlite+aiosqlite:///{tmp_path}/quick-reply-topic-recovery.db")
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/pre-recovered-topic.db")
     await database.create_schema_for_tests()
     harness = QuickReplyHarness()
     try:
         service = QuickReplyService(database)
-        await service.save_menu_message_id(-100123, 501)
-        missing_message = TelegramBadRequest(
-            method=EditMessageText(chat_id=-100123, message_id=501, text="menu"),
-            message="Bad Request: message to edit not found",
+        await service.save_valid(
+            text="Ответ переживёт рестарт #VPN",
+            tags=["#VPN"],
+            operator_telegram_id=7,
+            operator_display_name="Operator",
+            operator_username="operator",
+            source_chat_id=-100123,
+            source_message_id=401,
         )
-        missing_topic = TelegramBadRequest(
-            method=SendMessage(
-                chat_id=-100123,
-                message_thread_id=777,
-                text="menu",
-            ),
-            message="Bad Request: message thread not found",
-        )
-        bot = SimpleNamespace(
-            edit_message_text=AsyncMock(side_effect=missing_message),
-            send_message=AsyncMock(side_effect=[missing_topic, SimpleNamespace(message_id=502)]),
-            pin_chat_message=AsyncMock(),
+        await service.save_instruction_message_id(-100123, 500, 777)
+        bot = _bot()
+        bot.send_message = AsyncMock(
+            side_effect=[
+                SimpleNamespace(message_id=501),
+                SimpleNamespace(message_id=502),
+            ]
         )
         harness = _harness(service, bot)
-        recover_topic = AsyncMock(return_value=888)
-        harness.recover_quick_replies_topic = recover_topic
+        harness.quick_replies_topic_id = 888
 
-        await harness.ensure_quick_reply_menu()
+        await harness.ensure_quick_response_topic()
 
-        recover_topic.assert_awaited_once_with(777)
-        assert harness.quick_replies_topic_id == 888
-        assert bot.send_message.await_count == 2
-        assert bot.send_message.await_args_list[0].kwargs["message_thread_id"] == 777
-        assert bot.send_message.await_args_list[1].kwargs["message_thread_id"] == 888
-        assert await service.menu_message_id(-100123) == 502
-        bot.pin_chat_message.assert_awaited_once_with(
-            chat_id=-100123,
-            message_id=502,
-            disable_notification=True,
+        bot.edit_message_text.assert_not_awaited()
+        assert [item.kwargs["message_thread_id"] for item in bot.send_message.await_args_list] == [
+            888,
+            888,
+        ]
+        assert bot.send_message.await_args_list[1].kwargs["text"] == (
+            "Ответ переживёт рестарт #VPN"
         )
+        assert await service.instruction_topic_id(-100123) == 888
     finally:
-        await harness.shutdown_quick_reply_sessions()
+        await harness.shutdown_quick_reply_runtime()
         await database.dispose()
 
 
-async def test_quick_reply_menu_refresh_worker_updates_and_stops() -> None:
+async def test_pending_expirations_are_restored_after_restart(tmp_path: Path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/restart-expiration.db")
+    await database.create_schema_for_tests()
+    harness = QuickReplyHarness()
+    try:
+        service = QuickReplyService(database)
+        await service.save_pending_deletion(
+            text="Текст #1 #2 #3 #4 #5",
+            tags=["#1", "#2", "#3", "#4", "#5"],
+            operator_telegram_id=7,
+            operator_display_name="Operator",
+            operator_username="operator",
+            source_chat_id=-100123,
+            source_message_id=301,
+            invalid_until=datetime.now(UTC),
+        )
+        bot = _bot()
+        harness = _harness(service, bot)
+
+        await harness.restore_pending_quick_response_expirations()
+        await asyncio.sleep(0.05)
+
+        bot.delete_message.assert_awaited_with(chat_id=-100123, message_id=301)
+    finally:
+        await harness.shutdown_quick_reply_runtime()
+        await database.dispose()
+
+
+async def test_quick_response_topic_worker_refreshes_and_stops() -> None:
     refreshed = asyncio.Event()
 
-    async def ensure_menu() -> None:
+    async def ensure_topic() -> None:
         refreshed.set()
 
-    menu = SimpleNamespace(ensure_quick_reply_menu=ensure_menu)
-    worker = QuickReplyMenuRefreshWorker(menu, interval_seconds=0.01)  # type: ignore[arg-type]
+    topic = SimpleNamespace(ensure_quick_response_topic=ensure_topic)
+    worker = QuickResponseTopicRefreshWorker(
+        topic,  # type: ignore[arg-type]
+        interval_seconds=0.01,
+    )
     task = asyncio.create_task(worker.run())
 
     await asyncio.wait_for(refreshed.wait(), timeout=1)
     worker.stop()
     await asyncio.wait_for(task, timeout=1)
-
-
-async def test_button_wizard_uses_one_temporary_form_and_direct_group_actions(
-    tmp_path: Path,
-) -> None:
-    database = Database(f"sqlite+aiosqlite:///{tmp_path}/quick-reply-wizard.db")
-    await database.create_schema_for_tests()
-    harness = QuickReplyHarness()
-    try:
-        service = QuickReplyService(database)
-        await service.save_menu_message_id(-100123, 500)
-        bot = SimpleNamespace(
-            send_message=AsyncMock(
-                side_effect=[
-                    SimpleNamespace(message_id=600),
-                    SimpleNamespace(message_id=601),
-                    SimpleNamespace(message_id=602),
-                ]
-            ),
-            edit_message_text=AsyncMock(),
-            delete_message=AsyncMock(),
-            pin_chat_message=AsyncMock(),
-        )
-        harness = _harness(service, bot)
-        operator = _operator()
-
-        open_new = SimpleNamespace(
-            from_user=operator,
-            data="suppsystem_answers:new:0",
-            message=_panel_message(500),
-            answer=AsyncMock(),
-        )
-        await harness.handle_quick_reply_callback(open_new)
-
-        bot.send_message.assert_awaited_once()
-        assert bot.send_message.await_args.kwargs["text"] == "➕ Открываю форму…"
-        assert harness._quick_reply_drafts[7].step == "group"
-        assert harness._quick_reply_drafts[7].panel_message_id == 600
-        first_form = bot.edit_message_text.await_args.kwargs
-        assert first_form["message_id"] == 600
-        assert "Напишите название группы обычным сообщением" in first_form["text"]
-        open_new.answer.assert_awaited_once_with()
-
-        selected_inline = SimpleNamespace(
-            message_thread_id=777,
-            via_bot=SimpleNamespace(id=42),
-        )
-        assert await harness.handle_quick_reply_topic_message(selected_inline, "") is True
-        assert harness._quick_reply_drafts[7].step == "group"
-
-        group_name = SimpleNamespace(
-            from_user=operator,
-            chat=SimpleNamespace(id=-100123),
-            message_id=701,
-            message_thread_id=777,
-            text="НЕ РАБОТАЕТ AI",
-            caption=None,
-            reply=AsyncMock(),
-        )
-        assert await harness.handle_quick_reply_topic_message(group_name, "") is True
-        assert bot.send_message.await_count == 2
-        assert "Группа готовых ответов" in bot.send_message.await_args.kwargs["text"]
-        assert harness._quick_reply_drafts[7].step == "title"
-        title_form = bot.edit_message_text.await_args.kwargs
-        assert title_form["message_id"] == 600
-        assert "Шаг 1 из 2" in title_form["text"]
-
-        title = SimpleNamespace(
-            from_user=operator,
-            chat=group_name.chat,
-            message_id=702,
-            message_thread_id=777,
-            text="AI не отвечает",
-            caption=None,
-            reply=AsyncMock(),
-        )
-        assert await harness.handle_quick_reply_topic_message(title, "") is True
-        assert bot.send_message.await_count == 2
-        assert harness._quick_reply_drafts[7].step == "text"
-        text_form = bot.edit_message_text.await_args.kwargs
-        assert text_form["message_id"] == 600
-        assert "Шаг 2 из 2" in text_form["text"]
-
-        answer_text = SimpleNamespace(
-            from_user=operator,
-            chat=group_name.chat,
-            message_id=703,
-            message_thread_id=777,
-            text="Перезапустите приложение и попробуйте ещё раз.",
-            caption=None,
-            reply=AsyncMock(),
-        )
-        assert await harness.handle_quick_reply_topic_message(answer_text, "") is True
-        confirmation = bot.edit_message_text.await_args.kwargs
-        assert confirmation["message_id"] == 600
-        assert "Новый готовый ответ" in confirmation["text"]
-        assert "Группа: НЕ РАБОТАЕТ AI" in confirmation["text"]
-        assert "Название: AI не отвечает" in confirmation["text"]
-        assert confirmation["reply_markup"].inline_keyboard[0][0].text == "✅ Сохранить"
-
-        panel = _panel_message(600)
-        save = SimpleNamespace(
-            from_user=operator,
-            data="suppsystem_answers:draftsave:7",
-            message=panel,
-            answer=AsyncMock(),
-        )
-        await harness.handle_quick_reply_callback(save)
-
-        assert bot.send_message.await_count == 3
-        saved_text = panel.edit_text.await_args.args[0]
-        assert saved_text.startswith("✅ Готовый ответ сохранён")
-        saved_keyboard = panel.edit_text.await_args.kwargs["reply_markup"]
-        assert saved_keyboard.inline_keyboard[1][1].switch_inline_query_current_chat == (
-            "qr-group-1"
-        )
-        save.answer.assert_awaited_once_with("Готовый ответ сохранён.")
-
-        groups, group_total = await service.list_groups(offset=0, limit=10)
-        assert group_total == 1
-        assert groups[0].name == "НЕ РАБОТАЕТ AI"
-        assert groups[0].reply_count == 1
-        replies, reply_total = await service.list_active(
-            group_id=groups[0].id,
-            offset=0,
-            limit=10,
-        )
-        assert reply_total == 1
-        assert replies[0].title == "AI не отвечает"
-        assert replies[0].text == "Перезапустите приложение и попробуйте ещё раз."
-        assert replies[0].published_message_id == 602
-        assert not harness._quick_reply_drafts
-        assert bot.pin_chat_message.await_count == 2
-    finally:
-        await harness.shutdown_quick_reply_sessions()
-        await database.dispose()

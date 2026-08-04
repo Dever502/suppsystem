@@ -33,7 +33,6 @@ from suppsystem.telegram_panel_handler import (
     GIFT_DAYS_ERROR_TEXT as GIFT_DAYS_ERROR_TEXT,
 )
 from suppsystem.telegram_panel_handler import TelegramPanelCommandHandler
-from suppsystem.telegram_quick_replies import QUICK_REPLY_CALLBACK_PREFIX
 from suppsystem.telegram_statistics import STATISTICS_CALLBACK_PREFIX
 
 
@@ -61,7 +60,7 @@ class TelegramSupportAdapter(TelegramOperatorHandlers):
         self.statistics_service = statistics_service or StatisticsService(ticket_service.database)
         self.quick_reply_service = quick_reply_service
         self.quick_replies_topic_id = quick_replies_topic_id
-        self.initialize_quick_reply_sessions()
+        self.initialize_quick_reply_runtime()
         self.panel_commands = TelegramPanelCommandHandler(panel_service)
         self.authorization = AuthorizationService(settings)
         self.limiter = limiter
@@ -83,8 +82,9 @@ class TelegramSupportAdapter(TelegramOperatorHandlers):
             self.handle_group_message,
             F.chat.id == self.settings.support_group_id,
         )
-        self.router.inline_query.register(
-            self.handle_quick_reply_inline_query,
+        self.router.edited_message.register(
+            self.handle_edited_group_message,
+            F.chat.id == self.settings.support_group_id,
         )
         self.router.callback_query.register(
             self.handle_statistics_callback,
@@ -93,8 +93,4 @@ class TelegramSupportAdapter(TelegramOperatorHandlers):
         self.router.callback_query.register(
             self.handle_rating_callback,
             F.data.startswith(f"{RATING_CALLBACK_PREFIX}:"),
-        )
-        self.router.callback_query.register(
-            self.handle_quick_reply_callback,
-            F.data.startswith(f"{QUICK_REPLY_CALLBACK_PREFIX}:"),
         )

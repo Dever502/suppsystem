@@ -4,8 +4,10 @@ import asyncio
 import logging
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest
 
 from suppsystem.database import Database, retry_sqlite_locks
+from suppsystem.telegram_errors import is_missing_topic_error
 from suppsystem.telegram_limits import TelegramRateLimiter
 from suppsystem.web_models import SystemSetting
 
@@ -14,7 +16,7 @@ logger = logging.getLogger(__name__)
 RATINGS_TOPIC = "ratings"
 RATINGS_TOPIC_NAME = "⭐ Оценки"
 QUICK_REPLIES_TOPIC = "quick_replies"
-QUICK_REPLIES_TOPIC_NAME = "📚 Готовые ответы"
+QUICK_REPLIES_TOPIC_NAME = "⚡ Быстрые ответы"
 
 
 class TelegramSystemTopicService:
@@ -123,3 +125,21 @@ class TelegramSystemTopicService:
                 },
             )
             return replacement_topic_id
+
+    async def reconcile_name(self, topic_kind: str, topic_id: int) -> int:
+        topic_name = self._topic_name(topic_kind)
+        try:
+            await self.limiter.wait()
+            await self.bot.edit_forum_topic(
+                chat_id=self.support_group_id,
+                message_thread_id=topic_id,
+                name=topic_name,
+            )
+        except TelegramBadRequest as error:
+            message = str(error).casefold()
+            if "topic_not_modified" in message or "topic is not modified" in message:
+                return topic_id
+            if is_missing_topic_error(error):
+                return await self.recover(topic_kind, topic_id)
+            raise
+        return topic_id

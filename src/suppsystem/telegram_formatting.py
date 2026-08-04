@@ -222,7 +222,8 @@ def format_subscription_lookup(lookup: PanelSubscriptionLookup) -> str:
     identity_provider = provider_labels.get(
         lookup.identity_provider, escape(lookup.identity_provider)
     )
-    identity = f"{identity_provider}:<code>{escape(lookup.identity_value)}</code>"
+    separator = " " if lookup.identity_provider == "email" else ""
+    identity = f"{identity_provider}:{separator}<code>{escape(lookup.identity_value)}</code>"
     if lookup.subscription is None:
         return (
             "💳 <b>Подписка Remnawave</b>\n\n"

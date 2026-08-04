@@ -405,6 +405,21 @@ def test_subscription_lookup_uses_compact_telegram_search_label() -> None:
     )
 
 
+def test_subscription_lookup_separates_email_label_from_value() -> None:
+    from suppsystem.panel import PanelSubscriptionLookup
+
+    text = format_subscription_lookup(
+        PanelSubscriptionLookup(
+            status="not_found",
+            identity_provider="email",
+            identity_value="user@example.com",
+            subscription=None,
+        )
+    )
+
+    assert "Email: <code>user@example.com</code>" in text
+
+
 @pytest.mark.parametrize(
     ("expire_at", "expected"),
     [

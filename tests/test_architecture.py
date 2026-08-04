@@ -62,6 +62,8 @@ def test_split_telegram_handlers_do_not_import_persistence_frameworks() -> None:
         "telegram_topic_manager",
         "telegram_message_utils",
         "telegram_quick_replies",
+        "telegram_quick_reply_drafts",
+        "telegram_quick_reply_views",
     ):
         imports = imported_modules(module)
         assert not any(name.startswith("sqlalchemy") for name in imports), module

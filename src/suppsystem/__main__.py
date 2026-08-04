@@ -264,6 +264,7 @@ async def run() -> None:
     )
     dispatcher.include_router(adapter.router)
     await adapter.recover_waiting_topics_after_restart()
+    await adapter.ensure_quick_reply_menu()
     await adapter.ensure_statistics_dashboard()
     statistics_worker = StatisticsDashboardRefreshWorker(adapter)
 
@@ -356,7 +357,12 @@ async def run() -> None:
                 statistics_worker.stop,
                 *((notification_worker.stop,) if notification_worker is not None else ()),
             ),
-            close_resources=(bot.session.close, http_client.aclose, database.dispose),
+            close_resources=(
+                adapter.shutdown_quick_reply_sessions,
+                bot.session.close,
+                http_client.aclose,
+                database.dispose,
+            ),
         )
 
 

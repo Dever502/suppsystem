@@ -61,6 +61,7 @@ class TelegramSupportAdapter(TelegramOperatorHandlers):
         self.statistics_service = statistics_service or StatisticsService(ticket_service.database)
         self.quick_reply_service = quick_reply_service
         self.quick_replies_topic_id = quick_replies_topic_id
+        self.initialize_quick_reply_sessions()
         self.panel_commands = TelegramPanelCommandHandler(panel_service)
         self.authorization = AuthorizationService(settings)
         self.limiter = limiter

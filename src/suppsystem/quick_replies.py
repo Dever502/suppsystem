@@ -4,12 +4,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import cast
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 
 from suppsystem.database import Database, retry_sqlite_locks
 from suppsystem.models import QuickReply, QuickReplyGroup
+from suppsystem.web_models import SystemSetting
 
 QUICK_REPLY_GROUP_NAME_MAX_LENGTH = 64
 QUICK_REPLY_TITLE_MAX_LENGTH = 64
@@ -38,6 +39,7 @@ class QuickReplyGroupView:
     published_message_id: int | None
     active: bool
     created_at: datetime
+    reply_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -78,7 +80,7 @@ def normalize_quick_reply_title(title: str) -> str:
     return normalize_quick_reply_name(title)
 
 
-def _group_view(group: QuickReplyGroup) -> QuickReplyGroupView:
+def _group_view(group: QuickReplyGroup, *, reply_count: int = 0) -> QuickReplyGroupView:
     return QuickReplyGroupView(
         id=group.id,
         name=group.name,
@@ -88,6 +90,7 @@ def _group_view(group: QuickReplyGroup) -> QuickReplyGroupView:
         published_message_id=group.published_message_id,
         active=group.active,
         created_at=group.created_at,
+        reply_count=reply_count,
     )
 
 
@@ -195,18 +198,39 @@ class QuickReplyService:
                 )
                 or 0
             )
-            groups = list(
+            rows = list(
                 (
-                    await session.scalars(
-                        select(QuickReplyGroup)
+                    await session.execute(
+                        select(
+                            QuickReplyGroup,
+                            func.count(QuickReply.id),
+                        )
+                        .outerjoin(
+                            QuickReply,
+                            (QuickReply.group_id == QuickReplyGroup.id)
+                            & QuickReply.active.is_(True),
+                        )
                         .where(QuickReplyGroup.active.is_(True))
-                        .order_by(QuickReplyGroup.id)
+                        .group_by(QuickReplyGroup.id)
+                        .order_by(
+                            case(
+                                (
+                                    QuickReplyGroup.normalized_name == "общее",
+                                    0,
+                                ),
+                                else_=1,
+                            ),
+                            QuickReplyGroup.normalized_name,
+                            QuickReplyGroup.id,
+                        )
                         .offset(offset)
                         .limit(limit)
                     )
                 ).all()
             )
-        return [_group_view(group) for group in groups], total
+        return [
+            _group_view(group, reply_count=int(reply_count)) for group, reply_count in rows
+        ], total
 
     async def get_active_group(self, group_id: int) -> QuickReplyGroupView | None:
         async with self.database.session() as session:
@@ -336,7 +360,10 @@ class QuickReplyService:
                             QuickReply.group_id == group_id,
                             QuickReply.active.is_(True),
                         )
-                        .order_by(QuickReply.id)
+                        .order_by(
+                            QuickReply.normalized_title,
+                            QuickReply.id,
+                        )
                         .offset(offset)
                         .limit(limit)
                     )
@@ -383,3 +410,32 @@ class QuickReplyService:
             changed = cast(CursorResult[object], result).rowcount == 1
             await session.commit()
             return changed
+
+    @staticmethod
+    def _menu_setting_key(support_group_id: int) -> str:
+        return f"telegram_quick_reply_menu:{support_group_id}"
+
+    async def menu_message_id(self, support_group_id: int) -> int | None:
+        async with self.database.session() as session:
+            setting = await session.get(
+                SystemSetting,
+                self._menu_setting_key(support_group_id),
+            )
+        if setting is None:
+            return None
+        try:
+            message_id = int(setting.value)
+        except ValueError:
+            return None
+        return message_id if message_id > 0 else None
+
+    @retry_sqlite_locks
+    async def save_menu_message_id(self, support_group_id: int, message_id: int) -> None:
+        async with self.database.session() as session:
+            key = self._menu_setting_key(support_group_id)
+            setting = await session.get(SystemSetting, key)
+            if setting is None:
+                session.add(SystemSetting(key=key, value=str(message_id)))
+            else:
+                setting.value = str(message_id)
+            await session.commit()

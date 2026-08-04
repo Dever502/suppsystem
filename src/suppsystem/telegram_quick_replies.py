@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
+from collections.abc import Awaitable, Callable
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
@@ -30,6 +32,7 @@ from suppsystem.quick_replies import (
     QuickReplyView,
     utf16_code_units,
 )
+from suppsystem.telegram_errors import is_missing_topic_error
 from suppsystem.telegram_limits import TelegramRateLimiter
 from suppsystem.telegram_message_utils import command_argument
 from suppsystem.telegram_quick_reply_drafts import TelegramQuickReplyDraftHandlers
@@ -58,6 +61,8 @@ from suppsystem.telegram_quick_reply_views import (
 
 logger = logging.getLogger(__name__)
 
+QUICK_REPLY_MENU_REFRESH_INTERVAL_SECONDS = 60.0
+
 _LEGACY_CATALOG_ACTIONS = {
     "menu_catalog",
     "menu_add",
@@ -78,6 +83,8 @@ class TelegramQuickReplyHandlers(TelegramQuickReplyDraftHandlers):
     settings: Settings
     quick_reply_service: QuickReplyService | None
     quick_replies_topic_id: int | None
+    recover_quick_replies_topic: Callable[[int], Awaitable[int]] | None
+    _quick_reply_menu_lock: asyncio.Lock
 
     async def _pin_quick_reply_menu(self, message_id: int) -> None:
         try:
@@ -195,58 +202,110 @@ class TelegramQuickReplyHandlers(TelegramQuickReplyDraftHandlers):
             )
         return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
+    def _quick_reply_menu_guard(self) -> asyncio.Lock:
+        lock = getattr(self, "_quick_reply_menu_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._quick_reply_menu_lock = lock
+        return lock
+
+    async def _write_quick_reply_menu(
+        self,
+        page: int,
+        *,
+        force_create: bool = False,
+    ) -> None:
+        service = self.quick_reply_service
+        topic_id = self.quick_replies_topic_id
+        assert service is not None
+        assert topic_id is not None
+
+        text, keyboard = await self._quick_reply_shared_menu(page)
+        message_id = (
+            None if force_create else await service.menu_message_id(self.settings.support_group_id)
+        )
+        if message_id is not None:
+            try:
+                await self.limiter.wait()
+                await self.bot.edit_message_text(
+                    chat_id=self.settings.support_group_id,
+                    message_id=message_id,
+                    text=text,
+                    reply_markup=keyboard,
+                    parse_mode=None,
+                )
+            except TelegramBadRequest as error:
+                if message_not_modified(error):
+                    await self._pin_quick_reply_menu(message_id)
+                    return
+                if not message_missing(error):
+                    raise
+            else:
+                await self._pin_quick_reply_menu(message_id)
+                return
+
+        await self.limiter.wait()
+        message = await self.bot.send_message(
+            chat_id=self.settings.support_group_id,
+            message_thread_id=topic_id,
+            text=text,
+            reply_markup=keyboard,
+            parse_mode=None,
+        )
+        await service.save_menu_message_id(
+            self.settings.support_group_id,
+            message.message_id,
+        )
+        await self._pin_quick_reply_menu(message.message_id)
+
+    async def _ensure_quick_reply_menu_locked(self, page: int) -> None:
+        try:
+            await self._write_quick_reply_menu(page)
+        except TelegramBadRequest as error:
+            if not is_missing_topic_error(error):
+                raise
+            missing_topic_id = self.quick_replies_topic_id
+            recover_topic = getattr(self, "recover_quick_replies_topic", None)
+            if missing_topic_id is None or recover_topic is None:
+                raise RuntimeError("quick reply topic recovery is not configured") from error
+
+            replacement_topic_id = await recover_topic(missing_topic_id)
+            if replacement_topic_id <= 0:
+                raise RuntimeError(
+                    "quick reply topic recovery returned an invalid topic id"
+                ) from error
+            self.quick_replies_topic_id = replacement_topic_id
+            await self.shutdown_quick_reply_sessions()
+            await self._write_quick_reply_menu(page, force_create=True)
+            logger.warning(
+                "Recreated missing quick reply topic and menu",
+                extra={
+                    "event": "quick_reply_topic_recovered",
+                    "old_topic_id": missing_topic_id,
+                    "new_topic_id": replacement_topic_id,
+                    "support_group_id": self.settings.support_group_id,
+                },
+            )
+
     async def ensure_quick_reply_menu(self, page: int = 0) -> None:
         service = getattr(self, "quick_reply_service", None)
         topic_id = getattr(self, "quick_replies_topic_id", None)
         if service is None or topic_id is None:
             return
-        try:
-            text, keyboard = await self._quick_reply_shared_menu(page)
-            message_id = await service.menu_message_id(self.settings.support_group_id)
-            if message_id is not None:
-                try:
-                    await self.limiter.wait()
-                    await self.bot.edit_message_text(
-                        chat_id=self.settings.support_group_id,
-                        message_id=message_id,
-                        text=text,
-                        reply_markup=keyboard,
-                        parse_mode=None,
-                    )
-                except TelegramBadRequest as error:
-                    if message_not_modified(error):
-                        await self._pin_quick_reply_menu(message_id)
-                        return
-                    if not message_missing(error):
-                        raise
-                else:
-                    await self._pin_quick_reply_menu(message_id)
-                    return
-
-            await self.limiter.wait()
-            message = await self.bot.send_message(
-                chat_id=self.settings.support_group_id,
-                message_thread_id=topic_id,
-                text=text,
-                reply_markup=keyboard,
-                parse_mode=None,
-            )
-            await service.save_menu_message_id(
-                self.settings.support_group_id,
-                message.message_id,
-            )
-            await self._pin_quick_reply_menu(message.message_id)
-        except TelegramAPIError:
-            logger.warning(
-                "Unable to initialize quick reply menu",
-                exc_info=True,
-                extra={"event": "quick_reply_menu_startup_degraded"},
-            )
-        except Exception:
-            logger.exception(
-                "Unable to persist quick reply menu",
-                extra={"event": "quick_reply_menu_persistence_failed"},
-            )
+        async with self._quick_reply_menu_guard():
+            try:
+                await self._ensure_quick_reply_menu_locked(page)
+            except TelegramAPIError:
+                logger.warning(
+                    "Unable to initialize quick reply menu",
+                    exc_info=True,
+                    extra={"event": "quick_reply_menu_startup_degraded"},
+                )
+            except Exception:
+                logger.exception(
+                    "Unable to persist quick reply menu",
+                    extra={"event": "quick_reply_menu_persistence_failed"},
+                )
 
     async def refresh_quick_reply_menu(self, page: int = 0) -> None:
         service = getattr(self, "quick_reply_service", None)
@@ -691,3 +750,31 @@ class TelegramQuickReplyHandlers(TelegramQuickReplyDraftHandlers):
             await callback.answer()
             return
         await callback.answer("Некорректная кнопка.", show_alert=False)
+
+
+class QuickReplyMenuRefreshWorker:
+    def __init__(
+        self,
+        menu: TelegramQuickReplyHandlers,
+        *,
+        interval_seconds: float = QUICK_REPLY_MENU_REFRESH_INTERVAL_SECONDS,
+    ) -> None:
+        self.menu = menu
+        self.interval_seconds = interval_seconds
+        self._stopping = asyncio.Event()
+
+    def stop(self) -> None:
+        self._stopping.set()
+
+    async def run(self) -> None:
+        while not self._stopping.is_set():
+            try:
+                await asyncio.wait_for(self._stopping.wait(), timeout=self.interval_seconds)
+            except TimeoutError:
+                try:
+                    await self.menu.ensure_quick_reply_menu()
+                except Exception:
+                    logger.exception(
+                        "Unable to refresh quick reply menu",
+                        extra={"event": "quick_reply_menu_refresh_failed"},
+                    )

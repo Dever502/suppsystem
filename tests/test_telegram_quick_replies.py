@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.methods import EditMessageText, SendMessage
 from aiogram.types import Message
 from pydantic import SecretStr
 
@@ -17,7 +20,10 @@ from suppsystem.quick_replies import (
     QuickReplyView,
     utf16_code_units,
 )
-from suppsystem.telegram_quick_replies import TelegramQuickReplyHandlers
+from suppsystem.telegram_quick_replies import (
+    QuickReplyMenuRefreshWorker,
+    TelegramQuickReplyHandlers,
+)
 from suppsystem.telegram_quick_reply_views import (
     inline_reply_description,
     parse_add_answer_argument,
@@ -474,6 +480,69 @@ async def test_quick_reply_menu_is_persisted_refreshed_and_pinned(
         assert bot.pin_chat_message.await_count == 2
     finally:
         await database.dispose()
+
+
+async def test_deleted_quick_reply_topic_is_recreated_with_a_new_menu(
+    tmp_path: Path,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/quick-reply-topic-recovery.db")
+    await database.create_schema_for_tests()
+    harness = QuickReplyHarness()
+    try:
+        service = QuickReplyService(database)
+        await service.save_menu_message_id(-100123, 501)
+        missing_message = TelegramBadRequest(
+            method=EditMessageText(chat_id=-100123, message_id=501, text="menu"),
+            message="Bad Request: message to edit not found",
+        )
+        missing_topic = TelegramBadRequest(
+            method=SendMessage(
+                chat_id=-100123,
+                message_thread_id=777,
+                text="menu",
+            ),
+            message="Bad Request: message thread not found",
+        )
+        bot = SimpleNamespace(
+            edit_message_text=AsyncMock(side_effect=missing_message),
+            send_message=AsyncMock(side_effect=[missing_topic, SimpleNamespace(message_id=502)]),
+            pin_chat_message=AsyncMock(),
+        )
+        harness = _harness(service, bot)
+        recover_topic = AsyncMock(return_value=888)
+        harness.recover_quick_replies_topic = recover_topic
+
+        await harness.ensure_quick_reply_menu()
+
+        recover_topic.assert_awaited_once_with(777)
+        assert harness.quick_replies_topic_id == 888
+        assert bot.send_message.await_count == 2
+        assert bot.send_message.await_args_list[0].kwargs["message_thread_id"] == 777
+        assert bot.send_message.await_args_list[1].kwargs["message_thread_id"] == 888
+        assert await service.menu_message_id(-100123) == 502
+        bot.pin_chat_message.assert_awaited_once_with(
+            chat_id=-100123,
+            message_id=502,
+            disable_notification=True,
+        )
+    finally:
+        await harness.shutdown_quick_reply_sessions()
+        await database.dispose()
+
+
+async def test_quick_reply_menu_refresh_worker_updates_and_stops() -> None:
+    refreshed = asyncio.Event()
+
+    async def ensure_menu() -> None:
+        refreshed.set()
+
+    menu = SimpleNamespace(ensure_quick_reply_menu=ensure_menu)
+    worker = QuickReplyMenuRefreshWorker(menu, interval_seconds=0.01)  # type: ignore[arg-type]
+    task = asyncio.create_task(worker.run())
+
+    await asyncio.wait_for(refreshed.wait(), timeout=1)
+    worker.stop()
+    await asyncio.wait_for(task, timeout=1)
 
 
 async def test_button_wizard_uses_one_temporary_form_and_direct_group_actions(

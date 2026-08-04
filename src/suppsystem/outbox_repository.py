@@ -113,6 +113,7 @@ class OutboxRepository:
                 "claimed_at": None,
                 "claim_token": None,
                 "last_error": None,
+                "payload": {},
             },
         )
 
@@ -144,29 +145,39 @@ class OutboxRepository:
         retry_after_seconds: float,
         max_attempts: int,
     ) -> bool:
-        return await self._transition_notification(
-            notification_id,
-            claim_token,
-            {
-                "status": case(
-                    (
-                        NotificationOutbox.attempt_count >= max_attempts,
-                        NotificationStatus.FAILED,
-                    ),
-                    else_=NotificationStatus.PENDING,
-                ),
-                "next_attempt_at": case(
-                    (
-                        NotificationOutbox.attempt_count >= max_attempts,
-                        NotificationOutbox.next_attempt_at,
-                    ),
-                    else_=utcnow() + timedelta(seconds=retry_after_seconds),
-                ),
-                "last_error": error[:1000],
-                "claimed_at": None,
-                "claim_token": None,
-            },
+        ownership = (
+            NotificationOutbox.id == notification_id,
+            NotificationOutbox.status == NotificationStatus.PROCESSING,
+            NotificationOutbox.claim_token == claim_token,
         )
+        async with self.database.session() as session:
+            terminal = await session.execute(
+                update(NotificationOutbox)
+                .where(*ownership, NotificationOutbox.attempt_count >= max_attempts)
+                .values(
+                    status=NotificationStatus.FAILED,
+                    last_error=error[:1000],
+                    claimed_at=None,
+                    claim_token=None,
+                    payload={},
+                )
+            )
+            if cast(CursorResult[object], terminal).rowcount == 1:
+                await session.commit()
+                return True
+            pending = await session.execute(
+                update(NotificationOutbox)
+                .where(*ownership)
+                .values(
+                    status=NotificationStatus.PENDING,
+                    next_attempt_at=utcnow() + timedelta(seconds=retry_after_seconds),
+                    last_error=error[:1000],
+                    claimed_at=None,
+                    claim_token=None,
+                )
+            )
+            await session.commit()
+            return cast(CursorResult[object], pending).rowcount == 1
 
     async def mark_notification_failed(
         self, notification_id: str, *, claim_token: str, error: str
@@ -179,6 +190,7 @@ class OutboxRepository:
                 "last_error": error[:1000],
                 "claimed_at": None,
                 "claim_token": None,
+                "payload": {},
             },
         )
 
@@ -286,6 +298,7 @@ class OutboxRepository:
                 "delivered_at": utcnow(),
                 "delivered_message_id": delivered_message_id,
                 "last_error": None,
+                "payload": {},
             },
         )
 
@@ -338,6 +351,7 @@ class OutboxRepository:
                 "claimed_at": None,
                 "claim_token": None,
                 "last_error": reason[:1000],
+                "payload": {},
             },
         )
 
@@ -350,23 +364,40 @@ class OutboxRepository:
         retry_after_seconds: float,
         max_attempts: int,
     ) -> bool:
-        return await self._transition_delivery(
-            delivery_id,
-            claim_token,
-            {
-                "status": case(
-                    (
-                        DeliveryOutbox.attempt_count >= max_attempts,
-                        DeliveryStatus.FAILED,
-                    ),
-                    else_=DeliveryStatus.PENDING,
-                ),
-                "next_attempt_at": utcnow() + timedelta(seconds=retry_after_seconds),
-                "claimed_at": None,
-                "claim_token": None,
-                "last_error": error[:1000],
-            },
+        ownership = (
+            DeliveryOutbox.id == delivery_id,
+            DeliveryOutbox.status == DeliveryStatus.PROCESSING,
+            DeliveryOutbox.claim_token == claim_token,
         )
+        async with self.database.session() as session:
+            terminal = await session.execute(
+                update(DeliveryOutbox)
+                .where(*ownership, DeliveryOutbox.attempt_count >= max_attempts)
+                .values(
+                    status=DeliveryStatus.FAILED,
+                    next_attempt_at=utcnow() + timedelta(seconds=retry_after_seconds),
+                    claimed_at=None,
+                    claim_token=None,
+                    last_error=error[:1000],
+                    payload={},
+                )
+            )
+            if cast(CursorResult[object], terminal).rowcount == 1:
+                await session.commit()
+                return True
+            pending = await session.execute(
+                update(DeliveryOutbox)
+                .where(*ownership)
+                .values(
+                    status=DeliveryStatus.PENDING,
+                    next_attempt_at=utcnow() + timedelta(seconds=retry_after_seconds),
+                    claimed_at=None,
+                    claim_token=None,
+                    last_error=error[:1000],
+                )
+            )
+            await session.commit()
+            return cast(CursorResult[object], pending).rowcount == 1
 
     async def release_stale_deliveries(self, stale_after_seconds: int = 300) -> int:
         threshold = utcnow() - timedelta(seconds=stale_after_seconds)

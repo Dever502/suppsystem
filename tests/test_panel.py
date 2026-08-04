@@ -32,6 +32,7 @@ from suppsystem.panel_notifications import (
     gift_notification_text,
     revoke_link_notification_text,
 )
+from suppsystem.panel_types import subscription_url_fingerprint
 from suppsystem.reconciliation import ReconciliationWorker
 from suppsystem.remnawave import (
     RemnawaveAmbiguousIdentityError,
@@ -522,6 +523,7 @@ async def test_web_gift_uses_email_binding_and_polls_notification(database: Data
     assert remnawave.emails == ["web@example.com"]
     assert ticket is not None and ticket.remnawave_user_uuid == remnawave_user().uuid
     assert len(messages) == 1 and "Подписка продлена" in (messages[0].content or "")
+    assert messages[0].sensitive is False
     assert deliveries == []
 
 
@@ -854,6 +856,9 @@ async def test_reconciliation_batch_preserves_order_within_each_ticket(
     }
     first = next(job for job in first_batch if job.id == "reconciliation-first")
     assert await repository.finish_reconciliation(first)
+    async with database.session() as session:
+        finished = await session.get(ReconciliationOutbox, first.id)
+    assert finished is not None and finished.payload == {}
 
     second_batch = await repository.claim_reconciliations(limit=4)
     assert [job.id for job in second_batch] == ["reconciliation-second"]
@@ -1334,6 +1339,73 @@ async def test_manual_revoke_resolution_preserves_notification_guarantee(
 
 
 @pytest.mark.asyncio
+async def test_manual_revoke_resolution_respects_web_support_block(database: Database) -> None:
+    await add_web_ticket(database, binding=remnawave_user().uuid)
+    async with database.session() as session:
+        action = OperatorAction(
+            ticket_id="web-ticket-1",
+            operator_telegram_id=42,
+            action="remnawave_revoke_subscription_link",
+            idempotency_key="manual-blocked-revoke",
+            payload={
+                "automatic_reconcile": "inconclusive",
+                "requires_reconcile": True,
+                "identity_provider": "uuid",
+                "identity_value": remnawave_user().uuid,
+                "remnawave_uuid": remnawave_user().uuid,
+            },
+            result="unknown",
+        )
+        session.add(action)
+        await session.flush()
+        session.add_all(
+            [
+                SupportBlock(
+                    ticket_id="web-ticket-1",
+                    blocked_by_telegram_id=42,
+                    reason="abuse",
+                    source="web",
+                ),
+                NotificationOutbox(
+                    ticket_id="web-ticket-1",
+                    operator_action_id=action.id,
+                    idempotency_key="manual-blocked-revoke:notification",
+                    event_type="subscription_link_reissued",
+                    destination="subscription_owner",
+                    recipient_identity_provider="uuid",
+                    recipient_identity_value=remnawave_user().uuid,
+                    payload={"before_subscription_url": "https://sub.example/old"},
+                    status=NotificationStatus.AWAITING_PAYLOAD,
+                ),
+            ]
+        )
+        await session.commit()
+
+    service = PanelService(WebRemnawave(remnawave_user()), database=database)
+    assert await service.resolve_inconclusive_action(
+        ticket_id="web-ticket-1",
+        operator_action_id=action.id,
+        operator_telegram_id=7,
+        resolution="applied",
+        idempotency_key="resolve-manual-blocked-revoke",
+    )
+
+    async with database.session() as session:
+        intent = await session.scalar(
+            select(NotificationOutbox).where(NotificationOutbox.operator_action_id == action.id)
+        )
+        client_messages = list(
+            (
+                await session.scalars(
+                    select(TicketMessage).where(TicketMessage.ticket_id == "web-ticket-1")
+                )
+            ).all()
+        )
+    assert intent is not None and intent.status == NotificationStatus.PENDING
+    assert client_messages == []
+
+
+@pytest.mark.asyncio
 async def test_concurrent_manual_resolutions_have_one_consistent_winner(
     database: Database,
     monkeypatch: pytest.MonkeyPatch,
@@ -1599,6 +1671,10 @@ async def test_revoke_link_is_confirmed_by_durable_reconciliation(database: Data
     )
     action, job = await load_action_and_job(database, "telegram:-100:9:/revokelink")
     assert result.status == "unknown"
+    assert "before_subscription_url" not in job.payload
+    assert job.payload["before_subscription_url_sha256"] == subscription_url_fingerprint(
+        "https://sub.example/abc123"
+    )
     assert await service.reconcile_durable_action(action.id, job.payload) is True
     async with database.session() as session:
         notification = await session.scalar(
@@ -1627,7 +1703,10 @@ async def test_revoke_intent_exists_before_external_mutation(database: Database)
                 )
             assert intent is not None
             assert intent.status == NotificationStatus.AWAITING_PAYLOAD
-            assert intent.payload["before_subscription_url"] == "https://sub.example/abc123"
+            assert "before_subscription_url" not in intent.payload
+            assert intent.payload["before_subscription_url_sha256"] == subscription_url_fingerprint(
+                "https://sub.example/abc123"
+            )
             self.revoke_calls.append((user_uuid, revoke_only_passwords))
             assert isinstance(self.result, RemnawaveUser)
             return replace(self.result, subscription_url="https://sub.example/reissued")
@@ -1702,6 +1781,12 @@ async def test_revoke_link_telegram_delivery_mode(
                 == f"panel-revoke-link:{action.id}:telegram-notification"
             )
         )
+        message = await session.scalar(
+            select(TicketMessage).where(
+                TicketMessage.ticket_id == action.ticket_id,
+                TicketMessage.content.contains("Ссылка подписки обновлена"),
+            )
+        )
 
     assert result.completed is True
     assert action is not None
@@ -1709,6 +1794,9 @@ async def test_revoke_link_telegram_delivery_mode(
     assert intent.status == NotificationStatus.PENDING
     assert intent.payload["subscription_url"] == "https://sub.example/mode-test"
     assert (delivery is not None) is expected_delivery
+    assert (message is not None) is expected_delivery
+    if message is not None:
+        assert message.sensitive is True
     if delivery is not None:
         assert delivery.payload == {
             "kind": "send_text",

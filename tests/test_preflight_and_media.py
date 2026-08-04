@@ -16,9 +16,14 @@ from suppsystem.__main__ import (
 )
 from suppsystem.authorization import AuthorizationService
 from suppsystem.config import Settings
+from suppsystem.media_storage import StoredMedia
 from suppsystem.models import TicketChannel, TicketStatus
 from suppsystem.panel import PanelActionResult
-from suppsystem.service_types import InternalNoteView, TopicProvisioningConflictError
+from suppsystem.service_types import (
+    InternalNoteView,
+    TicketNotFoundError,
+    TopicProvisioningConflictError,
+)
 from suppsystem.telegram_adapter import (
     GIFT_DAYS_ERROR_TEXT,
     SUPPORT_PENDING_TEXT,
@@ -767,6 +772,46 @@ async def test_reopened_ticket_customer_card_is_best_effort() -> None:
     await adapter._refresh_reopened_ticket_context(ticket)  # type: ignore[arg-type]
 
     assert calls == {"sync": 1, "notice": 1, "card": 1}
+
+
+async def test_operator_media_is_retained_when_link_state_is_unknown() -> None:
+    media = StoredMedia(
+        id="00000000-0000-4000-8000-000000000001",
+        storage_path="web-media/assets/00/media.png",
+        mime_type="image/png",
+        size_bytes=100,
+        sha256="a" * 64,
+        original_filename="media.png",
+    )
+    adapter = object.__new__(TelegramSupportAdapter)
+    adapter.ticket_service = SimpleNamespace(
+        get_media=AsyncMock(side_effect=RuntimeError("database unavailable"))
+    )
+    adapter.media_storage = SimpleNamespace(delete=AsyncMock())
+
+    await adapter._delete_operator_media_if_unlinked(media)
+
+    adapter.media_storage.delete.assert_not_awaited()
+
+
+async def test_operator_media_is_deleted_after_confirmed_missing_link() -> None:
+    media = StoredMedia(
+        id="00000000-0000-4000-8000-000000000002",
+        storage_path="web-media/assets/00/media.png",
+        mime_type="image/png",
+        size_bytes=100,
+        sha256="b" * 64,
+        original_filename="media.png",
+    )
+    adapter = object.__new__(TelegramSupportAdapter)
+    adapter.ticket_service = SimpleNamespace(
+        get_media=AsyncMock(side_effect=TicketNotFoundError(media.id))
+    )
+    adapter.media_storage = SimpleNamespace(delete=AsyncMock())
+
+    await adapter._delete_operator_media_if_unlinked(media)
+
+    adapter.media_storage.delete.assert_awaited_once_with(media)
 
 
 async def test_ticket_reopened_notice_uses_actor_specific_text() -> None:

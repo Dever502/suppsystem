@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock
 
 from aiogram.types import Update
 
-from suppsystem.telegram_ingress import DurableTelegramIngressMiddleware
+from suppsystem.telegram_ingress import DurableTelegramIngressMiddleware, update_ordering_key
 from suppsystem.telegram_limits import TelegramRateLimiter
 from suppsystem.user_message_limits import UserMessageRateLimiter
 
@@ -19,6 +19,26 @@ class Clock:
 
     def advance(self, seconds: float) -> None:
         self.now += seconds
+
+
+def test_update_ordering_key_scopes_forum_topics_independently() -> None:
+    def group_message(update_id: int, thread_id: int) -> Update:
+        return Update.model_validate(
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": update_id,
+                    "message_thread_id": thread_id,
+                    "date": 0,
+                    "chat": {"id": -100123, "type": "supergroup", "title": "Support"},
+                    "from": {"id": 7, "is_bot": False, "first_name": "Operator"},
+                    "text": "reply",
+                },
+            }
+        )
+
+    assert update_ordering_key(group_message(1, 777)) == "chat:-100123:thread:777"
+    assert update_ordering_key(group_message(2, 778)) == "chat:-100123:thread:778"
 
 
 async def test_inbound_limiter_allows_burst_then_throttles_without_extending_block() -> None:
@@ -76,10 +96,16 @@ async def test_rejected_attempts_do_not_consume_more_capacity() -> None:
 async def test_middleware_drops_excess_private_messages_before_persistence() -> None:
     class Repository:
         def __init__(self) -> None:
-            self.saved: list[int] = []
+            self.saved: list[tuple[int, str]] = []
 
-        async def enqueue_inbound_update(self, update_id: int, payload: dict[str, object]) -> bool:
-            self.saved.append(update_id)
+        async def enqueue_inbound_update(
+            self,
+            update_id: int,
+            payload: dict[str, object],
+            *,
+            ordering_key: str,
+        ) -> bool:
+            self.saved.append((update_id, ordering_key))
             return True
 
     repository = Repository()
@@ -118,7 +144,7 @@ async def test_middleware_drops_excess_private_messages_before_persistence() -> 
     await middleware(handler, private_message(2), {})
     await middleware(handler, private_message(3), {})
 
-    assert repository.saved == [1]
+    assert repository.saved == [(1, "chat:42:thread:0")]
     assert wake.call_count == 1
     assert bot.send_message.await_count == 1
     assert bot.send_message.await_args.kwargs["text"] == (

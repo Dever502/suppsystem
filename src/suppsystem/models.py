@@ -97,7 +97,7 @@ class UserIdentity(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
-    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(320), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     user: Mapped[User] = relationship(back_populates="identities")
@@ -160,6 +160,7 @@ class TicketMessage(Base):
             "channel",
             "created_at",
         ),
+        Index("ix_ticket_messages_sensitive_created", "sensitive", "created_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -171,6 +172,9 @@ class TicketMessage(Base):
     content: Mapped[str | None] = mapped_column(Text)
     media: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     suppressed: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
+    sensitive: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=text("false"), nullable=False
     )
     rating_cycle: Mapped[int | None] = mapped_column(Integer)
@@ -204,7 +208,7 @@ class DeliveryOutbox(Base):
     ticket_id: Mapped[str] = mapped_column(
         ForeignKey("tickets.id", ondelete="CASCADE"), nullable=False
     )
-    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(512), unique=True, nullable=False)
     direction: Mapped[Direction] = mapped_column(String(32), nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     status: Mapped[DeliveryStatus] = mapped_column(
@@ -243,11 +247,11 @@ class NotificationOutbox(Base):
         ForeignKey("operator_actions.id", ondelete="SET NULL"),
         unique=True,
     )
-    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(512), unique=True, nullable=False)
     event_type: Mapped[str] = mapped_column(String(64), nullable=False)
     destination: Mapped[str] = mapped_column(String(64), nullable=False)
     recipient_identity_provider: Mapped[str] = mapped_column(String(32), nullable=False)
-    recipient_identity_value: Mapped[str] = mapped_column(String(255), nullable=False)
+    recipient_identity_value: Mapped[str] = mapped_column(String(320), nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     status: Mapped[NotificationStatus] = mapped_column(
         String(32), default=NotificationStatus.PENDING, nullable=False
@@ -268,10 +272,19 @@ class InboundUpdate(Base):
     __table_args__ = (
         Index("ix_inbound_updates_claim", "status", "next_attempt_at", "telegram_update_id"),
         Index("ix_inbound_updates_stale", "status", "claimed_at"),
+        Index(
+            "ix_inbound_updates_ordering",
+            "ordering_key",
+            "status",
+            "telegram_update_id",
+        ),
     )
 
     telegram_update_id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, autoincrement=False
+    )
+    ordering_key: Mapped[str] = mapped_column(
+        String(64), nullable=False, server_default="legacy:global"
     )
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     status: Mapped[WorkStatus] = mapped_column(
@@ -302,7 +315,7 @@ class ReconciliationOutbox(Base):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(512), unique=True, nullable=False)
     kind: Mapped[str] = mapped_column(String(64), nullable=False)
     ticket_id: Mapped[str | None] = mapped_column(ForeignKey("tickets.id", ondelete="CASCADE"))
     operator_action_id: Mapped[str | None] = mapped_column(
@@ -346,7 +359,7 @@ class OperatorAction(Base):
     ticket_id: Mapped[str | None] = mapped_column(ForeignKey("tickets.id", ondelete="SET NULL"))
     operator_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     action: Mapped[str] = mapped_column(String(64), nullable=False)
-    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(512), unique=True, nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     result: Mapped[str | None] = mapped_column(String(64))
     trace_id: Mapped[str | None] = mapped_column(String(64))

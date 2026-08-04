@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.formparsers import MultiPartException
 from starlette.types import Message
@@ -17,6 +20,7 @@ from suppsystem.media_storage import (
     StoredMedia,
 )
 from suppsystem.metrics import MetricsRegistry
+from suppsystem.service_types import TicketNotFoundError
 from suppsystem.services import TicketService
 from suppsystem.user_message_limits import UserMessageRateLimiter
 from suppsystem.web_api_schemas import (
@@ -34,6 +38,26 @@ from suppsystem.web_api_schemas import (
 
 MAX_WEB_MESSAGE_REQUEST_BYTES = MAX_WEB_PHOTO_BYTES + 64 * 1024
 MAX_TELEGRAM_PHOTO_CAPTION_CHARS = 1024
+logger = logging.getLogger(__name__)
+
+
+async def _delete_media_if_unlinked(
+    *,
+    ticket_service: TicketService,
+    media_storage: LocalMediaStorage,
+    stored_media: StoredMedia,
+) -> None:
+    try:
+        await ticket_service.get_media(stored_media.id)
+    except TicketNotFoundError:
+        await media_storage.delete(stored_media)
+        return
+    except Exception:
+        logger.warning(
+            "Unable to determine whether Web media is linked; retaining it for orphan cleanup",
+            exc_info=True,
+            extra={"event": "web_media_link_check_failed", "media_id": stored_media.id},
+        )
 
 
 def _limit_request_body(request: Request, max_bytes: int) -> None:
@@ -175,18 +199,6 @@ def register_web_routes(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="external_user_id is required",
             )
-        rate_limit = await user_message_limiter.consume(
-            f"web:{settings.web_identity_mode}:{identity_resource}"
-        )
-        if not rate_limit.allowed:
-            if upload is not None:
-                await upload.close()
-            metrics.event("web_ingress", "rate_limited")
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Too many user messages",
-                headers={"Retry-After": str(rate_limit.retry_after_seconds)},
-            )
         stored_media: StoredMedia | None = None
         try:
             if upload is not None:
@@ -205,17 +217,45 @@ def register_web_routes(
                     "photo_sha256": stored_media.sha256 if stored_media else None,
                 },
             )
-            result = await ticket_service.accept_message(
-                identity_mode=settings.web_identity_mode,
-                external_user_id=message.external_user_id,
-                email=message.email,
-                display_name=message.display_name,
-                remnawave_user_uuid=message.remnawave_user_uuid,
-                content=message.text,
-                media=stored_media,
-                target_chat_id=settings.support_group_id,
-                command=command,
+            replay = await ticket_service.load_web_message_replay(command)
+            if replay is not None:
+                if stored_media is not None:
+                    await media_storage.delete(stored_media)
+                    stored_media = None
+                metrics.event("web_ingress", "replayed")
+                return accepted_message_response(replay)
+            rate_limit = await user_message_limiter.consume(
+                f"web:{settings.web_identity_mode}:{identity_resource}"
             )
+            if not rate_limit.allowed:
+                if stored_media is not None:
+                    await media_storage.delete(stored_media)
+                    stored_media = None
+                metrics.event("web_ingress", "rate_limited")
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many user messages",
+                    headers={"Retry-After": str(rate_limit.retry_after_seconds)},
+                )
+            try:
+                result = await ticket_service.accept_message(
+                    identity_mode=settings.web_identity_mode,
+                    external_user_id=message.external_user_id,
+                    email=message.email,
+                    display_name=message.display_name,
+                    remnawave_user_uuid=message.remnawave_user_uuid,
+                    content=message.text,
+                    media=stored_media,
+                    target_chat_id=settings.support_group_id,
+                    command=command,
+                )
+            except IntegrityError:
+                # A concurrent request may commit the same idempotency key after
+                # our initial replay lookup. Resolve that race to its durable result.
+                replay = await ticket_service.load_web_message_replay(command)
+                if replay is None:
+                    raise
+                result = replay
         except (ValueError, MediaValidationError) as error:
             if stored_media is not None:
                 await media_storage.delete(stored_media)
@@ -225,16 +265,18 @@ def register_web_routes(
             ) from error
         except Exception:
             if stored_media is not None:
-                try:
-                    await ticket_service.get_media(stored_media.id)
-                except Exception:
-                    await media_storage.delete(stored_media)
+                await _delete_media_if_unlinked(
+                    ticket_service=ticket_service,
+                    media_storage=media_storage,
+                    stored_media=stored_media,
+                )
             raise
         if stored_media is not None:
-            try:
-                await ticket_service.get_media(stored_media.id)
-            except Exception:
-                await media_storage.delete(stored_media)
+            await _delete_media_if_unlinked(
+                ticket_service=ticket_service,
+                media_storage=media_storage,
+                stored_media=stored_media,
+            )
         metrics.event("web_ingress", "replayed" if not result.changed else "accepted")
         return accepted_message_response(result)
 

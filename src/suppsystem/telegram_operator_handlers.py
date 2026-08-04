@@ -43,6 +43,21 @@ class TelegramOperatorHandlers(TelegramStatisticsDashboard, TelegramUserHandlers
     panel_commands: TelegramPanelCommandHandler
     media_storage: LocalMediaStorage
 
+    async def _delete_operator_media_if_unlinked(self, stored_media: StoredMedia) -> None:
+        try:
+            await self.ticket_service.get_media(stored_media.id)
+        except TicketNotFoundError:
+            await self.media_storage.delete(stored_media)
+        except Exception:
+            logger.warning(
+                "Unable to determine whether operator media is linked; retaining it for cleanup",
+                exc_info=True,
+                extra={
+                    "event": "web_operator_media_link_check_failed",
+                    "media_id": stored_media.id,
+                },
+            )
+
     async def _handle_topic_rename_service_message(self, message: Message) -> bool:
         topic_edit = getattr(message, "forum_topic_edited", None)
         if topic_edit is None:
@@ -333,7 +348,7 @@ class TelegramOperatorHandlers(TelegramStatisticsDashboard, TelegramUserHandlers
             )
         except Exception:
             if stored_media is not None:
-                await self.media_storage.delete(stored_media)
+                await self._delete_operator_media_if_unlinked(stored_media)
             raise
         if stored_media is not None and not result.changed:
             await self.media_storage.delete(stored_media)

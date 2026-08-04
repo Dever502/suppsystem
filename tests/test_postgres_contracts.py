@@ -14,16 +14,20 @@ from suppsystem.api import create_app
 from suppsystem.api_idempotency import api_idempotency_command
 from suppsystem.config import Settings
 from suppsystem.database import Database
+from suppsystem.durable_work import DurableWorkRepository
 from suppsystem.media_storage import StoredMedia
 from suppsystem.migrations import upgrade_database
 from suppsystem.models import (
     DeliveryOutbox,
     DeliveryStatus,
     Direction,
+    InboundUpdate,
     OperatorAction,
     Ticket,
     TicketMessage,
     TicketStatus,
+    UserIdentity,
+    WorkStatus,
     utcnow,
 )
 from suppsystem.service_types import DeliveryJob, TicketView, TopicProvisioningConflictError
@@ -195,6 +199,99 @@ async def test_postgres_web_photo_persists_message_before_media(
         assert asset.message_id == result.message_id
         assert delivery is not None
         assert delivery.payload["kind"] == "send_photo"
+
+
+@pytest.mark.parametrize("identity_mode", ["external_id", "email"])
+async def test_postgres_web_boundary_values_fit_persisted_columns(
+    postgres_database_url: str,
+    identity_mode: str,
+) -> None:
+    long_email = "a" * (320 - len("@example.com")) + "@example.com"
+    identity_value = "x" * 255 if identity_mode == "external_id" else long_email
+    external_user_id = identity_value if identity_mode == "external_id" else None
+    email = "boundary@example.com" if identity_mode == "external_id" else long_email
+    command = api_idempotency_command(
+        operation="web_message",
+        resource=identity_value,
+        key="k" * 128,
+        payload={"identity_mode": identity_mode},
+    )
+
+    async with migrated_service(postgres_database_url) as (database, service):
+        result = await service.accept_message(
+            identity_mode=identity_mode,
+            external_user_id=external_user_id,
+            email=email,
+            display_name="Boundary",
+            remnawave_user_uuid=None,
+            content="Boundary storage check",
+            media=None,
+            target_chat_id=-100123,
+            command=command,
+        )
+
+        async with database.session() as session:
+            identity = await session.scalar(
+                select(UserIdentity).where(UserIdentity.external_id == identity_value)
+            )
+            action = await session.scalar(
+                select(OperatorAction).where(OperatorAction.idempotency_key == command.storage_key)
+            )
+            delivery = await session.scalar(
+                select(DeliveryOutbox).where(DeliveryOutbox.ticket_id == result.ticket.id)
+            )
+        assert identity is not None
+        assert action is not None
+        assert delivery is not None
+        assert len(delivery.idempotency_key) <= 512
+
+
+async def test_postgres_inbound_retry_preserves_per_conversation_order(
+    postgres_database_url: str,
+) -> None:
+    async with migrated_service(postgres_database_url) as (database, _service):
+        repository = DurableWorkRepository(database)
+        await repository.enqueue_inbound_update(
+            7201, {"update_id": 7201}, ordering_key="chat:7:thread:21"
+        )
+        await repository.enqueue_inbound_update(
+            7202, {"update_id": 7202}, ordering_key="chat:7:thread:21"
+        )
+        await repository.enqueue_inbound_update(
+            7203, {"update_id": 7203}, ordering_key="chat:7:thread:22"
+        )
+
+        first = await repository.claim_inbound_update()
+        assert first is not None and first.telegram_update_id == 7201
+        assert await repository.retry_inbound_update(first, "temporary failure")
+
+        independent = await repository.claim_inbound_update()
+        assert independent is not None and independent.telegram_update_id == 7203
+        assert await repository.finish_inbound_update(independent)
+        assert await repository.claim_inbound_update() is None
+
+        async with database.session() as session:
+            retried_row = await session.get(InboundUpdate, 7201)
+            assert retried_row is not None
+            retried_row.next_attempt_at = utcnow()
+            await session.commit()
+
+        retried = await repository.claim_inbound_update()
+        assert retried is not None and retried.telegram_update_id == 7201
+        assert await repository.finish_inbound_update(retried)
+        later = await repository.claim_inbound_update()
+        assert later is not None and later.telegram_update_id == 7202
+        assert await repository.finish_inbound_update(later)
+
+        async with database.session() as session:
+            statuses = list(
+                (
+                    await session.scalars(
+                        select(InboundUpdate.status).order_by(InboundUpdate.telegram_update_id)
+                    )
+                ).all()
+            )
+        assert [WorkStatus(status) for status in statuses] == [WorkStatus.DELIVERED] * 3
 
 
 async def test_postgres_operator_photo_persists_message_before_media(
@@ -815,6 +912,7 @@ async def test_postgres_late_worker_cannot_overwrite_reclaimed_delivery(
         assert delivered.status == DeliveryStatus.DELIVERED
         assert delivered.claim_token is None
         assert delivered.delivered_message_id == 222
+        assert delivered.payload == {}
 
 
 async def test_postgres_restart_recovers_persisted_stale_delivery_claim(

@@ -17,6 +17,7 @@ from suppsystem.models import (
     NotificationOutbox,
     NotificationStatus,
     ReconciliationOutbox,
+    TicketMessage,
     WorkStatus,
     utcnow,
 )
@@ -107,6 +108,18 @@ async def assert_retention_policy(
                     created_at=old_outbox,
                 ),
                 NotificationOutbox(
+                    id="notification-stale-subscription-link",
+                    ticket_id=ticket.id,
+                    idempotency_key="notification-stale-subscription-link",
+                    event_type="subscription_link_reissued",
+                    destination="subscription_owner",
+                    recipient_identity_provider="telegram",
+                    recipient_identity_value=str(ticket.telegram_user_id),
+                    payload={"subscription_url": "https://sub.example/private"},
+                    status=NotificationStatus.PENDING,
+                    created_at=old_outbox,
+                ),
+                NotificationOutbox(
                     id="notification-failed",
                     ticket_id=ticket.id,
                     idempotency_key="notification-failed",
@@ -128,6 +141,15 @@ async def assert_retention_policy(
                     delivered_at=old_outbox,
                     created_at=old_outbox,
                 ),
+                TicketMessage(
+                    id="sensitive-ticket-message",
+                    ticket_id=ticket.id,
+                    direction=Direction.OPERATOR_TO_USER,
+                    channel="system",
+                    content="New URL: https://sub.example/private",
+                    sensitive=True,
+                    created_at=old_outbox,
+                ),
                 ReconciliationOutbox(
                     id="reconciliation-failed",
                     idempotency_key="reconciliation-failed",
@@ -147,20 +169,33 @@ async def assert_retention_policy(
 
     assert result.inbound_updates == 1
     assert result.delivery_outbox == 2
-    assert result.notification_outbox == 1
+    assert result.notification_outbox == 2
     assert result.reconciliation_outbox == 1
-    assert result.total == 5
+    assert result.ticket_messages_scrubbed == 1
+    assert result.total == 7
 
     async with ticket_service.database.session() as session:
         inbound_ids = set(await session.scalars(select(InboundUpdate.telegram_update_id)))
         delivery_ids = set(await session.scalars(select(DeliveryOutbox.id)))
         notification_ids = set(await session.scalars(select(NotificationOutbox.id)))
         reconciliation_ids = set(await session.scalars(select(ReconciliationOutbox.id)))
+        failed_delivery = await session.get(DeliveryOutbox, "delivery-failed")
+        failed_notification = await session.get(NotificationOutbox, "notification-failed")
+        failed_reconciliation = await session.get(ReconciliationOutbox, "reconciliation-failed")
+        sensitive_message = await session.get(TicketMessage, "sensitive-ticket-message")
 
     assert inbound_ids == {2, 3}
     assert delivery_ids == {"delivery-failed"}
     assert notification_ids == {"notification-failed"}
     assert reconciliation_ids == {"reconciliation-failed"}
+    assert failed_delivery is not None and failed_delivery.payload == {}
+    assert failed_notification is not None and failed_notification.payload == {
+        "reason": "retain for diagnostics"
+    }
+    assert failed_reconciliation is not None and failed_reconciliation.payload == {}
+    assert sensitive_message is not None
+    assert sensitive_message.sensitive is False
+    assert "sub.example" not in str(sensitive_message.content)
 
 
 async def test_retention_prunes_only_expired_successful_or_cancelled_sqlite_work(

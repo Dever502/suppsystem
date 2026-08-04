@@ -28,7 +28,7 @@ from suppsystem.models import (
 
 pytestmark = pytest.mark.postgres
 
-HEAD_REVISION = "0013_worker_concurrency_indexes"
+HEAD_REVISION = "0014_api_ingress_ordering"
 LEGACY_ACTIVE_TICKET_ID = "00000000-0000-4000-8000-000000000001"
 LEGACY_IDLE_TICKET_ID = "00000000-0000-4000-8000-000000000002"
 LEGACY_MESSAGE_ID = "00000000-0000-4000-8000-000000000101"

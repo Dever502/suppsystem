@@ -21,6 +21,7 @@ from suppsystem.models import (
     NotificationStatus,
     OperatorAction,
     ReconciliationOutbox,
+    TicketMessage,
     WorkStatus,
     utcnow,
 )
@@ -53,6 +54,7 @@ class RetentionCleanupResult:
     delivery_outbox: int
     notification_outbox: int
     reconciliation_outbox: int
+    ticket_messages_scrubbed: int = 0
 
     @property
     def total(self) -> int:
@@ -61,6 +63,7 @@ class RetentionCleanupResult:
             + self.delivery_outbox
             + self.notification_outbox
             + self.reconciliation_outbox
+            + self.ticket_messages_scrubbed
         )
 
 
@@ -158,12 +161,24 @@ class DurableWorkRepository:
         self.database = database
 
     async def enqueue_inbound_update(
-        self, telegram_update_id: int, payload: dict[str, object]
+        self,
+        telegram_update_id: int,
+        payload: dict[str, object],
+        *,
+        ordering_key: str,
     ) -> bool:
+        if not ordering_key or len(ordering_key) > 64:
+            raise ValueError("ordering_key must contain 1 to 64 characters")
         async with self.database.session() as session:
             if await session.get(InboundUpdate, telegram_update_id) is not None:
                 return False
-            session.add(InboundUpdate(telegram_update_id=telegram_update_id, payload=payload))
+            session.add(
+                InboundUpdate(
+                    telegram_update_id=telegram_update_id,
+                    ordering_key=ordering_key,
+                    payload=payload,
+                )
+            )
             try:
                 await session.commit()
             except IntegrityError:
@@ -176,20 +191,30 @@ class DurableWorkRepository:
     async def claim_inbound_update(self) -> InboundUpdateJob | None:
         now = utcnow()
         token = str(uuid.uuid4())
-        candidate = (
-            select(InboundUpdate.telegram_update_id)
-            .where(
-                InboundUpdate.status == WorkStatus.PENDING,
-                InboundUpdate.next_attempt_at <= now,
+        candidate = aliased(InboundUpdate)
+        earlier = aliased(InboundUpdate)
+        has_earlier_unfinished = exists(
+            select(earlier.telegram_update_id).where(
+                earlier.ordering_key == candidate.ordering_key,
+                earlier.status.in_((WorkStatus.PENDING, WorkStatus.PROCESSING)),
+                earlier.telegram_update_id < candidate.telegram_update_id,
             )
-            .order_by(InboundUpdate.telegram_update_id)
+        ).correlate(candidate)
+        claimable_id = (
+            select(candidate.telegram_update_id)
+            .where(
+                candidate.status == WorkStatus.PENDING,
+                candidate.next_attempt_at <= now,
+                ~has_earlier_unfinished,
+            )
+            .order_by(candidate.telegram_update_id)
             .limit(1)
         )
         async with self.database.session() as session:
             result = await session.execute(
                 update(InboundUpdate)
                 .where(
-                    InboundUpdate.telegram_update_id.in_(candidate),
+                    InboundUpdate.telegram_update_id.in_(claimable_id),
                     InboundUpdate.status == WorkStatus.PENDING,
                     InboundUpdate.next_attempt_at <= now,
                 )
@@ -290,6 +315,48 @@ class DurableWorkRepository:
         inbound_before = current_time - inbound_retention
         outbox_before = current_time - outbox_retention
         async with self.database.session() as session:
+            sensitive_messages = await session.execute(
+                update(TicketMessage)
+                .where(
+                    TicketMessage.sensitive.is_(True),
+                    TicketMessage.created_at < outbox_before,
+                )
+                .values(
+                    content="🔒 Ссылка скрыта по истечении срока хранения.",
+                    sensitive=False,
+                )
+            )
+            await session.execute(
+                update(DeliveryOutbox)
+                .where(
+                    DeliveryOutbox.status == DeliveryStatus.FAILED,
+                    DeliveryOutbox.created_at < outbox_before,
+                )
+                .values(payload={})
+            )
+            await session.execute(
+                update(NotificationOutbox)
+                .where(
+                    NotificationOutbox.event_type == "subscription_link_reissued",
+                    NotificationOutbox.status.in_(
+                        (
+                            NotificationStatus.AWAITING_PAYLOAD,
+                            NotificationStatus.PENDING,
+                            NotificationStatus.FAILED,
+                        )
+                    ),
+                    NotificationOutbox.created_at < outbox_before,
+                )
+                .values(status=NotificationStatus.CANCELLED, payload={})
+            )
+            await session.execute(
+                update(ReconciliationOutbox)
+                .where(
+                    ReconciliationOutbox.status == WorkStatus.FAILED,
+                    ReconciliationOutbox.created_at < outbox_before,
+                )
+                .values(payload={})
+            )
             inbound = await session.execute(
                 delete(InboundUpdate).where(
                     InboundUpdate.status == WorkStatus.DELIVERED,
@@ -336,6 +403,7 @@ class DurableWorkRepository:
             delivery_outbox=cast(CursorResult[object], deliveries).rowcount,
             notification_outbox=cast(CursorResult[object], notifications).rowcount,
             reconciliation_outbox=cast(CursorResult[object], reconciliations).rowcount,
+            ticket_messages_scrubbed=cast(CursorResult[object], sensitive_messages).rowcount,
         )
 
     async def claim_reconciliations(self, limit: int) -> list[ReconciliationJob]:
@@ -466,6 +534,8 @@ class DurableWorkRepository:
             values["next_attempt_at"] = next_attempt_at
         if delivered_at is not None:
             values["delivered_at"] = delivered_at
+        if status in {WorkStatus.DELIVERED, WorkStatus.FAILED}:
+            values["payload"] = {}
         async with self.database.session() as session:
             result = await session.execute(
                 update(ReconciliationOutbox)

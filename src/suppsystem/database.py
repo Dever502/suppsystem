@@ -56,7 +56,10 @@ class Database:
     def __init__(self, database_url: str) -> None:
         backend_name = make_url(database_url).get_backend_name()
         self.is_sqlite = backend_name == "sqlite"
-        engine_options: dict[str, Any] = {"pool_pre_ping": True}
+        engine_options: dict[str, Any] = {
+            "pool_pre_ping": True,
+            "hide_parameters": True,
+        }
         if backend_name == "postgresql":
             # Bound the pool below the PostgreSQL connection budget while allowing
             # enough overlap for the API and the internal workers in one application instance.

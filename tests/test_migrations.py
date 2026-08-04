@@ -23,6 +23,7 @@ EXPECTED_QUERY_INDEXES = {
     "ix_tickets_status_updated",
     "ix_tickets_status_last_activity",
     "ix_ticket_messages_ticket_created",
+    "ix_ticket_messages_sensitive_created",
     "ix_delivery_outbox_claim",
     "ix_delivery_outbox_stale",
     "ix_delivery_outbox_ticket_direction_status",
@@ -30,6 +31,7 @@ EXPECTED_QUERY_INDEXES = {
     "ix_notification_outbox_claim",
     "ix_notification_outbox_stale",
     "ix_notification_outbox_ticket_status_created",
+    "ix_inbound_updates_ordering",
     "ix_reconciliation_ticket_status_created",
     "ix_operator_actions_ticket_action_result",
     "ix_operator_actions_result_created",
@@ -109,7 +111,7 @@ async def test_explicit_upgrade_target_ignores_ambient_database_url(
 
     await upgrade_database(explicit_url)
 
-    assert await current_revision(explicit_url) == "0013_worker_concurrency_indexes"
+    assert await current_revision(explicit_url) == "0014_api_ingress_ordering"
     assert not ambient_path.exists()
 
 
@@ -126,12 +128,12 @@ async def test_explicit_downgrade_target_ignores_ambient_database_url(
     await downgrade_to_revision(explicit_url, "0009_ticket_last_activity")
 
     assert await current_revision(explicit_url) == "0009_ticket_last_activity"
-    assert await current_revision(ambient_url) == "0013_worker_concurrency_indexes"
+    assert await current_revision(ambient_url) == "0014_api_ingress_ordering"
 
     await upgrade_database(explicit_url)
 
-    assert await current_revision(explicit_url) == "0013_worker_concurrency_indexes"
-    assert await current_revision(ambient_url) == "0013_worker_concurrency_indexes"
+    assert await current_revision(explicit_url) == "0014_api_ingress_ordering"
+    assert await current_revision(ambient_url) == "0014_api_ingress_ordering"
 
 
 async def test_alembic_cli_still_uses_ambient_database_url(
@@ -144,7 +146,7 @@ async def test_alembic_cli_still_uses_ambient_database_url(
 
     await asyncio.to_thread(command.upgrade, config, "head")
 
-    assert await current_revision(ambient_url) == "0013_worker_concurrency_indexes"
+    assert await current_revision(ambient_url) == "0014_api_ingress_ordering"
 
 
 def test_alembic_config_accepts_percent_encoded_credentials() -> None:
@@ -196,6 +198,11 @@ async def test_upgrade_head_creates_query_indexes(tmp_path: Path) -> None:
                     column["name"] for column in inspect(sync).get_columns("ticket_messages")
                 }
             )
+            inbound_columns = await connection.run_sync(
+                lambda sync: {
+                    column["name"] for column in inspect(sync).get_columns("inbound_updates")
+                }
+            )
     finally:
         await engine.dispose()
     assert "delivered_message_id" in columns
@@ -205,6 +212,8 @@ async def test_upgrade_head_creates_query_indexes(tmp_path: Path) -> None:
     assert "close_cycle" in ticket_columns
     assert "last_activity_at" in ticket_columns
     assert "rating_cycle" in message_columns
+    assert "sensitive" in message_columns
+    assert "ordering_key" in inbound_columns
 
 
 async def test_query_indexes_support_downgrade_and_reupgrade(tmp_path: Path) -> None:

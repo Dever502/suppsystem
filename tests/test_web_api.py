@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -19,16 +20,21 @@ from suppsystem.migrations import upgrade_database
 from suppsystem.models import (
     DeliveryOutbox,
     Direction,
+    OperatorAction,
     SupportBlock,
     TicketChannel,
     TicketMessage,
     TicketStatus,
+    UserIdentity,
 )
 from suppsystem.services import TicketService
 from suppsystem.statistics import StatisticsService
 
 WEB_TOKEN = "web-token-with-at-least-thirty-two-characters"
 OPERATOR_TOKEN = "operator-token-with-at-least-thirty-two-chars"
+VALID_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 async def _context(
@@ -136,6 +142,148 @@ async def test_web_message_flow_is_channel_aware_and_idempotent(
             )
         assert delivery_count == 1
         assert message_count == 2
+    finally:
+        await client.aclose()
+        await database.dispose()
+
+
+async def test_web_message_replay_is_original_snapshot_and_does_not_consume_quota(
+    tmp_path: Path,
+) -> None:
+    client, database, _service = await _context(
+        tmp_path,
+        user_messages_per_minute=2,
+        user_messages_per_hour=2,
+    )
+    first_headers = {
+        "X-API-Token": WEB_TOKEN,
+        "X-Idempotency-Key": "web-exact-replay-first",
+    }
+    first_payload = {
+        "external_user_id": "exact-replay-user",
+        "email": "first@example.com",
+        "display_name": "First Name",
+        "text": "Original message",
+    }
+    try:
+        first = await client.post("/api/v1/web/messages", headers=first_headers, json=first_payload)
+        changed = await client.post(
+            "/api/v1/web/messages",
+            headers={
+                "X-API-Token": WEB_TOKEN,
+                "X-Idempotency-Key": "web-exact-replay-second",
+            },
+            json={
+                **first_payload,
+                "email": "changed@example.com",
+                "display_name": "Changed Name",
+                "text": "Later message",
+            },
+        )
+        replay = await client.post(
+            "/api/v1/web/messages", headers=first_headers, json=first_payload
+        )
+        limited = await client.post(
+            "/api/v1/web/messages",
+            headers={
+                "X-API-Token": WEB_TOKEN,
+                "X-Idempotency-Key": "web-exact-replay-third",
+            },
+            json={**first_payload, "text": "Must be limited"},
+        )
+
+        assert first.status_code == 200
+        assert changed.status_code == 200
+        assert replay.status_code == 200
+        assert replay.json() == first.json()
+        assert limited.status_code == 429
+    finally:
+        await client.aclose()
+        await database.dispose()
+
+
+async def test_web_polling_never_exposes_internal_operator_notes(tmp_path: Path) -> None:
+    client, database, service = await _context(tmp_path)
+    try:
+        created = await client.post(
+            "/api/v1/web/messages",
+            headers={"X-API-Token": WEB_TOKEN, "X-Idempotency-Key": "web-note-create"},
+            json={
+                "external_user_id": "web-note-user",
+                "email": "note@example.com",
+                "text": "Visible customer message",
+            },
+        )
+        ticket_id = created.json()["conversation_id"]
+        assert await service.add_internal_note(
+            ticket_id=ticket_id,
+            operator_telegram_id=77,
+            operator_display_name="Operator",
+            operator_username="operator",
+            note="Private operator context",
+            source_chat_id=-100123,
+            source_message_id=9002,
+            idempotency_key="telegram:-100123:9002:/note",
+        )
+
+        page = await client.get(
+            f"/api/v1/web/conversations/{ticket_id}/messages",
+            headers={"X-API-Token": WEB_TOKEN},
+        )
+
+        assert page.status_code == 200
+        assert [item["text"] for item in page.json()["items"]] == ["Visible customer message"]
+        async with database.session() as session:
+            internal_note = await session.scalar(
+                select(TicketMessage).where(
+                    TicketMessage.ticket_id == ticket_id,
+                    TicketMessage.channel == "internal_note",
+                )
+            )
+        assert internal_note is not None
+    finally:
+        await client.aclose()
+        await database.dispose()
+
+
+@pytest.mark.parametrize("identity_mode", ["external_id", "email"])
+async def test_web_api_boundary_identity_and_idempotency_values_fit_storage(
+    tmp_path: Path,
+    identity_mode: Literal["external_id", "email"],
+) -> None:
+    client, database, _service = await _context(tmp_path, web_identity_mode=identity_mode)
+    long_email = "a" * (320 - len("@example.com")) + "@example.com"
+    identity = "x" * 255 if identity_mode == "external_id" else long_email
+    payload = {
+        "email": "boundary@example.com" if identity_mode == "external_id" else long_email,
+        "text": "Boundary storage check",
+        **({"external_user_id": identity} if identity_mode == "external_id" else {}),
+    }
+    try:
+        response = await client.post(
+            "/api/v1/web/messages",
+            headers={"X-API-Token": WEB_TOKEN, "X-Idempotency-Key": "k" * 128},
+            json=payload,
+        )
+
+        assert response.status_code == 200
+        ticket_id = response.json()["conversation_id"]
+        async with database.session() as session:
+            stored_identity = await session.scalar(
+                select(UserIdentity).where(UserIdentity.external_id == identity)
+            )
+            action = await session.scalar(
+                select(OperatorAction).where(
+                    OperatorAction.ticket_id == ticket_id,
+                    OperatorAction.action == "web_create_message",
+                )
+            )
+            delivery = await session.scalar(
+                select(DeliveryOutbox).where(DeliveryOutbox.ticket_id == ticket_id)
+            )
+        assert stored_identity is not None
+        assert action is not None and len(action.idempotency_key) <= 512
+        assert delivery is not None and len(delivery.idempotency_key) <= 512
     finally:
         await client.aclose()
         await database.dispose()
@@ -613,7 +761,7 @@ async def test_web_photo_is_validated_persisted_and_downloadable(tmp_path: Path)
                 "email": "photo@example.com",
                 "text": "Screenshot",
             },
-            files={"photo": ("screen.png", b"\x89PNG\r\n\x1a\nimage-data", "image/png")},
+            files={"photo": ("screen.png", VALID_PNG, "image/png")},
         )
         assert created.status_code == 200
         ticket_id = created.json()["conversation"]["id"]
@@ -627,7 +775,7 @@ async def test_web_photo_is_validated_persisted_and_downloadable(tmp_path: Path)
         downloaded = await client.get(media_url, headers={"X-API-Token": WEB_TOKEN})
         assert downloaded.status_code == 200
         assert downloaded.headers["content-type"] == "image/png"
-        assert downloaded.content == b"\x89PNG\r\n\x1a\nimage-data"
+        assert downloaded.content == VALID_PNG
 
         long_caption = await client.post(
             "/api/v1/web/messages",
@@ -637,7 +785,7 @@ async def test_web_photo_is_validated_persisted_and_downloadable(tmp_path: Path)
                 "email": "photo@example.com",
                 "text": "x" * 1025,
             },
-            files={"photo": ("screen.png", b"\x89PNG\r\n\x1a\nimage", "image/png")},
+            files={"photo": ("screen.png", VALID_PNG, "image/png")},
         )
         assert long_caption.status_code == 422
 
@@ -650,6 +798,15 @@ async def test_web_photo_is_validated_persisted_and_downloadable(tmp_path: Path)
         assert rejected.status_code == 422
         assert list((tmp_path / "web-media" / "tmp").iterdir()) == []
 
+        truncated = await client.post(
+            "/api/v1/web/messages",
+            headers={"X-API-Token": WEB_TOKEN, "X-Idempotency-Key": "web-photo-truncated"},
+            data={"external_user_id": "photo-user", "email": "photo@example.com"},
+            files={"photo": ("truncated.png", b"\x89PNG\r\n\x1a\nnot-a-png", "image/png")},
+        )
+        assert truncated.status_code == 422
+        assert list((tmp_path / "web-media" / "tmp").iterdir()) == []
+
         unknown = await client.post(
             "/api/v1/web/messages",
             headers={"X-API-Token": WEB_TOKEN, "X-Idempotency-Key": "web-photo-0003"},
@@ -658,9 +815,41 @@ async def test_web_photo_is_validated_persisted_and_downloadable(tmp_path: Path)
                 "email": "photo@example.com",
                 "unknown": "not accepted",
             },
-            files={"photo": ("screen.png", b"\x89PNG\r\n\x1a\nimage", "image/png")},
+            files={"photo": ("screen.png", VALID_PNG, "image/png")},
         )
         assert unknown.status_code == 422
+    finally:
+        await client.aclose()
+        await database.dispose()
+
+
+async def test_transient_media_link_check_keeps_committed_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, database, service = await _context(tmp_path)
+    original_get_media = service.get_media
+
+    async def unavailable_get_media(media_id: str) -> object:
+        raise RuntimeError(f"temporary database failure for {media_id}")
+
+    monkeypatch.setattr(service, "get_media", unavailable_get_media)
+    try:
+        created = await client.post(
+            "/api/v1/web/messages",
+            headers={"X-API-Token": WEB_TOKEN, "X-Idempotency-Key": "media-link-check"},
+            data={"external_user_id": "media-check", "email": "media-check@example.com"},
+            files={"photo": ("screen.png", VALID_PNG, "image/png")},
+        )
+
+        assert created.status_code == 200
+        media_url = created.json()["message"]["media_url"]
+        assert len(list((tmp_path / "web-media" / "assets").rglob("*.png"))) == 1
+
+        monkeypatch.setattr(service, "get_media", original_get_media)
+        downloaded = await client.get(media_url, headers={"X-API-Token": WEB_TOKEN})
+        assert downloaded.status_code == 200
+        assert downloaded.content == VALID_PNG
     finally:
         await client.aclose()
         await database.dispose()

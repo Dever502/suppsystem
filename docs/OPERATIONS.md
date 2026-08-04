@@ -207,7 +207,7 @@ HMAC-SHA256 и дедуплицирует эффект по `event_id`.
 
 ```bash
 DEPLOY_DIR=/opt/suppsystem \
-  sh scripts/deploy.sh deploy registry.example/suppsystem:v2.1.0
+  sh scripts/deploy.sh deploy registry.example/suppsystem:v3.0.0
 DEPLOY_DIR=/opt/suppsystem sh scripts/production-compose.sh ps
 ```
 

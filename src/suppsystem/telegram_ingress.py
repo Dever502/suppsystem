@@ -20,6 +20,24 @@ from suppsystem.user_message_limits import UserMessageRateLimiter
 logger = logging.getLogger(__name__)
 
 
+def update_ordering_key(update: Update) -> str:
+    """Keep one private chat or forum topic ordered without blocking unrelated updates."""
+
+    message: object | None = update.message or update.edited_message
+    callback = update.callback_query
+    if message is None and callback is not None:
+        message = callback.message
+    if message is not None:
+        chat = getattr(message, "chat", None)
+        chat_id = getattr(chat, "id", None)
+        if isinstance(chat_id, int):
+            thread_id = getattr(message, "message_thread_id", None)
+            return f"chat:{chat_id}:thread:{thread_id if isinstance(thread_id, int) else 0}"
+    if callback is not None:
+        return f"user:{callback.from_user.id}"
+    return f"update:{update.update_id}"
+
+
 class DurableTelegramIngressMiddleware(BaseMiddleware):
     """Apply per-user admission control, then durably persist polling updates."""
 
@@ -61,7 +79,11 @@ class DurableTelegramIngressMiddleware(BaseMiddleware):
                 )
                 return None
         payload = event.model_dump(mode="json", exclude_none=True)
-        await self.repository.enqueue_inbound_update(event.update_id, payload)
+        await self.repository.enqueue_inbound_update(
+            event.update_id,
+            payload,
+            ordering_key=update_ordering_key(event),
+        )
         self.wake_worker()
         return None
 

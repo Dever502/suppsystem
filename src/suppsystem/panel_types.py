@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -146,6 +147,10 @@ def safe_remnawave_context(
         "remnawave_telegram_id": subscription.telegram_id,
         "remnawave_email": subscription.email,
     }
+
+
+def subscription_url_fingerprint(subscription_url: str) -> str:
+    return hashlib.sha256(subscription_url.encode()).hexdigest()
 
 
 def optional_result_int(value: object) -> int | None:

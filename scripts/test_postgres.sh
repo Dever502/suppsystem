@@ -7,11 +7,15 @@ cd "$root"
 compose_file=compose.production.postgres.yaml
 compose_project="suppsystem-pgtest-${CI_JOB_ID:-$$}"
 started_postgres=false
+postgres_container=""
 
 cleanup() {
     status=$?
     trap - EXIT HUP INT TERM
     if [ "$started_postgres" = true ]; then
+        if [ -n "$postgres_container" ]; then
+            docker rm --force "$postgres_container" >/dev/null 2>&1 || true
+        fi
         if ! docker compose --project-name "$compose_project" --file "$compose_file" \
             down --volumes --remove-orphans >/dev/null; then
             echo "Unable to remove disposable PostgreSQL test environment" >&2
@@ -46,9 +50,32 @@ if [ -z "${TEST_POSTGRES_DATABASE_URL:-}" ]; then
     export POSTGRES_RUNTIME_PASSWORD APP_IMAGE SUPPSYSTEM_ENV_FILE
     export POSTGRES_TEST_PORT
     started_postgres=true
+    postgres_container="${compose_project}-postgres-test"
     docker compose --project-name "$compose_project" --file "$compose_file" \
-        up --detach --wait --wait-timeout 60 postgres
-    TEST_POSTGRES_DATABASE_URL="postgresql+asyncpg://postgres:suppsystem-test-only-password@127.0.0.1:${POSTGRES_TEST_PORT}/suppsystem_test"
+        run --detach --service-ports --name "$postgres_container" \
+        --env POSTGRES_DB=suppsystem_test \
+        --env POSTGRES_USER=suppsystem_test \
+        --env POSTGRES_PASSWORD=suppsystem-test-only-password \
+        postgres >/dev/null
+
+    postgres_ready=false
+    attempt=0
+    while [ "$attempt" -lt 60 ]; do
+        if docker exec "$postgres_container" \
+            pg_isready --username suppsystem_test --dbname suppsystem_test >/dev/null 2>&1; then
+            postgres_ready=true
+            break
+        fi
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+    if [ "$postgres_ready" != true ]; then
+        docker logs "$postgres_container" >&2
+        echo "Disposable PostgreSQL test environment did not become ready" >&2
+        exit 1
+    fi
+
+    TEST_POSTGRES_DATABASE_URL="postgresql+asyncpg://suppsystem_test:suppsystem-test-only-password@127.0.0.1:${POSTGRES_TEST_PORT}/suppsystem_test"
     export TEST_POSTGRES_DATABASE_URL
 fi
 

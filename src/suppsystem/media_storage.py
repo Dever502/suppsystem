@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import uuid
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Protocol
 
+from PIL import Image, UnidentifiedImageError
 from starlette.datastructures import UploadFile
 
 MAX_WEB_PHOTO_BYTES = 10 * 1024 * 1024
@@ -17,6 +19,13 @@ MIME_EXTENSIONS = {
     "image/png": ".png",
     "image/webp": ".webp",
 }
+PILLOW_FORMAT_MIME_TYPES = {
+    "JPEG": "image/jpeg",
+    "PNG": "image/png",
+    "WEBP": "image/webp",
+}
+MAX_TELEGRAM_PHOTO_DIMENSION_SUM = 10_000
+MAX_TELEGRAM_PHOTO_ASPECT_RATIO = 20
 
 
 class TelegramDownloader(Protocol):
@@ -54,6 +63,36 @@ def _detected_mime(header: bytes) -> str | None:
     if len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP":
         return "image/webp"
     return None
+
+
+def _decoded_photo_mime(path: Path) -> str:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(path) as image:
+                image_format = image.format
+                width, height = image.size
+                if image_format not in PILLOW_FORMAT_MIME_TYPES:
+                    raise MediaValidationError("unsupported photo format")
+                if width <= 0 or height <= 0:
+                    raise MediaValidationError("photo dimensions are invalid")
+                if width + height > MAX_TELEGRAM_PHOTO_DIMENSION_SUM:
+                    raise MediaValidationError("photo dimensions are too large")
+                if max(width, height) / min(width, height) > MAX_TELEGRAM_PHOTO_ASPECT_RATIO:
+                    raise MediaValidationError("photo aspect ratio is too large")
+                if getattr(image, "n_frames", 1) != 1:
+                    raise MediaValidationError("animated photos are not supported")
+                image.verify()
+            with Image.open(path) as image:
+                image.load()
+    except MediaValidationError:
+        raise
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
+        raise MediaValidationError("photo dimensions are too large") from error
+    except (OSError, UnidentifiedImageError) as error:
+        raise MediaValidationError("photo is corrupted or incomplete") from error
+
+    return PILLOW_FORMAT_MIME_TYPES[image_format]
 
 
 class LocalMediaStorage:
@@ -97,10 +136,18 @@ class LocalMediaStorage:
         if size > MAX_WEB_PHOTO_BYTES:
             temp_path.unlink(missing_ok=True)
             raise MediaValidationError("photo is too large")
-        detected_mime = _detected_mime(header)
-        if detected_mime is None or detected_mime not in ALLOWED_PHOTO_MIME_TYPES:
+        header_mime = _detected_mime(header)
+        if header_mime is None or header_mime not in ALLOWED_PHOTO_MIME_TYPES:
             temp_path.unlink(missing_ok=True)
             raise MediaValidationError("unsupported photo format")
+        try:
+            detected_mime = _decoded_photo_mime(temp_path)
+        except MediaValidationError:
+            temp_path.unlink(missing_ok=True)
+            raise
+        if detected_mime != header_mime:
+            temp_path.unlink(missing_ok=True)
+            raise MediaValidationError("photo format does not match its content")
         if declared_mime and declared_mime.casefold() not in {
             detected_mime,
             "application/octet-stream",

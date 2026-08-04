@@ -222,10 +222,16 @@ def test_compose_allows_shutdown_to_outlive_soft_deadline(compose_file: str) -> 
 async def test_durable_ingress_commits_without_running_handler_then_replays() -> None:
     class Repository:
         def __init__(self) -> None:
-            self.saved: list[tuple[int, dict[str, object]]] = []
+            self.saved: list[tuple[int, dict[str, object], str]] = []
 
-        async def enqueue_inbound_update(self, update_id: int, payload: dict[str, object]) -> bool:
-            self.saved.append((update_id, payload))
+        async def enqueue_inbound_update(
+            self,
+            update_id: int,
+            payload: dict[str, object],
+            *,
+            ordering_key: str,
+        ) -> bool:
+            self.saved.append((update_id, payload, ordering_key))
             return True
 
     repository = Repository()
@@ -254,6 +260,7 @@ async def test_durable_ingress_commits_without_running_handler_then_replays() ->
     assert handled == []
     assert repository.saved[0][0] == 501
     assert repository.saved[0][1]["update_id"] == 501
+    assert repository.saved[0][2] == "update:501"
     assert wake_count == 1
 
     result = await middleware(  # type: ignore[arg-type]

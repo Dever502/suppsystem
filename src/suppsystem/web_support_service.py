@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -39,6 +40,11 @@ from suppsystem.web_models import MediaAsset, SystemSetting, TicketLifecycleEven
 
 logger = logging.getLogger(__name__)
 WEB_IDENTITY_MODE_KEY = "web_identity_mode"
+WEB_VISIBLE_MESSAGE_CHANNELS = (
+    TicketChannel.WEB.value,
+    "rating",
+    "system",
+)
 
 
 @dataclass(frozen=True)
@@ -90,6 +96,138 @@ def _message_item(message: TicketMessage) -> WebMessageItem:
         media_id=media_id,
         media_mime_type=media_mime_type,
     )
+
+
+def _optional_snapshot_string(value: object) -> str | None:
+    if value is None or isinstance(value, str):
+        return value
+    raise RuntimeError("stored Web API response is malformed")
+
+
+def _snapshot_datetime(value: object, *, optional: bool = False) -> datetime | None:
+    if value is None and optional:
+        return None
+    if not isinstance(value, str):
+        raise RuntimeError("stored Web API response is malformed")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise RuntimeError("stored Web API response is malformed") from error
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _ticket_snapshot(ticket: TicketView) -> dict[str, object]:
+    return {
+        "id": ticket.id,
+        "user_id": ticket.user_id,
+        "telegram_user_id": ticket.telegram_user_id,
+        "display_name": ticket.display_name,
+        "username": ticket.username,
+        "topic_id": ticket.topic_id,
+        "status": ticket.status.value,
+        "created_at": ticket.created_at.isoformat(),
+        "updated_at": ticket.updated_at.isoformat(),
+        "last_activity_at": ticket.last_activity_at.isoformat(),
+        "closed_at": ticket.closed_at.isoformat() if ticket.closed_at is not None else None,
+        "close_cycle": ticket.close_cycle,
+        "reopened": ticket.reopened,
+        "channel": ticket.channel.value,
+        "email": ticket.email,
+        "identity_provider": ticket.identity_provider,
+        "identity_value": ticket.identity_value,
+        "remnawave_user_uuid": ticket.remnawave_user_uuid,
+    }
+
+
+def _message_snapshot(message: WebMessageItem) -> dict[str, object]:
+    return {
+        "id": message.id,
+        "direction": message.direction.value,
+        "channel": message.channel,
+        "content": message.content,
+        "created_at": message.created_at.isoformat(),
+        "cursor": message.cursor,
+        "media_id": message.media_id,
+        "media_mime_type": message.media_mime_type,
+    }
+
+
+def _ticket_from_snapshot(value: object) -> TicketView:
+    if not isinstance(value, Mapping):
+        raise RuntimeError("stored Web API response is malformed")
+    try:
+        user_id = value["user_id"]
+        telegram_user_id = value["telegram_user_id"]
+        topic_id = value["topic_id"]
+        close_cycle = value["close_cycle"]
+        reopened = value["reopened"]
+        if not isinstance(user_id, int) or isinstance(user_id, bool):
+            raise TypeError
+        if telegram_user_id is not None and (
+            not isinstance(telegram_user_id, int) or isinstance(telegram_user_id, bool)
+        ):
+            raise TypeError
+        if topic_id is not None and (not isinstance(topic_id, int) or isinstance(topic_id, bool)):
+            raise TypeError
+        if not isinstance(close_cycle, int) or isinstance(close_cycle, bool):
+            raise TypeError
+        if not isinstance(reopened, bool):
+            raise TypeError
+        ticket_id = value["id"]
+        identity_provider = value["identity_provider"]
+        if not isinstance(ticket_id, str) or not isinstance(identity_provider, str):
+            raise TypeError
+        created_at = _snapshot_datetime(value["created_at"])
+        updated_at = _snapshot_datetime(value["updated_at"])
+        last_activity_at = _snapshot_datetime(value["last_activity_at"])
+        assert created_at is not None and updated_at is not None and last_activity_at is not None
+        return TicketView(
+            id=ticket_id,
+            user_id=user_id,
+            telegram_user_id=telegram_user_id,
+            display_name=_optional_snapshot_string(value["display_name"]),
+            username=_optional_snapshot_string(value["username"]),
+            topic_id=topic_id,
+            status=TicketStatus(value["status"]),
+            created_at=created_at,
+            updated_at=updated_at,
+            last_activity_at=last_activity_at,
+            closed_at=_snapshot_datetime(value["closed_at"], optional=True),
+            close_cycle=close_cycle,
+            reopened=reopened,
+            channel=TicketChannel(value["channel"]),
+            email=_optional_snapshot_string(value["email"]),
+            identity_provider=identity_provider,
+            identity_value=_optional_snapshot_string(value["identity_value"]),
+            remnawave_user_uuid=_optional_snapshot_string(value["remnawave_user_uuid"]),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError("stored Web API response is malformed") from error
+
+
+def _message_from_snapshot(value: object) -> WebMessageItem:
+    if not isinstance(value, Mapping):
+        raise RuntimeError("stored Web API response is malformed")
+    try:
+        message_id = value["id"]
+        channel = value["channel"]
+        cursor = value["cursor"]
+        if not all(isinstance(item, str) for item in (message_id, channel, cursor)):
+            raise TypeError
+        created_at = _snapshot_datetime(value["created_at"])
+        assert created_at is not None
+        return WebMessageItem(
+            id=message_id,
+            direction=Direction(value["direction"]),
+            channel=channel,
+            content=_optional_snapshot_string(value["content"]),
+            created_at=created_at,
+            cursor=cursor,
+            media_id=_optional_snapshot_string(value["media_id"]),
+            media_mime_type=_optional_snapshot_string(value["media_mime_type"]),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError("stored Web API response is malformed") from error
 
 
 def normalize_email(value: str) -> str:
@@ -167,6 +305,19 @@ class WebSupportService(TicketServiceBase):
             message_id = replay.get("message_id")
             if not isinstance(ticket_id, str) or not isinstance(message_id, str):
                 raise RuntimeError("stored Web API response is malformed")
+            if "ticket" in replay or "message" in replay:
+                ticket_snapshot = _ticket_from_snapshot(replay.get("ticket"))
+                message_snapshot = _message_from_snapshot(replay.get("message"))
+                if ticket_snapshot.id != ticket_id or message_snapshot.id != message_id:
+                    raise RuntimeError("stored Web API response is malformed")
+                return WebMessageResult(
+                    changed=bool(replay["changed"]),
+                    created=bool(replay.get("created")),
+                    reopened=bool(replay.get("reopened")),
+                    ticket=ticket_snapshot,
+                    message_id=message_id,
+                    message=message_snapshot,
+                )
             ticket = await session.get(Ticket, ticket_id)
             if ticket is None:
                 raise RuntimeError("stored Web API ticket is missing")
@@ -181,6 +332,11 @@ class WebSupportService(TicketServiceBase):
                 message_id=message_id,
                 message=_message_item(message),
             )
+
+    async def load_web_message_replay(
+        self, command: ApiIdempotencyCommand
+    ) -> WebMessageResult | None:
+        return await self._load_replay(command)
 
     @retry_sqlite_locks
     async def accept_message(
@@ -357,11 +513,16 @@ class WebSupportService(TicketServiceBase):
                         await enqueue_topic_reconciliation(
                             session, ticket_id=ticket.id, desired_status=TicketStatus.OPEN.value
                         )
+                await session.flush()
+                view = await self._ticket_view(session, ticket)
+                message_item = _message_item(message)
                 response = {
                     "ticket_id": ticket.id,
                     "message_id": message_id,
                     "created": created,
                     "reopened": reopened,
+                    "ticket": _ticket_snapshot(view),
+                    "message": _message_snapshot(message_item),
                 }
                 session.add(
                     OperatorAction(
@@ -386,7 +547,6 @@ class WebSupportService(TicketServiceBase):
                 )
                 try:
                     await session.flush()
-                    view = await self._ticket_view(session, ticket)
                     await session.commit()
                 except IntegrityError:
                     await session.rollback()
@@ -411,7 +571,7 @@ class WebSupportService(TicketServiceBase):
                     reopened,
                     view,
                     message_id,
-                    _message_item(message),
+                    message_item,
                 )
         replay = await self._load_replay(command)
         if replay is None:
@@ -431,7 +591,10 @@ class WebSupportService(TicketServiceBase):
         await self.get_web_ticket(ticket_id)
         statement = (
             select(TicketMessage)
-            .where(TicketMessage.ticket_id == ticket_id)
+            .where(
+                TicketMessage.ticket_id == ticket_id,
+                TicketMessage.channel.in_(WEB_VISIBLE_MESSAGE_CHANNELS),
+            )
             .order_by(TicketMessage.created_at, TicketMessage.id)
             .limit(limit)
         )

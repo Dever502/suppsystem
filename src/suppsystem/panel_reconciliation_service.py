@@ -33,6 +33,7 @@ from suppsystem.panel_types import (
     action_status_from_lookup,
     optional_result_int,
     safe_remnawave_context,
+    subscription_url_fingerprint,
 )
 from suppsystem.remnawave import (
     RemnawaveError,
@@ -152,7 +153,7 @@ class PanelReconciliationService(PanelPersistenceService):
                 return False
             action_name = action.action
             action_payload = dict(action.payload)
-            revoke_before_url: str | None = None
+            revoke_before_fingerprint: str | None = None
             if action_name == "remnawave_revoke_subscription_link" and resolution == "applied":
                 intent = await session.scalar(
                     select(NotificationOutbox).where(
@@ -171,10 +172,14 @@ class PanelReconciliationService(PanelPersistenceService):
                     return False
                 if not isinstance(user_uuid, str) and identity_provider != "telegram":
                     return False
-                raw_before_url = intent.payload.get("before_subscription_url")
-                if not isinstance(raw_before_url, str):
+                raw_before_fingerprint = intent.payload.get("before_subscription_url_sha256")
+                legacy_before_url = intent.payload.get("before_subscription_url")
+                if isinstance(raw_before_fingerprint, str):
+                    revoke_before_fingerprint = raw_before_fingerprint
+                elif isinstance(legacy_before_url, str):
+                    revoke_before_fingerprint = subscription_url_fingerprint(legacy_before_url)
+                else:
                     return False
-                revoke_before_url = raw_before_url
                 revoke_user_uuid = user_uuid if isinstance(user_uuid, str) else None
                 if identity_provider == "telegram":
                     try:
@@ -183,7 +188,7 @@ class PanelReconciliationService(PanelPersistenceService):
                         return False
 
         revoke_user: RemnawaveUser | None = None
-        if revoke_before_url is not None:
+        if revoke_before_fingerprint is not None:
             try:
                 if revoke_user_uuid is not None:
                     revoke_user = await self.remnawave.get_user_by_uuid(revoke_user_uuid)
@@ -193,7 +198,9 @@ class PanelReconciliationService(PanelPersistenceService):
                     return False
             except RemnawaveError:
                 return False
-            if revoke_user.subscription_url == revoke_before_url:
+            if subscription_url_fingerprint(revoke_user.subscription_url) == (
+                revoke_before_fingerprint
+            ):
                 return False
 
         reconciled_at = utcnow()
@@ -229,7 +236,12 @@ class PanelReconciliationService(PanelPersistenceService):
                 await session.rollback()
                 return False
             if row.action == "remnawave_revoke_subscription_link":
-                ticket = await session.get(Ticket, ticket_id)
+                ticket = await session.scalar(
+                    select(Ticket).where(Ticket.id == ticket_id).with_for_update()
+                )
+                blocked = (
+                    ticket is not None and await session.get(SupportBlock, ticket.id) is not None
+                )
                 intent = await session.scalar(
                     select(NotificationOutbox).where(
                         NotificationOutbox.operator_action_id == operator_action_id,
@@ -242,9 +254,13 @@ class PanelReconciliationService(PanelPersistenceService):
                             await session.rollback()
                             return False
                         self._fill_revoke_notification(intent, revoke_user, recovered=True)
-                        if ticket is not None and (
-                            TicketChannel(ticket.channel) is TicketChannel.WEB
-                            or self.revoke_link_telegram_notification
+                        if (
+                            ticket is not None
+                            and not blocked
+                            and (
+                                TicketChannel(ticket.channel) is TicketChannel.WEB
+                                or self.revoke_link_telegram_notification
+                            )
                         ):
                             self._queue_revoke_link_telegram_notification(
                                 session,
@@ -255,6 +271,7 @@ class PanelReconciliationService(PanelPersistenceService):
                             )
                     else:
                         intent.status = NotificationStatus.CANCELLED
+                        intent.payload = {}
                 else:
                     await session.rollback()
                     return False
@@ -271,6 +288,11 @@ class PanelReconciliationService(PanelPersistenceService):
                     result="completed",
                     trace_id=get_trace_id(),
                 )
+            )
+            await session.execute(
+                update(ReconciliationOutbox)
+                .where(ReconciliationOutbox.operator_action_id == operator_action_id)
+                .values(payload={})
             )
             try:
                 await session.commit()
@@ -488,7 +510,9 @@ class PanelReconciliationService(PanelPersistenceService):
         if action == "extend_subscription":
             payload["before_expire_at"] = before.expire_at.isoformat()
         elif action == "revoke_subscription_link":
-            payload["before_subscription_url"] = before.subscription_url
+            payload["before_subscription_url_sha256"] = subscription_url_fingerprint(
+                before.subscription_url
+            )
         elif action == "reset_key":
             if before.credential_fingerprint is None:
                 raise RemnawaveUnexpectedResponseError("Remnawave 2.8 user credentials are missing")
@@ -600,10 +624,19 @@ class PanelReconciliationService(PanelPersistenceService):
                     else "inconclusive"
                 )
             elif action_name == "revoke_subscription_link":
-                before_url = payload.get("before_subscription_url")
-                if not isinstance(before_url, str):
+                before_fingerprint = payload.get("before_subscription_url_sha256")
+                legacy_before_url = payload.get("before_subscription_url")
+                if isinstance(before_fingerprint, str):
+                    pass
+                elif isinstance(legacy_before_url, str):
+                    before_fingerprint = subscription_url_fingerprint(legacy_before_url)
+                else:
                     raise ReconciliationPayloadError("invalid revoke reconciliation payload")
-                outcome = "applied" if user.subscription_url != before_url else "not_applied"
+                outcome = (
+                    "applied"
+                    if subscription_url_fingerprint(user.subscription_url) != before_fingerprint
+                    else "not_applied"
+                )
             elif action_name == "reset_key":
                 before_fingerprint = payload.get("before_credential_fingerprint")
                 if not isinstance(before_fingerprint, str):
@@ -689,6 +722,7 @@ class PanelReconciliationService(PanelPersistenceService):
                         revoke_intent_ready = True
                     elif outcome == "not_applied":
                         intent.status = NotificationStatus.CANCELLED
+                        intent.payload = {}
             ticket = await session.get(Ticket, row.ticket_id) if row.ticket_id is not None else None
             blocked = ticket is not None and await session.get(SupportBlock, ticket.id) is not None
             if (

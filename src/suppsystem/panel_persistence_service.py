@@ -34,6 +34,7 @@ from suppsystem.panel_types import (
     RemnawaveReader,
     lookup_status_from_error,
     subscription_info,
+    subscription_url_fingerprint,
 )
 from suppsystem.remnawave import RemnawaveError, RemnawaveNotFoundError, RemnawaveUser
 from suppsystem.service_types import TicketView
@@ -264,7 +265,9 @@ class PanelPersistenceService:
             if intent is None:
                 return False
             intent.payload = {
-                "before_subscription_url": subscription.subscription_url,
+                "before_subscription_url_sha256": subscription_url_fingerprint(
+                    subscription.subscription_url
+                ),
                 "remnawave_username": subscription.username,
                 "remnawave_uuid": subscription.uuid,
             }
@@ -468,6 +471,7 @@ class PanelPersistenceService:
                 direction=Direction.OPERATOR_TO_USER,
                 channel="system",
                 content=text,
+                sensitive=True,
             )
         )
         if recipient_telegram_id is not None:

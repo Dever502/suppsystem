@@ -112,6 +112,7 @@ async def test_delivery_transitions_require_current_processing_claim(
     assert cancelled.status == DeliveryStatus.CANCELLED
     assert cancelled.claimed_at is None
     assert cancelled.claim_token is None
+    assert cancelled.payload == {}
 
 
 async def test_late_worker_cannot_overwrite_released_and_reclaimed_delivery(
@@ -154,6 +155,7 @@ async def test_late_worker_cannot_overwrite_released_and_reclaimed_delivery(
     assert delivered.claimed_at is None
     assert delivered.claim_token is None
     assert delivered.delivered_message_id == 222
+    assert delivered.payload == {}
 
 
 async def test_restart_recovers_persisted_stale_delivery_claim(tmp_path: Path) -> None:

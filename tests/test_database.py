@@ -13,6 +13,7 @@ from suppsystem.runtime_defaults import POSTGRES_POOL_SIZE
 async def test_sqlite_connections_enable_safety_pragmas(tmp_path: Path) -> None:
     database = Database(f"sqlite+aiosqlite:///{tmp_path}/support.db")
     try:
+        assert database.engine.sync_engine.hide_parameters is True
         async with database.engine.connect() as connection:
             foreign_keys = await connection.scalar(text("PRAGMA foreign_keys"))
             journal_mode = await connection.scalar(text("PRAGMA journal_mode"))
@@ -66,6 +67,7 @@ async def test_sqlite_lock_retry_does_not_mask_other_database_errors(tmp_path: P
 def test_postgres_engine_uses_bounded_runtime_pool() -> None:
     database = Database("postgresql+asyncpg://user:password@localhost/suppsystem")
     try:
+        assert database.engine.sync_engine.hide_parameters is True
         assert database.engine.pool.size() == POSTGRES_POOL_SIZE
     finally:
         # Engine construction does not open a connection; avoid requiring an event loop here.

@@ -247,6 +247,7 @@ async def test_delivery_receipt_is_persisted(ticket_service: TicketService) -> N
     assert delivery.status == DeliveryStatus.DELIVERED
     assert delivery.delivered_message_id == 456
     assert delivery.delivered_at is not None
+    assert delivery.payload == {}
 
 
 async def test_user_message_waits_for_topic_and_is_released_on_attach(
@@ -1186,6 +1187,7 @@ async def test_notification_outbox_claim_and_mark_delivered(
     assert notification is not None
     assert notification.status == "delivered"
     assert notification.delivered_at is not None
+    assert notification.payload == {}
 
 
 async def test_notification_outbox_retry_marks_failed_after_max_attempts(
@@ -1212,14 +1214,25 @@ async def test_notification_outbox_retry_marks_failed_after_max_attempts(
     assert notification is not None
     assert notification.status == "failed"
     assert notification.last_error == "bad request"
+    assert notification.payload == {}
 
 
 async def test_inbound_update_claim_fencing_survives_reclaim(
     ticket_service: TicketService,
 ) -> None:
     repository = DurableWorkRepository(ticket_service.database)
-    assert await repository.enqueue_inbound_update(7001, {"update_id": 7001}) is True
-    assert await repository.enqueue_inbound_update(7001, {"update_id": 7001}) is False
+    assert (
+        await repository.enqueue_inbound_update(
+            7001, {"update_id": 7001}, ordering_key="chat:7:thread:0"
+        )
+        is True
+    )
+    assert (
+        await repository.enqueue_inbound_update(
+            7001, {"update_id": 7001}, ordering_key="chat:7:thread:0"
+        )
+        is False
+    )
 
     old_claim = await repository.claim_inbound_update()
     assert old_claim is not None
@@ -1235,6 +1248,42 @@ async def test_inbound_update_claim_fencing_survives_reclaim(
     assert update is not None
     assert WorkStatus(update.status) is WorkStatus.DELIVERED
     assert update.payload == {}
+
+
+async def test_inbound_retry_blocks_only_later_updates_with_same_ordering_key(
+    ticket_service: TicketService,
+) -> None:
+    repository = DurableWorkRepository(ticket_service.database)
+    await repository.enqueue_inbound_update(
+        7101, {"update_id": 7101}, ordering_key="chat:7:thread:11"
+    )
+    await repository.enqueue_inbound_update(
+        7102, {"update_id": 7102}, ordering_key="chat:7:thread:11"
+    )
+    await repository.enqueue_inbound_update(
+        7103, {"update_id": 7103}, ordering_key="chat:7:thread:12"
+    )
+
+    first = await repository.claim_inbound_update()
+    assert first is not None and first.telegram_update_id == 7101
+    assert await repository.retry_inbound_update(first, "temporary failure")
+
+    independent = await repository.claim_inbound_update()
+    assert independent is not None and independent.telegram_update_id == 7103
+    assert await repository.finish_inbound_update(independent)
+    assert await repository.claim_inbound_update() is None
+
+    async with ticket_service.database.session() as session:
+        retried = await session.get(InboundUpdate, 7101)
+        assert retried is not None
+        retried.next_attempt_at = utcnow()
+        await session.commit()
+
+    retried = await repository.claim_inbound_update()
+    assert retried is not None and retried.telegram_update_id == 7101
+    assert await repository.finish_inbound_update(retried)
+    later = await repository.claim_inbound_update()
+    assert later is not None and later.telegram_update_id == 7102
 
 
 async def test_notification_claim_fencing_rejects_late_worker(

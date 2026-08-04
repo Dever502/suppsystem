@@ -20,6 +20,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, validates
 
+_TRUE_SERVER_DEFAULT = text("true")
+
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
@@ -397,3 +399,35 @@ class SupportBlock(Base):
     reason: Mapped[str | None] = mapped_column(Text)
     source: Mapped[str] = mapped_column(String(32), default="telegram", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class QuickReply(Base):
+    __tablename__ = "quick_replies"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_chat_id",
+            "source_message_id",
+            name="uq_quick_replies_source",
+        ),
+        UniqueConstraint("normalized_title", name="uq_quick_replies_normalized_title"),
+        UniqueConstraint("published_message_id", name="uq_quick_replies_published_message"),
+        Index("ix_quick_replies_active_id", "active", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(64), nullable=False)
+    normalized_title: Mapped[str] = mapped_column(String(256), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_by_display_name: Mapped[str | None] = mapped_column(String(255))
+    created_by_username: Mapped[str | None] = mapped_column(String(255))
+    source_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    published_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=_TRUE_SERVER_DEFAULT, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )

@@ -25,6 +25,7 @@ from suppsystem.metrics import MetricsRegistry
 from suppsystem.migrations import upgrade_database
 from suppsystem.notification_webhook import NotificationWebhookWorker
 from suppsystem.panel import PanelService
+from suppsystem.quick_replies import QuickReplyService
 from suppsystem.reconciliation import ReconciliationWorker
 from suppsystem.remnawave import RemnawaveClient
 from suppsystem.runtime_defaults import (
@@ -40,7 +41,10 @@ from suppsystem.telegram_ingress import DurableTelegramIngressMiddleware, Telegr
 from suppsystem.telegram_lifecycle import create_polling_task
 from suppsystem.telegram_limits import TelegramRateLimiter
 from suppsystem.telegram_statistics import StatisticsDashboardRefreshWorker
-from suppsystem.telegram_system_topics import TelegramSystemTopicService
+from suppsystem.telegram_system_topics import (
+    QUICK_REPLIES_TOPIC,
+    TelegramSystemTopicService,
+)
 from suppsystem.trace import TraceMiddleware
 from suppsystem.user_message_limits import UserMessageRateLimiter
 
@@ -233,6 +237,8 @@ async def run() -> None:
         support_group_id=settings.support_group_id,
         limiter=limiter,
     )
+    quick_replies_topic_id = await system_topics.ensure(QUICK_REPLIES_TOPIC)
+    quick_reply_service = QuickReplyService(database)
     dispatcher = Dispatcher()
     ingress_worker = TelegramIngressWorker(
         bot=bot, dispatcher=dispatcher, repository=durable_work, runtime_health=runtime_health
@@ -253,6 +259,8 @@ async def run() -> None:
         settings=settings,
         limiter=limiter,
         panel_service=panel_service,
+        quick_reply_service=quick_reply_service,
+        quick_replies_topic_id=quick_replies_topic_id,
     )
     dispatcher.include_router(adapter.router)
     await adapter.recover_waiting_topics_after_restart()

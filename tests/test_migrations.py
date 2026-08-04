@@ -36,6 +36,7 @@ EXPECTED_QUERY_INDEXES = {
     "ix_operator_actions_ticket_action_result",
     "ix_operator_actions_result_created",
     "uq_operator_actions_unresolved_ticket",
+    "ix_quick_replies_active_id",
 }
 
 
@@ -111,7 +112,7 @@ async def test_explicit_upgrade_target_ignores_ambient_database_url(
 
     await upgrade_database(explicit_url)
 
-    assert await current_revision(explicit_url) == "0014_api_ingress_ordering"
+    assert await current_revision(explicit_url) == "0015_quick_replies"
     assert not ambient_path.exists()
 
 
@@ -128,12 +129,12 @@ async def test_explicit_downgrade_target_ignores_ambient_database_url(
     await downgrade_to_revision(explicit_url, "0009_ticket_last_activity")
 
     assert await current_revision(explicit_url) == "0009_ticket_last_activity"
-    assert await current_revision(ambient_url) == "0014_api_ingress_ordering"
+    assert await current_revision(ambient_url) == "0015_quick_replies"
 
     await upgrade_database(explicit_url)
 
-    assert await current_revision(explicit_url) == "0014_api_ingress_ordering"
-    assert await current_revision(ambient_url) == "0014_api_ingress_ordering"
+    assert await current_revision(explicit_url) == "0015_quick_replies"
+    assert await current_revision(ambient_url) == "0015_quick_replies"
 
 
 async def test_alembic_cli_still_uses_ambient_database_url(
@@ -146,7 +147,7 @@ async def test_alembic_cli_still_uses_ambient_database_url(
 
     await asyncio.to_thread(command.upgrade, config, "head")
 
-    assert await current_revision(ambient_url) == "0014_api_ingress_ordering"
+    assert await current_revision(ambient_url) == "0015_quick_replies"
 
 
 def test_alembic_config_accepts_percent_encoded_credentials() -> None:
@@ -203,6 +204,11 @@ async def test_upgrade_head_creates_query_indexes(tmp_path: Path) -> None:
                     column["name"] for column in inspect(sync).get_columns("inbound_updates")
                 }
             )
+            quick_reply_columns = await connection.run_sync(
+                lambda sync: {
+                    column["name"] for column in inspect(sync).get_columns("quick_replies")
+                }
+            )
     finally:
         await engine.dispose()
     assert "delivered_message_id" in columns
@@ -214,6 +220,16 @@ async def test_upgrade_head_creates_query_indexes(tmp_path: Path) -> None:
     assert "rating_cycle" in message_columns
     assert "sensitive" in message_columns
     assert "ordering_key" in inbound_columns
+    assert {
+        "title",
+        "normalized_title",
+        "text",
+        "created_by_telegram_id",
+        "source_chat_id",
+        "source_message_id",
+        "published_message_id",
+        "active",
+    } <= quick_reply_columns
 
 
 async def test_query_indexes_support_downgrade_and_reupgrade(tmp_path: Path) -> None:

@@ -8,6 +8,7 @@ from suppsystem.authorization import AuthorizationService
 from suppsystem.config import Settings
 from suppsystem.media_storage import LocalMediaStorage
 from suppsystem.panel import PanelService
+from suppsystem.quick_replies import QuickReplyService
 from suppsystem.services import TicketService
 from suppsystem.statistics import StatisticsService
 from suppsystem.telegram_constants import (
@@ -32,6 +33,7 @@ from suppsystem.telegram_panel_handler import (
     GIFT_DAYS_ERROR_TEXT as GIFT_DAYS_ERROR_TEXT,
 )
 from suppsystem.telegram_panel_handler import TelegramPanelCommandHandler
+from suppsystem.telegram_quick_replies import QUICK_REPLY_CALLBACK_PREFIX
 from suppsystem.telegram_statistics import STATISTICS_CALLBACK_PREFIX
 
 
@@ -48,6 +50,8 @@ class TelegramSupportAdapter(TelegramOperatorHandlers):
         panel_service: PanelService | None = None,
         media_storage: LocalMediaStorage | None = None,
         statistics_service: StatisticsService | None = None,
+        quick_reply_service: QuickReplyService | None = None,
+        quick_replies_topic_id: int | None = None,
     ) -> None:
         self.bot = bot
         self.ticket_service = ticket_service
@@ -55,6 +59,8 @@ class TelegramSupportAdapter(TelegramOperatorHandlers):
         self.panel_service = panel_service
         self.media_storage = media_storage or LocalMediaStorage(settings.data_dir)
         self.statistics_service = statistics_service or StatisticsService(ticket_service.database)
+        self.quick_reply_service = quick_reply_service
+        self.quick_replies_topic_id = quick_replies_topic_id
         self.panel_commands = TelegramPanelCommandHandler(panel_service)
         self.authorization = AuthorizationService(settings)
         self.limiter = limiter
@@ -83,4 +89,8 @@ class TelegramSupportAdapter(TelegramOperatorHandlers):
         self.router.callback_query.register(
             self.handle_rating_callback,
             F.data.startswith(f"{RATING_CALLBACK_PREFIX}:"),
+        )
+        self.router.callback_query.register(
+            self.handle_quick_reply_callback,
+            F.data.startswith(f"{QUICK_REPLY_CALLBACK_PREFIX}:"),
         )

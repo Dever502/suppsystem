@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 RATINGS_TOPIC = "ratings"
 RATINGS_TOPIC_NAME = "⭐ Оценки"
+QUICK_REPLIES_TOPIC = "quick_replies"
+QUICK_REPLIES_TOPIC_NAME = "📚 Готовые ответы"
 
 
 class TelegramSystemTopicService:
@@ -37,9 +39,14 @@ class TelegramSystemTopicService:
 
     @staticmethod
     def _topic_name(topic_kind: str) -> str:
-        if topic_kind == RATINGS_TOPIC:
-            return RATINGS_TOPIC_NAME
-        raise ValueError(f"unsupported system topic: {topic_kind}")
+        topic_names = {
+            RATINGS_TOPIC: RATINGS_TOPIC_NAME,
+            QUICK_REPLIES_TOPIC: QUICK_REPLIES_TOPIC_NAME,
+        }
+        try:
+            return topic_names[topic_kind]
+        except KeyError:
+            raise ValueError(f"unsupported system topic: {topic_kind}") from None
 
     async def _stored_topic_id(self, topic_kind: str) -> int | None:
         async with self.database.session() as session:

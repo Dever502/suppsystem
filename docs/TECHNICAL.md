@@ -26,7 +26,7 @@ FastAPI. Основные модули:
 
 | Область | Модули |
 | --- | --- |
-| Telegram и тикеты | `telegram_*`, `ticket_*`, `services.py` |
+| Telegram и тикеты | `telegram_*`, `ticket_*`, `services.py`, `quick_replies.py` |
 | доставка | `outbox_repository.py`, `delivery.py`, `notification_webhook.py` |
 | Remnawave | `panel*`, `remnawave.py` |
 | API и runtime | `api*`, `web_api*`, `__main__.py`, `runtime_health.py` |
@@ -75,6 +75,7 @@ waiting_topic ──> pending ──> processing ──> delivered
 | `tickets`, `ticket_messages` | тикеты, темы, сообщения, заметки и оценки |
 | `media_assets`, `ticket_lifecycle_events` | Web-фото и append-only события статистики |
 | `system_settings`, `operator_dashboard_state` | identity mode и сообщение статистики |
+| `quick_replies` | готовые ответы, авторство, источник и состояние публикации карточки |
 | `delivery_outbox`, `notification_outbox` | очереди Telegram и webhook |
 | `inbound_updates` | дедупликация входящих updates |
 | `operator_actions`, `reconciliation_outbox` | аудит Remnawave и очередь сверки |
@@ -94,6 +95,23 @@ least-privilege роли, `postgres-migrate` применяет Alembic, а пр
 параллельно: доставка — до 8 заданий, webhook и reconciliation — до 4. Порядок заданий одного
 тикета защищён очередями БД; Telegram ingress остаётся последовательным. PostgreSQL engine использует
 ограниченный пул: 10 постоянных и до 10 временных соединений.
+
+## Готовые ответы
+
+При старте приложение один раз создаёт системную Forum-тему `📚 Готовые ответы` и сохраняет её
+ID в `system_settings`. Команды `/addanswer` и `/answers` обрабатываются только внутри этой
+темы, доступны администраторам и никогда не проходят через доставку сообщения клиенту.
+
+`/addanswer` принимает plain text: первая строка после команды становится названием, остальные
+строки — текстом. Запись сначала фиксируется в `quick_replies`; уникальные source chat/message
+делают повтор одного Telegram update идемпотентным, а нормализованное название не допускает
+двойников. После commit в системной теме публикуется одна постоянная карточка и сохраняется её
+`published_message_id`. Как и для других внешних Telegram-вызовов, сбой между отправкой и commit
+редко может дать дубль при повторе.
+
+`/answers` создаёт временную inline-панель с пагинацией, привязанную к открывшему её оператору.
+Выбор показывает preview. Для текста до 256 символов используется нативная Telegram-кнопка
+копирования; длинный текст отправляется отдельным чистым сообщением с кнопкой удаления.
 
 ## Авторизация и HTTP API
 

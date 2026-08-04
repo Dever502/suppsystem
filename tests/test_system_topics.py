@@ -8,6 +8,8 @@ import pytest
 
 from suppsystem.database import Database
 from suppsystem.telegram_system_topics import (
+    QUICK_REPLIES_TOPIC,
+    QUICK_REPLIES_TOPIC_NAME,
     RATINGS_TOPIC,
     RATINGS_TOPIC_NAME,
     TelegramSystemTopicService,
@@ -72,6 +74,32 @@ async def test_ratings_topic_is_created_once_persisted_and_recovered(tmp_path: P
             setting = await session.get(SystemSetting, "telegram_topic:-100123:ratings")
         assert setting is not None
         assert setting.value == "902"
+    finally:
+        await database.dispose()
+
+
+async def test_quick_replies_topic_is_created_with_durable_id(tmp_path: Path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/quick-replies-topic.db")
+    await database.create_schema_for_tests()
+    try:
+        bot = RecordingTopicBot()
+        service = TelegramSystemTopicService(
+            bot=bot,  # type: ignore[arg-type]
+            database=database,
+            support_group_id=-100123,
+            limiter=FakeLimiter(),  # type: ignore[arg-type]
+        )
+
+        assert await service.ensure(QUICK_REPLIES_TOPIC) == 901
+        assert bot.created == [{"chat_id": -100123, "name": QUICK_REPLIES_TOPIC_NAME}]
+
+        async with database.session() as session:
+            setting = await session.get(
+                SystemSetting,
+                "telegram_topic:-100123:quick_replies",
+            )
+        assert setting is not None
+        assert setting.value == "901"
     finally:
         await database.dispose()
 

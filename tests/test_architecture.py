@@ -45,6 +45,7 @@ def test_application_services_do_not_import_transport_layers() -> None:
         "panel_action_service",
         "panel_reconciliation_service",
         "panel_persistence_service",
+        "quick_replies",
     ):
         imports = imported_modules(module)
         assert not any(
@@ -60,6 +61,7 @@ def test_split_telegram_handlers_do_not_import_persistence_frameworks() -> None:
         "telegram_operator_handlers",
         "telegram_topic_manager",
         "telegram_message_utils",
+        "telegram_quick_replies",
     ):
         imports = imported_modules(module)
         assert not any(name.startswith("sqlalchemy") for name in imports), module

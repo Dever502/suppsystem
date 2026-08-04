@@ -32,13 +32,16 @@ from suppsystem.telegram_message_utils import (
     command_key as build_command_key,
 )
 from suppsystem.telegram_panel_handler import TelegramPanelCommandHandler
+from suppsystem.telegram_quick_replies import TelegramQuickReplyHandlers
 from suppsystem.telegram_statistics import TelegramStatisticsDashboard
 from suppsystem.telegram_user_handlers import TelegramUserHandlers
 
 logger = logging.getLogger(__name__)
 
 
-class TelegramOperatorHandlers(TelegramStatisticsDashboard, TelegramUserHandlers):
+class TelegramOperatorHandlers(
+    TelegramQuickReplyHandlers, TelegramStatisticsDashboard, TelegramUserHandlers
+):
     authorization: AuthorizationService
     panel_commands: TelegramPanelCommandHandler
     media_storage: LocalMediaStorage
@@ -131,6 +134,8 @@ class TelegramOperatorHandlers(TelegramStatisticsDashboard, TelegramUserHandlers
             return
 
         command = message_command(message)
+        if await self.handle_quick_reply_topic_message(message, command):
+            return
         ticket = await self.ticket_service.get_by_topic(message.message_thread_id)
         if ticket is None:
             logger.info(

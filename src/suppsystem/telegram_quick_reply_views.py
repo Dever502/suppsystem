@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from suppsystem.quick_replies import (
     QUICK_REPLY_GROUP_NAME_MAX_LENGTH,
@@ -17,6 +16,9 @@ from suppsystem.quick_replies import (
 QUICK_REPLY_CALLBACK_PREFIX = "suppsystem_answers"
 QUICK_REPLY_PAGE_SIZE = 8
 TELEGRAM_COPY_TEXT_LIMIT = 256
+TELEGRAM_BUTTON_TEXT_LIMIT = 64
+QUICK_REPLY_INLINE_PAGE_SIZE = 20
+QUICK_REPLY_INLINE_QUERY_PREFIX = "qr-group-"
 QUICK_REPLY_DRAFT_TIMEOUT_SECONDS = 600.0
 ADD_GROUP_COMMAND = "/addgroup"
 ADD_ANSWER_COMMAND = "/addanswer"
@@ -69,7 +71,7 @@ def clean_draft_text(value: str) -> str | None:
     return clean_text
 
 
-def _truncate_utf16(value: str, limit: int) -> str:
+def truncate_utf16(value: str, limit: int) -> str:
     if utf16_code_units(value) <= limit:
         return value
     result: list[str] = []
@@ -89,7 +91,7 @@ def _operator_label(
     display_name: str | None,
     username: str | None,
 ) -> str:
-    return _truncate_utf16(
+    return truncate_utf16(
         display_name or (f"@{username}" if username else None) or f"TG:{telegram_id}",
         64,
     )
@@ -131,36 +133,36 @@ def quick_reply_card(reply: QuickReplyView, group_name: str) -> str:
     )
 
 
-def quick_reply_menu_text() -> str:
-    return (
-        "📚 Готовые ответы\n\n"
-        "Здесь можно выбрать готовый ответ или добавить новый.\n"
-        "Нажмите нужную кнопку — дальше бот всё подскажет."
-    )
-
-
-def quick_reply_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📖 Выбрать готовый ответ",
-                    callback_data=f"{QUICK_REPLY_CALLBACK_PREFIX}:menu_catalog",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="➕ Добавить готовый ответ",
-                    callback_data=f"{QUICK_REPLY_CALLBACK_PREFIX}:menu_add",
-                )
-            ],
-        ]
-    )
-
-
 def callback_data(action: str, owner_id: int, *values: int) -> str:
     suffix = ":".join(str(value) for value in values)
     return f"{QUICK_REPLY_CALLBACK_PREFIX}:{action}:{owner_id}" + (f":{suffix}" if suffix else "")
+
+
+def shared_callback_data(action: str, *values: int) -> str:
+    suffix = ":".join(str(value) for value in values)
+    return f"{QUICK_REPLY_CALLBACK_PREFIX}:{action}" + (f":{suffix}" if suffix else "")
+
+
+def inline_group_query(group_id: int) -> str:
+    return f"{QUICK_REPLY_INLINE_QUERY_PREFIX}{group_id}"
+
+
+def parse_inline_group_query(query: str) -> int | None:
+    token = query.strip().split(maxsplit=1)[0] if query.strip() else ""
+    if not token.startswith(QUICK_REPLY_INLINE_QUERY_PREFIX):
+        return None
+    try:
+        group_id = int(token.removeprefix(QUICK_REPLY_INLINE_QUERY_PREFIX))
+    except ValueError:
+        return None
+    return group_id if group_id > 0 else None
+
+
+def inline_reply_description(text: str, *, limit: int = 120) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1].rstrip() + "…"
 
 
 def message_missing(error: TelegramBadRequest) -> bool:

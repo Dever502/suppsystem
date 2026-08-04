@@ -10,6 +10,10 @@ from aiogram.types import (
     CopyTextButton,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InlineQuery,
+    InlineQueryResultArticle,
+    InlineQueryResultUnion,
+    InputTextMessageContent,
     Message,
 )
 
@@ -33,21 +37,38 @@ from suppsystem.telegram_quick_reply_views import (
     ADD_ANSWER_COMMAND,
     ADD_GROUP_COMMAND,
     ANSWERS_COMMAND,
+    QUICK_REPLY_INLINE_PAGE_SIZE,
     QUICK_REPLY_PAGE_SIZE,
+    TELEGRAM_BUTTON_TEXT_LIMIT,
     TELEGRAM_COPY_TEXT_LIMIT,
     callback_data,
+    inline_group_query,
+    inline_reply_description,
     message_missing,
     message_not_modified,
     parse_add_answer_argument,
     parse_add_group_argument,
-    quick_reply_menu_keyboard,
-    quick_reply_menu_text,
+    parse_inline_group_query,
+    shared_callback_data,
+    truncate_utf16,
 )
 from suppsystem.telegram_quick_reply_views import (
     QUICK_REPLY_CALLBACK_PREFIX as QUICK_REPLY_CALLBACK_PREFIX,
 )
 
 logger = logging.getLogger(__name__)
+
+_LEGACY_CATALOG_ACTIONS = {
+    "menu_catalog",
+    "menu_add",
+    "groups",
+    "group",
+    "view",
+    "addpicker",
+    "draftselect",
+    "draftnew",
+    "draftback",
+}
 
 
 class TelegramQuickReplyHandlers(TelegramQuickReplyDraftHandlers):
@@ -87,12 +108,100 @@ class TelegramQuickReplyHandlers(TelegramQuickReplyDraftHandlers):
                 },
             )
 
-    async def ensure_quick_reply_menu(self) -> None:
+    @staticmethod
+    def _group_button_text(group: QuickReplyGroupView) -> str:
+        prefix = "📁 "
+        suffix = f" · {group.reply_count}"
+        text = f"{prefix}{group.name}{suffix}"
+        if utf16_code_units(text) <= TELEGRAM_BUTTON_TEXT_LIMIT:
+            return text
+        name_limit = TELEGRAM_BUTTON_TEXT_LIMIT - utf16_code_units(prefix + suffix)
+        return f"{prefix}{truncate_utf16(group.name, name_limit)}{suffix}"
+
+    async def _quick_reply_shared_menu(
+        self,
+        requested_page: int,
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        assert self.quick_reply_service is not None
+        page = max(0, requested_page)
+        groups, total = await self.quick_reply_service.list_groups(
+            offset=page * QUICK_REPLY_PAGE_SIZE,
+            limit=QUICK_REPLY_PAGE_SIZE,
+        )
+        pages = max(1, math.ceil(total / QUICK_REPLY_PAGE_SIZE))
+        if page >= pages:
+            page = pages - 1
+            groups, total = await self.quick_reply_service.list_groups(
+                offset=page * QUICK_REPLY_PAGE_SIZE,
+                limit=QUICK_REPLY_PAGE_SIZE,
+            )
+
+        rows: list[list[InlineKeyboardButton]] = []
+        for group in groups:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=self._group_button_text(group),
+                        switch_inline_query_current_chat=inline_group_query(group.id),
+                    ),
+                    InlineKeyboardButton(
+                        text="➕",
+                        callback_data=shared_callback_data("add", group.id, page),
+                    ),
+                ]
+            )
+        if pages > 1:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="⬅️",
+                        callback_data=shared_callback_data(
+                            "menupage",
+                            max(0, page - 1),
+                        ),
+                    ),
+                    InlineKeyboardButton(
+                        text=f"{page + 1}/{pages}",
+                        callback_data=shared_callback_data("menupage", page),
+                    ),
+                    InlineKeyboardButton(
+                        text="➡️",
+                        callback_data=shared_callback_data(
+                            "menupage",
+                            min(pages - 1, page + 1),
+                        ),
+                    ),
+                ]
+            )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="➕ Создать новую группу",
+                    callback_data=shared_callback_data("new", page),
+                )
+            ]
+        )
+
+        if total:
+            text = (
+                "📚 Готовые ответы\n\n"
+                "Нажмите нужную группу — список ответов откроется только у вас.\n"
+                "➕ справа — добавить ответ в эту группу."
+            )
+        else:
+            text = (
+                "📚 Готовые ответы\n\n"
+                "Групп пока нет. Создайте первую — затем добавьте в неё ответы."
+            )
+        return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def ensure_quick_reply_menu(self, page: int = 0) -> None:
         service = getattr(self, "quick_reply_service", None)
         topic_id = getattr(self, "quick_replies_topic_id", None)
         if service is None or topic_id is None:
             return
         try:
+            text, keyboard = await self._quick_reply_shared_menu(page)
             message_id = await service.menu_message_id(self.settings.support_group_id)
             if message_id is not None:
                 try:
@@ -100,8 +209,8 @@ class TelegramQuickReplyHandlers(TelegramQuickReplyDraftHandlers):
                     await self.bot.edit_message_text(
                         chat_id=self.settings.support_group_id,
                         message_id=message_id,
-                        text=quick_reply_menu_text(),
-                        reply_markup=quick_reply_menu_keyboard(),
+                        text=text,
+                        reply_markup=keyboard,
                         parse_mode=None,
                     )
                 except TelegramBadRequest as error:
@@ -118,8 +227,8 @@ class TelegramQuickReplyHandlers(TelegramQuickReplyDraftHandlers):
             message = await self.bot.send_message(
                 chat_id=self.settings.support_group_id,
                 message_thread_id=topic_id,
-                text=quick_reply_menu_text(),
-                reply_markup=quick_reply_menu_keyboard(),
+                text=text,
+                reply_markup=keyboard,
                 parse_mode=None,
             )
             await service.save_menu_message_id(
@@ -139,299 +248,127 @@ class TelegramQuickReplyHandlers(TelegramQuickReplyDraftHandlers):
                 extra={"event": "quick_reply_menu_persistence_failed"},
             )
 
-    @staticmethod
-    def _group_button_text(group: QuickReplyGroupView) -> str:
-        return f"📁 {group.name} · {group.reply_count}"
+    async def refresh_quick_reply_menu(self, page: int = 0) -> None:
+        service = getattr(self, "quick_reply_service", None)
+        if service is None:
+            return
+        if await service.menu_message_id(self.settings.support_group_id) is None:
+            return
+        await self.ensure_quick_reply_menu(page)
 
-    async def _quick_reply_groups(
-        self, owner_id: int, requested_page: int
-    ) -> tuple[str, InlineKeyboardMarkup]:
-        assert self.quick_reply_service is not None
-        page = max(0, requested_page)
-        groups, total = await self.quick_reply_service.list_groups(
-            offset=page * QUICK_REPLY_PAGE_SIZE,
-            limit=QUICK_REPLY_PAGE_SIZE,
-        )
-        pages = max(1, math.ceil(total / QUICK_REPLY_PAGE_SIZE))
-        if page >= pages:
-            page = pages - 1
-            groups, total = await self.quick_reply_service.list_groups(
-                offset=page * QUICK_REPLY_PAGE_SIZE,
-                limit=QUICK_REPLY_PAGE_SIZE,
-            )
-
-        rows = [
-            [
-                InlineKeyboardButton(
-                    text=self._group_button_text(group),
-                    callback_data=callback_data("group", owner_id, group.id, 0, page),
-                )
-            ]
-            for group in groups
-        ]
-        if pages > 1:
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        text="⬅️",
-                        callback_data=callback_data("groups", owner_id, max(0, page - 1)),
-                    ),
-                    InlineKeyboardButton(
-                        text=f"{page + 1}/{pages}",
-                        callback_data=callback_data("groups", owner_id, page),
-                    ),
-                    InlineKeyboardButton(
-                        text="➡️",
-                        callback_data=callback_data(
-                            "groups",
-                            owner_id,
-                            min(pages - 1, page + 1),
-                        ),
-                    ),
-                ]
-            )
-        rows.extend(
-            [
-                [
-                    InlineKeyboardButton(
-                        text="➕ Добавить готовый ответ",
-                        callback_data=callback_data("addpicker", owner_id, 0),
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="❌ Закрыть",
-                        callback_data=callback_data("close", owner_id),
-                    )
-                ],
-            ]
-        )
-        text = (
-            "📚 Готовые ответы\n\nВыберите группу:"
-            if total
-            else "📚 Готовые ответы\n\nГрупп пока нет. Создайте первую при добавлении ответа."
-        )
-        return text, InlineKeyboardMarkup(inline_keyboard=rows)
-
-    async def _quick_reply_group_picker(
-        self, owner_id: int, requested_page: int
-    ) -> tuple[str, InlineKeyboardMarkup]:
-        assert self.quick_reply_service is not None
-        page = max(0, requested_page)
-        groups, total = await self.quick_reply_service.list_groups(
-            offset=page * QUICK_REPLY_PAGE_SIZE,
-            limit=QUICK_REPLY_PAGE_SIZE,
-        )
-        pages = max(1, math.ceil(total / QUICK_REPLY_PAGE_SIZE))
-        if page >= pages:
-            page = pages - 1
-            groups, total = await self.quick_reply_service.list_groups(
-                offset=page * QUICK_REPLY_PAGE_SIZE,
-                limit=QUICK_REPLY_PAGE_SIZE,
-            )
-
-        rows = [
-            [
-                InlineKeyboardButton(
-                    text=self._group_button_text(group),
-                    callback_data=callback_data(
-                        "draftselect",
-                        owner_id,
-                        group.id,
-                        page,
-                    ),
-                )
-            ]
-            for group in groups
-        ]
-        if pages > 1:
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        text="⬅️",
-                        callback_data=callback_data(
-                            "addpicker",
-                            owner_id,
-                            max(0, page - 1),
-                        ),
-                    ),
-                    InlineKeyboardButton(
-                        text=f"{page + 1}/{pages}",
-                        callback_data=callback_data("addpicker", owner_id, page),
-                    ),
-                    InlineKeyboardButton(
-                        text="➡️",
-                        callback_data=callback_data(
-                            "addpicker",
-                            owner_id,
-                            min(pages - 1, page + 1),
-                        ),
-                    ),
-                ]
-            )
-        rows.extend(
-            [
-                [
-                    InlineKeyboardButton(
-                        text="➕ Создать новую группу",
-                        callback_data=callback_data("draftnew", owner_id, page),
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="❌ Отмена",
-                        callback_data=callback_data("draftcancel", owner_id),
-                    )
-                ],
-            ]
-        )
-        return (
-            "➕ Новый готовый ответ\n\n"
-            "Сначала выберите группу.\n"
-            "Если подходящей нет — создайте новую.",
-            InlineKeyboardMarkup(inline_keyboard=rows),
-        )
-
-    async def _quick_reply_answers(
+    async def _shared_menu_message(
         self,
-        owner_id: int,
-        group: QuickReplyGroupView,
-        requested_page: int,
-        groups_page: int,
-    ) -> tuple[str, InlineKeyboardMarkup]:
+        callback: CallbackQuery,
+        topic_id: int,
+    ) -> Message | None:
+        message = self._callback_message(callback, topic_id)
+        if message is None or message.chat.id != self.settings.support_group_id:
+            return None
         assert self.quick_reply_service is not None
-        page = max(0, requested_page)
-        replies, total = await self.quick_reply_service.list_active(
-            group_id=group.id,
-            offset=page * QUICK_REPLY_PAGE_SIZE,
-            limit=QUICK_REPLY_PAGE_SIZE,
+        menu_message_id = await self.quick_reply_service.menu_message_id(
+            self.settings.support_group_id
         )
-        pages = max(1, math.ceil(total / QUICK_REPLY_PAGE_SIZE))
-        if page >= pages:
-            page = pages - 1
-            replies, total = await self.quick_reply_service.list_active(
-                group_id=group.id,
-                offset=page * QUICK_REPLY_PAGE_SIZE,
-                limit=QUICK_REPLY_PAGE_SIZE,
-            )
+        if menu_message_id != message.message_id:
+            return None
+        return message
 
-        rows = [
-            [
+    @staticmethod
+    def _inline_reply_keyboard(
+        owner_id: int,
+        group_id: int,
+        reply: QuickReplyView,
+    ) -> InlineKeyboardMarkup:
+        first_row: list[InlineKeyboardButton] = []
+        if utf16_code_units(reply.text) <= TELEGRAM_COPY_TEXT_LIMIT:
+            first_row.append(
                 InlineKeyboardButton(
-                    text=reply.title,
-                    callback_data=callback_data(
-                        "view",
-                        owner_id,
-                        reply.id,
-                        page,
-                        groups_page,
-                    ),
+                    text="📋 Скопировать",
+                    copy_text=CopyTextButton(text=reply.text),
                 )
+            )
+        first_row.append(
+            InlineKeyboardButton(
+                text="🗑 Удалить",
+                callback_data=callback_data("delete", owner_id),
+            )
+        )
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                first_row,
+                [
+                    InlineKeyboardButton(
+                        text="📚 Ещё из группы",
+                        switch_inline_query_current_chat=inline_group_query(group_id),
+                    )
+                ],
             ]
+        )
+
+    @classmethod
+    def _inline_reply_result(
+        cls,
+        owner_id: int,
+        group_id: int,
+        reply: QuickReplyView,
+    ) -> InlineQueryResultArticle:
+        return InlineQueryResultArticle(
+            id=f"{group_id}:{reply.id}",
+            title=reply.title,
+            description=inline_reply_description(reply.text),
+            input_message_content=InputTextMessageContent(
+                message_text=reply.text,
+                parse_mode=None,
+            ),
+            reply_markup=cls._inline_reply_keyboard(owner_id, group_id, reply),
+        )
+
+    @staticmethod
+    async def _answer_empty_inline_query(inline_query: InlineQuery) -> None:
+        await inline_query.answer(
+            [],
+            cache_time=0,
+            is_personal=True,
+            next_offset="",
+        )
+
+    async def handle_quick_reply_inline_query(self, inline_query: InlineQuery) -> None:
+        if not self.authorization.is_admin(inline_query.from_user.id):
+            await self._answer_empty_inline_query(inline_query)
+            return
+        service = getattr(self, "quick_reply_service", None)
+        if service is None:
+            await self._answer_empty_inline_query(inline_query)
+            return
+        group_id = parse_inline_group_query(inline_query.query)
+        if group_id is None:
+            await self._answer_empty_inline_query(inline_query)
+            return
+        try:
+            offset = int(inline_query.offset or "0")
+        except ValueError:
+            await self._answer_empty_inline_query(inline_query)
+            return
+        if offset < 0 or await service.get_active_group(group_id) is None:
+            await self._answer_empty_inline_query(inline_query)
+            return
+
+        replies, total = await service.list_active(
+            group_id=group_id,
+            offset=offset,
+            limit=QUICK_REPLY_INLINE_PAGE_SIZE,
+        )
+        results: list[InlineQueryResultUnion] = [
+            self._inline_reply_result(inline_query.from_user.id, group_id, reply)
             for reply in replies
         ]
-        if pages > 1:
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        text="⬅️",
-                        callback_data=callback_data(
-                            "group",
-                            owner_id,
-                            group.id,
-                            max(0, page - 1),
-                            groups_page,
-                        ),
-                    ),
-                    InlineKeyboardButton(
-                        text=f"{page + 1}/{pages}",
-                        callback_data=callback_data(
-                            "group",
-                            owner_id,
-                            group.id,
-                            page,
-                            groups_page,
-                        ),
-                    ),
-                    InlineKeyboardButton(
-                        text="➡️",
-                        callback_data=callback_data(
-                            "group",
-                            owner_id,
-                            group.id,
-                            min(pages - 1, page + 1),
-                            groups_page,
-                        ),
-                    ),
-                ]
-            )
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="⬅️ К группам",
-                    callback_data=callback_data("groups", owner_id, groups_page),
-                ),
-                InlineKeyboardButton(
-                    text="❌ Закрыть",
-                    callback_data=callback_data("close", owner_id),
-                ),
-            ]
+        next_offset = (
+            str(offset + len(replies)) if replies and offset + len(replies) < total else ""
         )
-        text = (
-            f"📚 Готовые ответы → {group.name}\n\nВыберите нужный ответ:"
-            if total
-            else f"📚 Готовые ответы → {group.name}\n\nВ этой группе пока нет ответов."
-        )
-        return text, InlineKeyboardMarkup(inline_keyboard=rows)
-
-    async def _quick_reply_preview(
-        self,
-        owner_id: int,
-        group: QuickReplyGroupView,
-        reply: QuickReplyView,
-        page: int,
-        groups_page: int,
-    ) -> tuple[str, InlineKeyboardMarkup]:
-        rows: list[list[InlineKeyboardButton]] = []
-        if utf16_code_units(reply.text) <= TELEGRAM_COPY_TEXT_LIMIT:
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        text="📋 Скопировать",
-                        copy_text=CopyTextButton(text=reply.text),
-                    )
-                ]
-            )
-        else:
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        text="📄 Показать чистый текст",
-                        callback_data=callback_data("text", owner_id, reply.id),
-                    )
-                ]
-            )
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="⬅️ К списку",
-                    callback_data=callback_data(
-                        "group",
-                        owner_id,
-                        reply.group_id,
-                        page,
-                        groups_page,
-                    ),
-                ),
-                InlineKeyboardButton(
-                    text="❌ Закрыть",
-                    callback_data=callback_data("close", owner_id),
-                ),
-            ]
-        )
-        return (
-            f"📝 {group.name} → {reply.title}\n\n{reply.text}",
-            InlineKeyboardMarkup(inline_keyboard=rows),
+        await inline_query.answer(
+            results,
+            cache_time=0,
+            is_personal=True,
+            next_offset=next_offset,
         )
 
     async def _handle_add_group(self, message: Message) -> None:
@@ -463,6 +400,7 @@ class TelegramQuickReplyHandlers(TelegramQuickReplyDraftHandlers):
             chat_id=message.chat.id,
             topic_id=message.message_thread_id,
         )
+        await self.refresh_quick_reply_menu()
         await self._delete_quick_reply_message(message)
 
     async def _handle_add_answer(self, message: Message) -> None:
@@ -507,19 +445,11 @@ class TelegramQuickReplyHandlers(TelegramQuickReplyDraftHandlers):
             chat_id=message.chat.id,
             topic_id=message.message_thread_id,
         )
+        await self.refresh_quick_reply_menu()
         await self._delete_quick_reply_message(message)
 
     async def _handle_answers(self, message: Message) -> None:
-        assert message.from_user is not None
-        text, keyboard = await self._quick_reply_groups(message.from_user.id, 0)
-        await self.limiter.wait()
-        await self.bot.send_message(
-            chat_id=message.chat.id,
-            message_thread_id=message.message_thread_id,
-            text=text,
-            reply_markup=keyboard,
-            parse_mode=None,
-        )
+        await self.ensure_quick_reply_menu()
         await self._delete_quick_reply_message(message)
 
     async def handle_quick_reply_topic_message(
@@ -533,6 +463,8 @@ class TelegramQuickReplyHandlers(TelegramQuickReplyDraftHandlers):
             return False
         if service is None:
             await message.reply("⚠️ Готовые ответы временно недоступны.")
+            return True
+        if getattr(message, "via_bot", None) is not None:
             return True
         if not command.startswith("/") and await self._handle_draft_input(message):
             return True
@@ -556,30 +488,66 @@ class TelegramQuickReplyHandlers(TelegramQuickReplyDraftHandlers):
             return None
         return message
 
-    async def _send_personal_catalog(self, owner_id: int) -> None:
-        await self._discard_draft(owner_id, delete_panel=True)
-        text, keyboard = await self._quick_reply_groups(owner_id, 0)
-        await self.limiter.wait()
-        await self.bot.send_message(
-            chat_id=self.settings.support_group_id,
-            message_thread_id=self.quick_replies_topic_id,
-            text=text,
-            reply_markup=keyboard,
-            parse_mode=None,
-        )
+    async def _handle_shared_callback(
+        self,
+        callback: CallbackQuery,
+        action: str,
+        parts: list[str],
+        topic_id: int,
+    ) -> bool:
+        if action not in {"menupage", "add", "new"}:
+            return False
+        message = await self._shared_menu_message(callback, topic_id)
+        if message is None:
+            await callback.answer(
+                "Панель устарела. Используйте актуальную закреплённую.",
+                show_alert=True,
+            )
+            return True
+        assert callback.from_user is not None
+        assert self.quick_reply_service is not None
 
-    async def _send_group_picker(self, owner_id: int) -> None:
-        await self._discard_draft(owner_id, delete_panel=True)
-        text, keyboard = await self._quick_reply_group_picker(owner_id, 0)
-        await self.limiter.wait()
-        panel = await self.bot.send_message(
-            chat_id=self.settings.support_group_id,
-            message_thread_id=self.quick_replies_topic_id,
-            text=text,
-            reply_markup=keyboard,
-            parse_mode=None,
-        )
-        self._set_picker_draft(owner_id, panel.message_id, 0)
+        if action == "menupage":
+            try:
+                page = int(parts[2])
+            except (IndexError, ValueError):
+                await callback.answer("Некорректная кнопка.", show_alert=False)
+                return True
+            text, keyboard = await self._quick_reply_shared_menu(page)
+            try:
+                await message.edit_text(text, reply_markup=keyboard, parse_mode=None)
+            except TelegramBadRequest as error:
+                if not message_not_modified(error):
+                    raise
+            await callback.answer()
+            return True
+
+        if action == "add":
+            try:
+                group_id = int(parts[2])
+                page = int(parts[3])
+            except (IndexError, ValueError):
+                await callback.answer("Некорректная кнопка.", show_alert=False)
+                return True
+            group = await self.quick_reply_service.get_active_group(group_id)
+            if group is None:
+                await callback.answer("Группа не найдена.", show_alert=True)
+                return True
+            await self._start_title_draft(
+                callback.from_user.id,
+                group,
+                max(0, page),
+            )
+            await callback.answer()
+            return True
+
+        try:
+            page = int(parts[2])
+        except (IndexError, ValueError):
+            page = 0
+        await self._start_group_draft(callback.from_user.id, max(0, page))
+        await callback.answer()
+        return True
 
     async def handle_quick_reply_callback(self, callback: CallbackQuery) -> None:
         if callback.from_user is None or not self.authorization.is_admin(callback.from_user.id):
@@ -590,6 +558,7 @@ class TelegramQuickReplyHandlers(TelegramQuickReplyDraftHandlers):
         if service is None or topic_id is None:
             await callback.answer("Готовые ответы недоступны.", show_alert=True)
             return
+
         parts = (callback.data or "").split(":")
         try:
             action = parts[1]
@@ -597,16 +566,13 @@ class TelegramQuickReplyHandlers(TelegramQuickReplyDraftHandlers):
             await callback.answer("Некорректная кнопка.", show_alert=False)
             return
 
-        if action in {"menu_catalog", "menu_add"}:
-            message = self._callback_message(callback, topic_id)
-            if message is None or message.chat.id != self.settings.support_group_id:
-                await callback.answer("Панель больше недоступна.", show_alert=False)
-                return
-            if action == "menu_catalog":
-                await self._send_personal_catalog(callback.from_user.id)
-            else:
-                await self._send_group_picker(callback.from_user.id)
-            await callback.answer()
+        if await self._handle_shared_callback(callback, action, parts, topic_id):
+            return
+        if action in _LEGACY_CATALOG_ACTIONS:
+            await callback.answer(
+                "Панель устарела. Используйте актуальную закреплённую.",
+                show_alert=True,
+            )
             return
 
         try:
@@ -644,62 +610,6 @@ class TelegramQuickReplyHandlers(TelegramQuickReplyDraftHandlers):
             await self._delete_quick_reply_message(message)
             await callback.answer("Добавление отменено.")
             return
-        if action == "groups":
-            try:
-                page = int(parts[3])
-            except (IndexError, ValueError):
-                page = 0
-            text, keyboard = await self._quick_reply_groups(owner_id, page)
-            await message.edit_text(text, reply_markup=keyboard, parse_mode=None)
-            await callback.answer()
-            return
-        if action == "group":
-            try:
-                group_id = int(parts[3])
-                page = int(parts[4])
-                groups_page = int(parts[5])
-            except (IndexError, ValueError):
-                await callback.answer("Некорректная кнопка.", show_alert=False)
-                return
-            group = await service.get_active_group(group_id)
-            if group is None:
-                await callback.answer("Группа не найдена.", show_alert=True)
-                return
-            text, keyboard = await self._quick_reply_answers(
-                owner_id,
-                group,
-                page,
-                groups_page,
-            )
-            await message.edit_text(text, reply_markup=keyboard, parse_mode=None)
-            await callback.answer()
-            return
-        if action == "view":
-            try:
-                reply_id = int(parts[3])
-                page = int(parts[4])
-                groups_page = int(parts[5])
-            except (IndexError, ValueError):
-                await callback.answer("Некорректная кнопка.", show_alert=False)
-                return
-            reply = await service.get_active(reply_id)
-            if reply is None:
-                await callback.answer("Ответ не найден.", show_alert=True)
-                return
-            group = await service.get_active_group(reply.group_id)
-            if group is None:
-                await callback.answer("Группа не найдена.", show_alert=True)
-                return
-            text, keyboard = await self._quick_reply_preview(
-                owner_id,
-                group,
-                reply,
-                page,
-                groups_page,
-            )
-            await message.edit_text(text, reply_markup=keyboard, parse_mode=None)
-            await callback.answer()
-            return
         if action == "text":
             try:
                 reply_id = int(parts[3])
@@ -727,71 +637,7 @@ class TelegramQuickReplyHandlers(TelegramQuickReplyDraftHandlers):
                     ]
                 ),
             )
-            await callback.answer(
-                "Текст отправлен отдельным сообщением.",
-                show_alert=False,
-            )
-            return
-        if action == "addpicker":
-            try:
-                page = int(parts[3])
-            except (IndexError, ValueError):
-                page = 0
-            draft = self._draft_for_callback(owner_id, message.message_id)
-            if draft is not None:
-                await self._discard_draft(owner_id, delete_panel=False)
-            text, keyboard = await self._quick_reply_group_picker(owner_id, page)
-            await message.edit_text(text, reply_markup=keyboard, parse_mode=None)
-            self._set_picker_draft(owner_id, message.message_id, page)
-            await callback.answer()
-            return
-        if action == "draftselect":
-            try:
-                group_id = int(parts[3])
-                groups_page = int(parts[4])
-            except (IndexError, ValueError):
-                await callback.answer("Некорректная кнопка.", show_alert=False)
-                return
-            group = await service.get_active_group(group_id)
-            if group is None:
-                await callback.answer("Группа не найдена.", show_alert=True)
-                return
-            await self._begin_title_draft(
-                owner_id,
-                message.message_id,
-                group,
-                groups_page,
-            )
-            await callback.answer()
-            return
-        if action == "draftnew":
-            try:
-                groups_page = int(parts[3])
-            except (IndexError, ValueError):
-                groups_page = 0
-            await self._begin_group_draft(
-                owner_id,
-                message.message_id,
-                groups_page,
-            )
-            await callback.answer()
-            return
-        if action == "draftback":
-            draft = self._draft_for_callback(owner_id, message.message_id)
-            groups_page = draft.groups_page if draft is not None else 0
-            if draft is not None:
-                await self._discard_draft(owner_id, delete_panel=False)
-            text, keyboard = await self._quick_reply_group_picker(
-                owner_id,
-                groups_page,
-            )
-            await message.edit_text(text, reply_markup=keyboard, parse_mode=None)
-            self._set_picker_draft(
-                owner_id,
-                message.message_id,
-                groups_page,
-            )
-            await callback.answer()
+            await callback.answer("Текст отправлен отдельным сообщением.")
             return
         if action in {"edittitle", "edittext", "draftsave"}:
             draft = self._draft_for_callback(owner_id, message.message_id)
@@ -802,12 +648,27 @@ class TelegramQuickReplyHandlers(TelegramQuickReplyDraftHandlers):
                 )
                 return
             if action == "edittitle":
+                if draft.group_name is None:
+                    await callback.answer("Сессия повреждена.", show_alert=True)
+                    return
                 await self._prompt_title(owner_id, draft)
                 await callback.answer()
                 return
             if action == "edittext":
+                if draft.group_name is None or draft.title is None:
+                    await callback.answer("Сначала укажите название.", show_alert=True)
+                    return
                 await self._prompt_text(owner_id, draft)
                 await callback.answer()
+                return
+            if (
+                draft.group_id is None
+                or draft.group_name is None
+                or draft.title is None
+                or draft.text is None
+                or draft.source_message_id is None
+            ):
+                await callback.answer("Ответ ещё не заполнен.", show_alert=True)
                 return
             await self._save_draft(callback, message, draft)
             return

@@ -83,6 +83,9 @@ class TelegramSupportAdapter(TelegramOperatorHandlers):
             self.handle_group_message,
             F.chat.id == self.settings.support_group_id,
         )
+        self.router.inline_query.register(
+            self.handle_quick_reply_inline_query,
+        )
         self.router.callback_query.register(
             self.handle_statistics_callback,
             F.data.startswith(f"{STATISTICS_CALLBACK_PREFIX}:"),

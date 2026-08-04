@@ -6,11 +6,10 @@ from dataclasses import dataclass
 from typing import Literal
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.types import (
     CallbackQuery,
     CopyTextButton,
-    ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -36,6 +35,8 @@ from suppsystem.telegram_quick_reply_views import (
     callback_data,
     clean_draft_text,
     clean_draft_title,
+    inline_group_query,
+    message_not_modified,
     parse_add_group_argument,
     quick_reply_card,
     quick_reply_group_card,
@@ -43,7 +44,7 @@ from suppsystem.telegram_quick_reply_views import (
 
 logger = logging.getLogger(__name__)
 
-DraftStep = Literal["pick", "group", "title", "text", "confirm"]
+DraftStep = Literal["group", "title", "text", "confirm"]
 
 
 @dataclass
@@ -56,7 +57,6 @@ class QuickReplyDraft:
     title: str | None = None
     text: str | None = None
     source_message_id: int | None = None
-    prompt_message_id: int | None = None
 
 
 class TelegramQuickReplyDraftHandlers:
@@ -67,6 +67,10 @@ class TelegramQuickReplyDraftHandlers:
     quick_replies_topic_id: int | None
     _quick_reply_drafts: dict[int, QuickReplyDraft]
     _quick_reply_draft_tasks: dict[int, asyncio.Task[None]]
+
+    async def refresh_quick_reply_menu(self, page: int = 0) -> None:
+        del page
+        raise NotImplementedError
 
     def initialize_quick_reply_sessions(self) -> None:
         self._quick_reply_drafts = {}
@@ -97,21 +101,6 @@ class TelegramQuickReplyDraftHandlers:
             name=f"quick-reply-draft-timeout-{owner_id}",
         )
 
-    def _set_picker_draft(
-        self,
-        owner_id: int,
-        panel_message_id: int,
-        groups_page: int,
-    ) -> None:
-        self._set_draft(
-            owner_id,
-            QuickReplyDraft(
-                panel_message_id=panel_message_id,
-                groups_page=groups_page,
-                step="pick",
-            ),
-        )
-
     def _pop_draft(self, owner_id: int) -> QuickReplyDraft | None:
         self._ensure_quick_reply_sessions()
         draft = self._quick_reply_drafts.pop(owner_id, None)
@@ -130,8 +119,6 @@ class TelegramQuickReplyDraftHandlers:
             return
         self._quick_reply_drafts.pop(owner_id, None)
         self._quick_reply_draft_tasks.pop(owner_id, None)
-        if draft.prompt_message_id is not None:
-            await self._delete_quick_reply_message_id(draft.prompt_message_id)
         await self._delete_quick_reply_message_id(draft.panel_message_id)
 
     async def _delete_quick_reply_message_id(self, message_id: int) -> None:
@@ -162,11 +149,7 @@ class TelegramQuickReplyDraftHandlers:
         delete_panel: bool,
     ) -> QuickReplyDraft | None:
         draft = self._pop_draft(owner_id)
-        if draft is None:
-            return None
-        if draft.prompt_message_id is not None:
-            await self._delete_quick_reply_message_id(draft.prompt_message_id)
-        if delete_panel:
+        if draft is not None and delete_panel:
             await self._delete_quick_reply_message_id(draft.panel_message_id)
         return draft
 
@@ -178,55 +161,27 @@ class TelegramQuickReplyDraftHandlers:
         keyboard: InlineKeyboardMarkup,
     ) -> None:
         await self.limiter.wait()
-        await self.bot.edit_message_text(
-            chat_id=self.settings.support_group_id,
-            message_id=draft.panel_message_id,
-            text=text,
-            reply_markup=keyboard,
-            parse_mode=None,
-        )
-
-    async def _send_draft_prompt(
-        self,
-        owner_id: int,
-        draft: QuickReplyDraft,
-        *,
-        text: str,
-        placeholder: str,
-    ) -> None:
-        if draft.prompt_message_id is not None:
-            await self._delete_quick_reply_message_id(draft.prompt_message_id)
-        await self.limiter.wait()
-        prompt = await self.bot.send_message(
-            chat_id=self.settings.support_group_id,
-            message_thread_id=self.quick_replies_topic_id,
-            text=text,
-            reply_markup=ForceReply(
-                selective=True,
-                input_field_placeholder=placeholder,
-            ),
-            parse_mode=None,
-        )
-        draft.prompt_message_id = prompt.message_id
-        self._set_draft(owner_id, draft)
+        try:
+            await self.bot.edit_message_text(
+                chat_id=self.settings.support_group_id,
+                message_id=draft.panel_message_id,
+                text=text,
+                reply_markup=keyboard,
+                parse_mode=None,
+            )
+        except TelegramBadRequest as error:
+            if not message_not_modified(error):
+                raise
 
     @staticmethod
-    def _draft_cancel_keyboard(
-        owner_id: int,
-        *,
-        back_action: str,
-    ) -> InlineKeyboardMarkup:
+    def _draft_cancel_keyboard(owner_id: int) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text="⬅️ Назад",
-                        callback_data=callback_data(back_action, owner_id),
-                    ),
-                    InlineKeyboardButton(
                         text="❌ Отмена",
                         callback_data=callback_data("draftcancel", owner_id),
-                    ),
+                    )
                 ]
             ]
         )
@@ -244,20 +199,12 @@ class TelegramQuickReplyDraftHandlers:
             draft,
             text=(
                 "➕ Новая группа\n\n"
-                "Отправьте название группы одним сообщением.\n"
+                "Напишите название группы обычным сообщением.\n"
                 f"Максимум {QUICK_REPLY_GROUP_NAME_MAX_LENGTH} символов.{status}"
             ),
-            keyboard=self._draft_cancel_keyboard(
-                owner_id,
-                back_action="draftback",
-            ),
+            keyboard=self._draft_cancel_keyboard(owner_id),
         )
-        await self._send_draft_prompt(
-            owner_id,
-            draft,
-            text="Введите название новой группы:",
-            placeholder="Например: НЕ РАБОТАЕТ AI",
-        )
+        self._set_draft(owner_id, draft)
 
     async def _prompt_title(
         self,
@@ -274,21 +221,13 @@ class TelegramQuickReplyDraftHandlers:
             text=(
                 "➕ Новый готовый ответ\n\n"
                 f"Группа: {draft.group_name}\n\n"
-                "Шаг 1 из 2. Отправьте короткое название.\n"
-                "Оно будет показано на кнопке.\n"
+                "Шаг 1 из 2. Напишите короткое название обычным сообщением.\n"
+                "Оно будет показано в списке ответов.\n"
                 f"Максимум {QUICK_REPLY_TITLE_MAX_LENGTH} символов.{status}"
             ),
-            keyboard=self._draft_cancel_keyboard(
-                owner_id,
-                back_action="draftback",
-            ),
+            keyboard=self._draft_cancel_keyboard(owner_id),
         )
-        await self._send_draft_prompt(
-            owner_id,
-            draft,
-            text="Введите название кнопки:",
-            placeholder="Например: AI не отвечает",
-        )
+        self._set_draft(owner_id, draft)
 
     async def _prompt_text(
         self,
@@ -310,17 +249,9 @@ class TelegramQuickReplyDraftHandlers:
                 "Шаг 2 из 2. Отправьте полный текст ответа.\n"
                 f"Максимум {QUICK_REPLY_TEXT_MAX_LENGTH} символов.{status}"
             ),
-            keyboard=self._draft_cancel_keyboard(
-                owner_id,
-                back_action="edittitle",
-            ),
+            keyboard=self._draft_cancel_keyboard(owner_id),
         )
-        await self._send_draft_prompt(
-            owner_id,
-            draft,
-            text="Отправьте текст готового ответа:",
-            placeholder="Текст, который оператор будет копировать",
-        )
+        self._set_draft(owner_id, draft)
 
     async def _show_draft_confirmation(
         self,
@@ -331,33 +262,6 @@ class TelegramQuickReplyDraftHandlers:
         assert draft.title is not None
         assert draft.text is not None
         draft.step = "confirm"
-        draft.prompt_message_id = None
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="✅ Сохранить",
-                        callback_data=callback_data("draftsave", owner_id),
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="✏️ Изменить название",
-                        callback_data=callback_data("edittitle", owner_id),
-                    ),
-                    InlineKeyboardButton(
-                        text="✏️ Изменить текст",
-                        callback_data=callback_data("edittext", owner_id),
-                    ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="❌ Отмена",
-                        callback_data=callback_data("draftcancel", owner_id),
-                    )
-                ],
-            ]
-        )
         await self._edit_draft_panel(
             draft,
             text=(
@@ -366,7 +270,32 @@ class TelegramQuickReplyDraftHandlers:
                 f"Название: {draft.title}\n\n"
                 f"{draft.text}"
             ),
-            keyboard=keyboard,
+            keyboard=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="✅ Сохранить",
+                            callback_data=callback_data("draftsave", owner_id),
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="✏️ Название",
+                            callback_data=callback_data("edittitle", owner_id),
+                        ),
+                        InlineKeyboardButton(
+                            text="✏️ Текст",
+                            callback_data=callback_data("edittext", owner_id),
+                        ),
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="❌ Отмена",
+                            callback_data=callback_data("draftcancel", owner_id),
+                        )
+                    ],
+                ]
+            ),
         )
         self._set_draft(owner_id, draft)
 
@@ -463,7 +392,7 @@ class TelegramQuickReplyDraftHandlers:
         )
         draft.group_id = group.id
         draft.group_name = group.name
-        draft.prompt_message_id = None
+        await self.refresh_quick_reply_menu(draft.groups_page)
         await self._prompt_title(message.from_user.id, draft)
 
     async def _handle_draft_input(self, message: Message) -> bool:
@@ -472,8 +401,6 @@ class TelegramQuickReplyDraftHandlers:
         self._ensure_quick_reply_sessions()
         draft = self._quick_reply_drafts.get(message.from_user.id)
         if draft is None:
-            return False
-        if draft.step == "pick":
             return False
         value = message.text or message.caption
         if not value:
@@ -498,9 +425,6 @@ class TelegramQuickReplyDraftHandlers:
                 )
             return True
 
-        if draft.prompt_message_id is not None:
-            await self._delete_quick_reply_message_id(draft.prompt_message_id)
-            draft.prompt_message_id = None
         await self._delete_quick_reply_message(message)
 
         if draft.step == "group":
@@ -550,6 +474,17 @@ class TelegramQuickReplyDraftHandlers:
             return None
         return draft
 
+    async def _create_draft_panel(self, owner_id: int) -> int:
+        await self._discard_draft(owner_id, delete_panel=True)
+        await self.limiter.wait()
+        panel = await self.bot.send_message(
+            chat_id=self.settings.support_group_id,
+            message_thread_id=self.quick_replies_topic_id,
+            text="➕ Открываю форму…",
+            parse_mode=None,
+        )
+        return panel.message_id
+
     async def _begin_title_draft(
         self,
         owner_id: int,
@@ -573,6 +508,20 @@ class TelegramQuickReplyDraftHandlers:
         )
         await self._prompt_title(owner_id, draft)
 
+    async def _start_title_draft(
+        self,
+        owner_id: int,
+        group: QuickReplyGroupView,
+        groups_page: int,
+    ) -> None:
+        panel_message_id = await self._create_draft_panel(owner_id)
+        await self._begin_title_draft(
+            owner_id,
+            panel_message_id,
+            group,
+            groups_page,
+        )
+
     async def _begin_group_draft(
         self,
         owner_id: int,
@@ -592,6 +541,18 @@ class TelegramQuickReplyDraftHandlers:
             step="group",
         )
         await self._prompt_group_name(owner_id, draft)
+
+    async def _start_group_draft(
+        self,
+        owner_id: int,
+        groups_page: int,
+    ) -> None:
+        panel_message_id = await self._create_draft_panel(owner_id)
+        await self._begin_group_draft(
+            owner_id,
+            panel_message_id,
+            groups_page,
+        )
 
     async def _save_draft(
         self,
@@ -645,24 +606,15 @@ class TelegramQuickReplyDraftHandlers:
                 ),
                 parse_mode=None,
             )
+            self._set_draft(callback.from_user.id, draft)
             await callback.answer("Название уже используется.", show_alert=True)
             return
         except QuickReplyGroupNotFoundError:
             self._pop_draft(callback.from_user.id)
             await message.edit_text(
-                "⚠️ Группа больше недоступна. Начните добавление заново.",
+                "⚠️ Группа больше недоступна. Начните добавление из закреплённой панели.",
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text="➕ Добавить готовый ответ",
-                                callback_data=callback_data(
-                                    "addpicker",
-                                    callback.from_user.id,
-                                    0,
-                                ),
-                            )
-                        ],
                         [
                             InlineKeyboardButton(
                                 text="❌ Закрыть",
@@ -671,7 +623,7 @@ class TelegramQuickReplyDraftHandlers:
                                     callback.from_user.id,
                                 ),
                             )
-                        ],
+                        ]
                     ]
                 ),
                 parse_mode=None,
@@ -685,7 +637,9 @@ class TelegramQuickReplyDraftHandlers:
             chat_id=message.chat.id,
             topic_id=message.message_thread_id,
         )
+        await self.refresh_quick_reply_menu(draft.groups_page)
         self._pop_draft(callback.from_user.id)
+
         rows: list[list[InlineKeyboardButton]] = []
         if utf16_code_units(result.reply.text) <= TELEGRAM_COPY_TEXT_LIMIT:
             rows.append(
@@ -721,14 +675,8 @@ class TelegramQuickReplyDraftHandlers:
                         ),
                     ),
                     InlineKeyboardButton(
-                        text="📖 Открыть группу",
-                        callback_data=callback_data(
-                            "group",
-                            callback.from_user.id,
-                            draft.group_id,
-                            0,
-                            draft.groups_page,
-                        ),
+                        text="📚 Открыть группу",
+                        switch_inline_query_current_chat=inline_group_query(draft.group_id),
                     ),
                 ],
                 [

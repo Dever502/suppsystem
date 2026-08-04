@@ -64,7 +64,7 @@ class FakeBot:
         )
 
     async def get_me(self) -> SimpleNamespace:
-        return SimpleNamespace(id=42)
+        return SimpleNamespace(id=42, supports_inline_queries=True)
 
     async def get_chat_member(self, support_group_id: int, user_id: int) -> SimpleNamespace:
         return SimpleNamespace(status="administrator", can_manage_topics=True)
@@ -73,6 +73,11 @@ class FakeBot:
 class FakeBotWithoutTopicPermission(FakeBot):
     async def get_chat_member(self, support_group_id: int, user_id: int) -> SimpleNamespace:
         return SimpleNamespace(status="administrator", can_manage_topics=False)
+
+
+class FakeBotWithoutInlineMode(FakeBot):
+    async def get_me(self) -> SimpleNamespace:
+        return SimpleNamespace(id=42, supports_inline_queries=False)
 
 
 @pytest.mark.parametrize(
@@ -108,6 +113,13 @@ def test_unrelated_bad_request_is_not_an_unchanged_topic() -> None:
 
 async def test_support_group_preflight_accepts_forum_admin() -> None:
     await validate_support_group(FakeBot(), -100123)  # type: ignore[arg-type]
+
+
+async def test_support_group_preflight_warns_when_inline_mode_is_disabled(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    await validate_support_group(FakeBotWithoutInlineMode(), -100123)  # type: ignore[arg-type]
+    assert "Telegram Inline Mode is disabled" in caplog.text
 
 
 async def test_support_group_preflight_rejects_missing_topic_permission() -> None:

@@ -115,6 +115,7 @@ async def validate_support_group(bot: Bot, support_group_id: int) -> None:
     is_forum = getattr(chat, "is_forum", None)
     member_status = _telegram_value(getattr(member, "status", "unknown"))
     can_manage_topics = getattr(member, "can_manage_topics", None)
+    supports_inline_queries = getattr(bot_user, "supports_inline_queries", None)
     errors: list[str] = []
 
     if chat_type != "supergroup":
@@ -134,6 +135,7 @@ async def validate_support_group(bot: Bot, support_group_id: int) -> None:
         "chat_title": getattr(chat, "title", None),
         "is_forum": is_forum,
         "bot_id": bot_user.id,
+        "supports_inline_queries": supports_inline_queries,
         "member_status": member_status,
         "can_manage_topics": can_manage_topics,
     }
@@ -143,6 +145,12 @@ async def validate_support_group(bot: Bot, support_group_id: int) -> None:
             extra={**extra, "preflight_errors": errors},
         )
         raise RuntimeError("Invalid Telegram support group configuration: " + "; ".join(errors))
+
+    if supports_inline_queries is not True:
+        logger.warning(
+            "Telegram Inline Mode is disabled; quick reply group buttons will not work",
+            extra={**extra, "event": "telegram_inline_mode_disabled"},
+        )
 
     logger.info("Configured support group passed preflight checks", extra=extra)
 

@@ -113,7 +113,7 @@ async def test_explicit_upgrade_target_ignores_ambient_database_url(
 
     await upgrade_database(explicit_url)
 
-    assert await current_revision(explicit_url) == "0018_quick_response_status"
+    assert await current_revision(explicit_url) == "0019_canonical_quick_responses"
     assert not ambient_path.exists()
 
 
@@ -130,12 +130,12 @@ async def test_explicit_downgrade_target_ignores_ambient_database_url(
     await downgrade_to_revision(explicit_url, "0009_ticket_last_activity")
 
     assert await current_revision(explicit_url) == "0009_ticket_last_activity"
-    assert await current_revision(ambient_url) == "0018_quick_response_status"
+    assert await current_revision(ambient_url) == "0019_canonical_quick_responses"
 
     await upgrade_database(explicit_url)
 
-    assert await current_revision(explicit_url) == "0018_quick_response_status"
-    assert await current_revision(ambient_url) == "0018_quick_response_status"
+    assert await current_revision(explicit_url) == "0019_canonical_quick_responses"
+    assert await current_revision(ambient_url) == "0019_canonical_quick_responses"
 
 
 async def test_alembic_cli_still_uses_ambient_database_url(
@@ -148,7 +148,7 @@ async def test_alembic_cli_still_uses_ambient_database_url(
 
     await asyncio.to_thread(command.upgrade, config, "head")
 
-    assert await current_revision(ambient_url) == "0018_quick_response_status"
+    assert await current_revision(ambient_url) == "0019_canonical_quick_responses"
 
 
 def test_alembic_config_accepts_percent_encoded_credentials() -> None:
@@ -231,9 +231,10 @@ async def test_upgrade_head_creates_query_indexes(tmp_path: Path) -> None:
         "source_chat_id",
         "source_message_id",
         "published_message_id",
+        "publication_format_version",
         "state",
         "invalid_until",
-        "status_message_id",
+        "warning_message_id",
     } <= quick_response_columns
     assert "quick_replies" not in table_names
     assert "quick_reply_groups" not in table_names
@@ -282,7 +283,10 @@ async def test_flat_quick_response_migration_preserves_existing_replies(
         async with engine.connect() as connection:
             migrated = (
                 await connection.execute(
-                    text("SELECT text, tags, state, published_message_id FROM quick_responses")
+                    text(
+                        "SELECT text, tags, state, published_message_id, "
+                        "publication_format_version FROM quick_responses"
+                    )
                 )
             ).one()
     finally:
@@ -292,6 +296,73 @@ async def test_flat_quick_response_migration_preserves_existing_replies(
     assert json.loads(migrated.tags) == []
     assert migrated.state == "valid"
     assert migrated.published_message_id is None
+    assert migrated.publication_format_version == 0
+
+
+async def test_canonical_response_migration_preserves_status_and_resets_pending_publication(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path}/canonical-quick-responses.db"
+    config = build_alembic_config(database_url)
+    await asyncio.to_thread(command.upgrade, config, "0018_quick_response_status")
+
+    engine = create_async_engine(database_url)
+    created_at = "2026-08-04 12:00:00+00:00"
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO quick_responses ("
+                    "id, text, tags, created_by_telegram_id, source_chat_id, "
+                    "source_message_id, published_message_id, state, invalid_until, "
+                    "status_message_id, created_at, updated_at"
+                    ") VALUES ("
+                    "1, :valid_text, :tags, 7, -100123, 401, 401, :valid_state, NULL, "
+                    "901, :created_at, :created_at"
+                    "), ("
+                    "2, :pending_text, :tags, 7, -100123, 402, 402, "
+                    ":pending_state, :invalid_until, 902, :created_at, :created_at"
+                    ")"
+                ),
+                {
+                    "valid_text": "Сохранённый ответ #VPN",
+                    "pending_text": "Невалидный ответ #1 #2 #3 #4 #5",
+                    "valid_state": "valid",
+                    "pending_state": "pending_deletion",
+                    "tags": json.dumps([]),
+                    "invalid_until": "2026-08-04 12:05:00+00:00",
+                    "created_at": created_at,
+                },
+            )
+    finally:
+        await engine.dispose()
+
+    await asyncio.to_thread(command.upgrade, config, "head")
+
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            rows = (
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT id, published_message_id, publication_format_version, "
+                            "warning_message_id FROM quick_responses ORDER BY id"
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+    finally:
+        await engine.dispose()
+
+    assert rows[0]["published_message_id"] == 401
+    assert rows[0]["publication_format_version"] == 0
+    assert rows[0]["warning_message_id"] == 901
+    assert rows[1]["published_message_id"] is None
+    assert rows[1]["publication_format_version"] == 0
+    assert rows[1]["warning_message_id"] == 902
 
 
 async def test_query_indexes_support_downgrade_and_reupgrade(tmp_path: Path) -> None:

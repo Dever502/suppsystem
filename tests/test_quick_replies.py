@@ -6,6 +6,7 @@ from pathlib import Path
 from suppsystem.database import Database
 from suppsystem.quick_replies import (
     QUICK_RESPONSE_PENDING_DELETION,
+    QUICK_RESPONSE_PUBLICATION_FORMAT_VERSION,
     QUICK_RESPONSE_VALID,
     QuickReplyService,
 )
@@ -37,7 +38,11 @@ async def test_quick_response_is_created_and_updated_by_source_message(
 
         assert created.state == QUICK_RESPONSE_VALID
         assert created.tags == ("#TikTok",)
-        assert created.published_message_id == 301
+        assert created.published_message_id is None
+        assert created.publication_format_version == 0
+
+        await service.record_publication(created.id, 901)
+        assert await service.complete_publication(created.id, 901) is True
 
         updated = await service.save_valid(
             text="Обновите TikTok #TikTok #Android",
@@ -49,6 +54,8 @@ async def test_quick_response_is_created_and_updated_by_source_message(
         assert updated.id == created.id
         assert updated.text == "Обновите TikTok #TikTok #Android"
         assert updated.tags == ("#TikTok", "#Android")
+        assert updated.published_message_id == 901
+        assert updated.publication_format_version == QUICK_RESPONSE_PUBLICATION_FORMAT_VERSION
         assert [item.id for item in await service.list_valid()] == [created.id]
     finally:
         await database.dispose()
@@ -71,14 +78,7 @@ async def test_pending_response_preserves_deadline_and_can_become_valid(
         )
         assert pending.state == QUICK_RESPONSE_PENDING_DELETION
         assert pending.invalid_until == deadline
-        assert (
-            await service.attach_status_message(
-                pending.id,
-                900,
-                expected_state=QUICK_RESPONSE_PENDING_DELETION,
-            )
-            is True
-        )
+        assert await service.attach_warning(pending.id, 900) is True
 
         corrected = await service.save_valid(
             text="Текст #1 #2",
@@ -89,8 +89,8 @@ async def test_pending_response_preserves_deadline_and_can_become_valid(
         assert corrected.id == pending.id
         assert corrected.state == QUICK_RESPONSE_VALID
         assert corrected.invalid_until is None
-        assert corrected.status_message_id == 900
-        assert await service.clear_status_message(corrected.id, 900) is True
+        assert corrected.warning_message_id == 900
+        assert await service.clear_warning(corrected.id, 900) is True
         assert (
             await service.delete_if_still_pending(
                 pending.id,

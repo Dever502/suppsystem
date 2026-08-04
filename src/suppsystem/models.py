@@ -430,9 +430,15 @@ class QuickResponse(Base):
     source_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     source_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     published_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    publication_format_version: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
+    )
     state: Mapped[str] = mapped_column(String(24), default="valid", nullable=False)
     invalid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    status_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    warning_message_id: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

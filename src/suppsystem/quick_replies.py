@@ -10,10 +10,13 @@ from suppsystem.database import Database, retry_sqlite_locks
 from suppsystem.models import QuickResponse
 from suppsystem.web_models import SystemSetting
 
-QUICK_RESPONSE_TEXT_MAX_LENGTH = 4096
+QUICK_RESPONSE_SAVED_MARKER = "[SAVE]"
+QUICK_RESPONSE_RENDER_SUFFIX = f"\n\n{QUICK_RESPONSE_SAVED_MARKER}"
+QUICK_RESPONSE_TEXT_MAX_LENGTH = 4096 - len(QUICK_RESPONSE_RENDER_SUFFIX)
 QUICK_RESPONSE_MAX_TAGS = 4
 QUICK_RESPONSE_VALID = "valid"
 QUICK_RESPONSE_PENDING_DELETION = "pending_deletion"
+QUICK_RESPONSE_PUBLICATION_FORMAT_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -27,15 +30,20 @@ class QuickResponseView:
     source_chat_id: int
     source_message_id: int
     published_message_id: int | None
+    publication_format_version: int
     state: str
     invalid_until: datetime | None
-    status_message_id: int | None
+    warning_message_id: int | None
     created_at: datetime
     updated_at: datetime
 
 
 def utf16_code_units(value: str) -> int:
     return sum(2 if ord(character) > 0xFFFF else 1 for character in value)
+
+
+def render_quick_response(text: str) -> str:
+    return f"{text}{QUICK_RESPONSE_RENDER_SUFFIX}"
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
@@ -57,9 +65,10 @@ def _view(response: QuickResponse) -> QuickResponseView:
         source_chat_id=response.source_chat_id,
         source_message_id=response.source_message_id,
         published_message_id=response.published_message_id,
+        publication_format_version=response.publication_format_version,
         state=response.state,
         invalid_until=_as_utc(response.invalid_until),
-        status_message_id=response.status_message_id,
+        warning_message_id=response.warning_message_id,
         created_at=response.created_at,
         updated_at=response.updated_at,
     )
@@ -168,7 +177,8 @@ class QuickReplyService:
                         created_by_username=operator_username,
                         source_chat_id=source_chat_id,
                         source_message_id=source_message_id,
-                        published_message_id=source_message_id,
+                        published_message_id=None,
+                        publication_format_version=0,
                         state=state,
                         invalid_until=invalid_until,
                     )
@@ -179,7 +189,9 @@ class QuickReplyService:
                     response.created_by_telegram_id = operator_telegram_id
                     response.created_by_display_name = operator_display_name
                     response.created_by_username = operator_username
-                    response.published_message_id = source_message_id
+                    if state == QUICK_RESPONSE_PENDING_DELETION:
+                        response.published_message_id = None
+                        response.publication_format_version = 0
                     response.state = state
                     response.invalid_until = invalid_until
                 try:
@@ -193,30 +205,24 @@ class QuickReplyService:
         raise RuntimeError("unreachable quick response upsert state")
 
     @retry_sqlite_locks
-    async def attach_status_message(
-        self,
-        response_id: int,
-        status_message_id: int,
-        *,
-        expected_state: str,
-    ) -> bool:
+    async def attach_warning(self, response_id: int, warning_message_id: int) -> bool:
         async with self.database.session() as session:
             response = await session.get(QuickResponse, response_id)
-            if response is None or response.state != expected_state:
+            if response is None or response.state != QUICK_RESPONSE_PENDING_DELETION:
                 return False
-            if response.status_message_id is not None:
-                return response.status_message_id == status_message_id
-            response.status_message_id = status_message_id
+            if response.warning_message_id is not None:
+                return response.warning_message_id == warning_message_id
+            response.warning_message_id = warning_message_id
             await session.commit()
             return True
 
     @retry_sqlite_locks
-    async def clear_status_message(self, response_id: int, status_message_id: int) -> bool:
+    async def clear_warning(self, response_id: int, warning_message_id: int) -> bool:
         async with self.database.session() as session:
             response = await session.get(QuickResponse, response_id)
-            if response is None or response.status_message_id != status_message_id:
+            if response is None or response.warning_message_id != warning_message_id:
                 return False
-            response.status_message_id = None
+            response.warning_message_id = None
             await session.commit()
             return True
 
@@ -289,13 +295,27 @@ class QuickReplyService:
             return views
 
     @retry_sqlite_locks
-    async def mark_published(self, response_id: int, message_id: int) -> None:
+    async def record_publication(self, response_id: int, message_id: int) -> None:
         async with self.database.session() as session:
             response = await session.get(QuickResponse, response_id)
-            if response is None:
+            if response is None or response.state != QUICK_RESPONSE_VALID:
                 return
             response.published_message_id = message_id
             await session.commit()
+
+    @retry_sqlite_locks
+    async def complete_publication(self, response_id: int, message_id: int) -> bool:
+        async with self.database.session() as session:
+            response = await session.get(QuickResponse, response_id)
+            if (
+                response is None
+                or response.state != QUICK_RESPONSE_VALID
+                or response.published_message_id != message_id
+            ):
+                return False
+            response.publication_format_version = QUICK_RESPONSE_PUBLICATION_FORMAT_VERSION
+            await session.commit()
+            return True
 
     @staticmethod
     def _instruction_setting_key(support_group_id: int) -> str:

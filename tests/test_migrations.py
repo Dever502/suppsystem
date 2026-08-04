@@ -36,7 +36,8 @@ EXPECTED_QUERY_INDEXES = {
     "ix_operator_actions_ticket_action_result",
     "ix_operator_actions_result_created",
     "uq_operator_actions_unresolved_ticket",
-    "ix_quick_replies_active_id",
+    "ix_quick_reply_groups_active_id",
+    "ix_quick_replies_group_active_id",
 }
 
 
@@ -112,7 +113,7 @@ async def test_explicit_upgrade_target_ignores_ambient_database_url(
 
     await upgrade_database(explicit_url)
 
-    assert await current_revision(explicit_url) == "0015_quick_replies"
+    assert await current_revision(explicit_url) == "0016_quick_reply_groups"
     assert not ambient_path.exists()
 
 
@@ -129,12 +130,12 @@ async def test_explicit_downgrade_target_ignores_ambient_database_url(
     await downgrade_to_revision(explicit_url, "0009_ticket_last_activity")
 
     assert await current_revision(explicit_url) == "0009_ticket_last_activity"
-    assert await current_revision(ambient_url) == "0015_quick_replies"
+    assert await current_revision(ambient_url) == "0016_quick_reply_groups"
 
     await upgrade_database(explicit_url)
 
-    assert await current_revision(explicit_url) == "0015_quick_replies"
-    assert await current_revision(ambient_url) == "0015_quick_replies"
+    assert await current_revision(explicit_url) == "0016_quick_reply_groups"
+    assert await current_revision(ambient_url) == "0016_quick_reply_groups"
 
 
 async def test_alembic_cli_still_uses_ambient_database_url(
@@ -147,7 +148,7 @@ async def test_alembic_cli_still_uses_ambient_database_url(
 
     await asyncio.to_thread(command.upgrade, config, "head")
 
-    assert await current_revision(ambient_url) == "0015_quick_replies"
+    assert await current_revision(ambient_url) == "0016_quick_reply_groups"
 
 
 def test_alembic_config_accepts_percent_encoded_credentials() -> None:
@@ -209,6 +210,11 @@ async def test_upgrade_head_creates_query_indexes(tmp_path: Path) -> None:
                     column["name"] for column in inspect(sync).get_columns("quick_replies")
                 }
             )
+            quick_reply_group_columns = await connection.run_sync(
+                lambda sync: {
+                    column["name"] for column in inspect(sync).get_columns("quick_reply_groups")
+                }
+            )
     finally:
         await engine.dispose()
     assert "delivered_message_id" in columns
@@ -221,6 +227,7 @@ async def test_upgrade_head_creates_query_indexes(tmp_path: Path) -> None:
     assert "sensitive" in message_columns
     assert "ordering_key" in inbound_columns
     assert {
+        "group_id",
         "title",
         "normalized_title",
         "text",
@@ -230,6 +237,73 @@ async def test_upgrade_head_creates_query_indexes(tmp_path: Path) -> None:
         "published_message_id",
         "active",
     } <= quick_reply_columns
+    assert {
+        "name",
+        "normalized_name",
+        "created_by_telegram_id",
+        "source_chat_id",
+        "source_message_id",
+        "published_message_id",
+        "active",
+    } <= quick_reply_group_columns
+
+
+async def test_quick_reply_group_migration_preserves_existing_replies(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path}/legacy-quick-replies.db"
+    config = build_alembic_config(database_url)
+    await asyncio.to_thread(command.upgrade, config, "0015_quick_replies")
+
+    engine = create_async_engine(database_url)
+    created_at = "2026-08-04 12:00:00+00:00"
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO quick_replies ("
+                    "title, normalized_title, text, created_by_telegram_id, "
+                    "source_chat_id, source_message_id, active, created_at, updated_at"
+                    ") VALUES ("
+                    ":title, :normalized_title, :text, :created_by_telegram_id, "
+                    ":source_chat_id, :source_message_id, :active, :created_at, :updated_at"
+                    ")"
+                ),
+                {
+                    "title": "Старый ответ",
+                    "normalized_title": "старый ответ",
+                    "text": "Старый текст",
+                    "created_by_telegram_id": 7,
+                    "source_chat_id": -100123,
+                    "source_message_id": 501,
+                    "active": True,
+                    "created_at": created_at,
+                    "updated_at": created_at,
+                },
+            )
+    finally:
+        await engine.dispose()
+
+    await asyncio.to_thread(command.upgrade, config, "head")
+
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            migrated = (
+                await connection.execute(
+                    text(
+                        "SELECT r.title, r.group_id, g.name "
+                        "FROM quick_replies AS r "
+                        "JOIN quick_reply_groups AS g ON g.id = r.group_id"
+                    )
+                )
+            ).one()
+    finally:
+        await engine.dispose()
+
+    assert migrated.title == "Старый ответ"
+    assert migrated.group_id is not None
+    assert migrated.name == "Общее"
 
 
 async def test_query_indexes_support_downgrade_and_reupgrade(tmp_path: Path) -> None:

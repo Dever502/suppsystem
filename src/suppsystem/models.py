@@ -401,6 +401,40 @@ class SupportBlock(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class QuickReplyGroup(Base):
+    __tablename__ = "quick_reply_groups"
+    __table_args__ = (
+        UniqueConstraint("normalized_name", name="uq_quick_reply_groups_normalized_name"),
+        UniqueConstraint(
+            "source_chat_id",
+            "source_message_id",
+            name="uq_quick_reply_groups_source",
+        ),
+        UniqueConstraint(
+            "published_message_id",
+            name="uq_quick_reply_groups_published_message",
+        ),
+        Index("ix_quick_reply_groups_active_id", "active", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    normalized_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    created_by_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_by_display_name: Mapped[str | None] = mapped_column(String(255))
+    created_by_username: Mapped[str | None] = mapped_column(String(255))
+    source_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    published_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=_TRUE_SERVER_DEFAULT, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class QuickReply(Base):
     __tablename__ = "quick_replies"
     __table_args__ = (
@@ -409,12 +443,20 @@ class QuickReply(Base):
             "source_message_id",
             name="uq_quick_replies_source",
         ),
-        UniqueConstraint("normalized_title", name="uq_quick_replies_normalized_title"),
+        UniqueConstraint(
+            "group_id",
+            "normalized_title",
+            name="uq_quick_replies_group_title",
+        ),
         UniqueConstraint("published_message_id", name="uq_quick_replies_published_message"),
-        Index("ix_quick_replies_active_id", "active", "id"),
+        Index("ix_quick_replies_group_active_id", "group_id", "active", "id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("quick_reply_groups.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
     title: Mapped[str] = mapped_column(String(64), nullable=False)
     normalized_title: Mapped[str] = mapped_column(String(256), nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)

@@ -62,7 +62,7 @@ waiting_topic ──> pending ──> processing ──> delivered
 - общая блокировка тикета перед ingress и ответом оператора; legacy blocklist сохраняет
   совместимость Telegram-блокировки до создания тикета;
 - дедупликация Telegram updates и API-мутаций;
-- персональный admission limit: 30 личных сообщений в минуту и 150 в час.
+- персональный admission limit: 30 личных сообщений в минуту и 200 в час.
 
 Доставка — **at-least-once**. Telegram не поддерживает idempotency key, поэтому сбой между
 `send` и commit иногда создаёт дубль.

@@ -436,12 +436,13 @@ def test_gift_notification_formats_days_and_expiration(
     text = gift_notification_text(
         extend_days,
         datetime(2026, 8, 5, 12, 0, tzinfo=UTC),
+        now=datetime(2026, 8, 4, 12, 0, tzinfo=UTC),
     )
 
     assert text == (
         "🎁 <b>Подписка продлена</b>\n\n"
         f"{expected_duration}\n\n"
-        "Новая дата окончания: <b>5 августа 2026</b>"
+        "Новая дата окончания: <b>5 августа 2026</b> (1 день)"
     )
 
 
@@ -666,10 +667,9 @@ async def test_panel_extend_subscription_audits_and_is_idempotent(database: Data
     assert notification.payload == {
         "kind": "send_text",
         "target_chat_id": 123456789,
-        "text": (
-            "🎁 <b>Подписка продлена</b>\n\n"
-            "Вам добавлено <b>30 дней</b> подписки.\n\n"
-            "Новая дата окончания: <b>24 августа 2026</b>"
+        "text": gift_notification_text(
+            30,
+            datetime(2026, 8, 24, 12, 0, tzinfo=UTC),
         ),
         "parse_mode": "HTML",
     }
@@ -979,10 +979,9 @@ async def test_gift_reconcile_worker_handles_eventual_consistency(database: Data
             ).all()
         )
     assert len(notifications) == 1
-    assert notifications[0].payload["text"] == (
-        "🎁 <b>Подписка продлена</b>\n\n"
-        "Вам добавлено <b>30 дней</b> подписки.\n\n"
-        "Новая дата окончания: <b>24 августа 2026</b>"
+    assert notifications[0].payload["text"] == gift_notification_text(
+        30,
+        datetime(2026, 8, 24, 12, 0, tzinfo=UTC),
     )
 
 

@@ -32,13 +32,14 @@ QUICK_RESPONSE_TOPIC_REFRESH_INTERVAL_SECONDS = 60.0
 QUICK_RESPONSE_DELETE_CALLBACK_PREFIX = "quick_response_delete"
 QUICK_RESPONSE_DELETE_TEXT = "🗑 Удалить"
 QUICK_RESPONSE_WARNING_TEXT = (
-    "⚠️ Неправильное количество тегов. Укажите не более 4 тегов, "
+    "⚠️ Неправильные хештеги. Используйте формат #текст без пробела и не более 5 тегов, "
     "иначе сообщение будет удалено через 5 минут."
 )
 QUICK_RESPONSE_INSTRUCTION_TEXT = (
     "⚡ Быстрые ответы\n\n"
     "Отправьте готовый ответ обычным текстовым сообщением. "
-    "Можно добавить до 4 произвольных хештегов. После сохранения бот заменит исходник "
+    "Можно добавить до 5 произвольных хештегов в формате #текст без пробела. "
+    "После сохранения бот заменит исходник "
     "оформленной копией.\n\n"
     "Для поиска используйте лупу Telegram и текст или хештег. "
     "Для окончательного удаления используйте кнопку под ответом."
@@ -56,6 +57,24 @@ def _message_not_modified(error: TelegramBadRequest) -> bool:
 def _message_missing(error: TelegramBadRequest) -> bool:
     text = str(error).casefold()
     return "message to edit not found" in text or "message_id_invalid" in text
+
+
+def _raw_hashtags(text: str) -> list[str] | None:
+    tags: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] != "#":
+            index += 1
+            continue
+        end = index + 1
+        while end < len(text) and (text[end].isalnum() or text[end] == "_"):
+            end += 1
+        body = text[index + 1 : end]
+        if not body or not any(character.isalnum() for character in body):
+            return None
+        tags.append(text[index:end])
+        index = end
+    return tags
 
 
 def quick_response_delete_keyboard(response_id: int) -> InlineKeyboardMarkup:
@@ -420,8 +439,9 @@ class TelegramQuickReplyHandlers:
                 source_message_id=message.message_id,
             )
             tags = self._hashtags(message)
+            hashtags_valid = _raw_hashtags(message.text) == tags
             try:
-                if len(tags) <= QUICK_RESPONSE_MAX_TAGS:
+                if hashtags_valid and len(tags) <= QUICK_RESPONSE_MAX_TAGS:
                     await self._accept_response(message, tags)
                 else:
                     await self._reject_response(message, tags, previous)

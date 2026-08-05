@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, call
 
+import pytest
 from aiogram.enums import ChatType, MessageEntityType
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import DeleteMessage, EditMessageText
@@ -125,7 +126,9 @@ async def test_valid_quick_response_is_saved_unchanged(
         service = QuickReplyService(database)
         bot = _bot()
         harness = _harness(service, bot)
-        message = _message(text="Переустановите TikTok #TikTok #Android #VPN #Инструкция")
+        message = _message(
+            text="Переустановите TikTok #TikTok #Android #VPN #Инструкция #Поддержка"
+        )
 
         assert await harness.handle_quick_reply_topic_message(message) is True
 
@@ -136,7 +139,7 @@ async def test_valid_quick_response_is_saved_unchanged(
         assert saved is not None
         assert saved.state == QUICK_RESPONSE_VALID
         assert saved.text == message.text
-        assert saved.tags == ("#TikTok", "#Android", "#VPN", "#Инструкция")
+        assert saved.tags == ("#TikTok", "#Android", "#VPN", "#Инструкция", "#Поддержка")
         assert saved.published_message_id == 501
         assert saved.publication_format_version == QUICK_RESPONSE_PUBLICATION_FORMAT_VERSION
         assert saved.warning_message_id is None
@@ -222,7 +225,7 @@ async def test_invalid_response_gets_exact_warning_and_edit_makes_it_valid(
         service = QuickReplyService(database)
         bot = _bot()
         harness = _harness(service, bot)
-        message = _message(text="Текст #1 #2 #3 #4 #5")
+        message = _message(text="Текст #1 #2 #3 #4 #5 #6")
 
         await harness.handle_quick_reply_topic_message(message)
 
@@ -238,7 +241,7 @@ async def test_invalid_response_gets_exact_warning_and_edit_makes_it_valid(
             parse_mode=None,
         )
 
-        message.text = "Исправленный текст #1 #2 #3 #4"
+        message.text = "Исправленный текст #1 #2 #3 #4 #5"
         message.entities = _hashtags(message.text)
         await harness.handle_quick_reply_topic_message(message)
 
@@ -268,6 +271,45 @@ async def test_invalid_response_gets_exact_warning_and_edit_makes_it_valid(
         await database.dispose()
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Ответ # Fuck",
+        "Ответ #",
+        "Ответ #-VPN",
+        "Ответ ##VPN",
+        "Ответ #___",
+    ],
+)
+async def test_malformed_hashtag_is_rejected(text: str, tmp_path: Path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/malformed-hashtag.db")
+    await database.create_schema_for_tests()
+    harness = QuickReplyHarness()
+    try:
+        service = QuickReplyService(database)
+        bot = _bot()
+        harness = _harness(service, bot)
+        message = _message(text=text)
+
+        await harness.handle_quick_reply_topic_message(message)
+
+        pending = await service.get_by_source(
+            source_chat_id=-100123,
+            source_message_id=301,
+        )
+        assert pending is not None
+        assert pending.state == QUICK_RESPONSE_PENDING_DELETION
+        assert pending.warning_message_id == 901
+        message.reply.assert_awaited_once_with(
+            QUICK_RESPONSE_WARNING_TEXT,
+            parse_mode=None,
+        )
+        bot.send_message.assert_not_awaited()
+    finally:
+        await harness.shutdown_quick_reply_runtime()
+        await database.dispose()
+
+
 async def test_invalid_response_and_warning_are_deleted_after_deadline(
     tmp_path: Path,
     monkeypatch,
@@ -283,7 +325,7 @@ async def test_invalid_response_and_warning_are_deleted_after_deadline(
         service = QuickReplyService(database)
         bot = _bot()
         harness = _harness(service, bot)
-        message = _message(text="Текст #1 #2 #3 #4 #5")
+        message = _message(text="Текст #1 #2 #3 #4 #5 #6")
 
         await harness.handle_quick_reply_topic_message(message)
         await asyncio.sleep(0.05)
@@ -683,8 +725,8 @@ async def test_pending_expirations_are_restored_after_restart(tmp_path: Path) ->
     try:
         service = QuickReplyService(database)
         await service.save_pending_deletion(
-            text="Текст #1 #2 #3 #4 #5",
-            tags=["#1", "#2", "#3", "#4", "#5"],
+            text="Текст #1 #2 #3 #4 #5 #6",
+            tags=["#1", "#2", "#3", "#4", "#5", "#6"],
             operator_telegram_id=7,
             operator_display_name="Operator",
             operator_username="operator",

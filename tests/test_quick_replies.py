@@ -74,8 +74,8 @@ async def test_pending_response_preserves_deadline_and_can_become_valid(
         service = QuickReplyService(database)
         deadline = datetime.now(UTC) + timedelta(minutes=5)
         pending = await service.save_pending_deletion(
-            text="Текст #1 #2 #3 #4 #5",
-            tags=["#1", "#2", "#3", "#4", "#5"],
+            text="Текст #1 #2 #3 #4 #5 #6",
+            tags=["#1", "#2", "#3", "#4", "#5", "#6"],
             source_message_id=302,
             invalid_until=deadline,
             **_operator_fields(),  # type: ignore[arg-type]
@@ -115,8 +115,8 @@ async def test_pending_response_is_deleted_only_for_matching_deadline(
         service = QuickReplyService(database)
         deadline = datetime.now(UTC) + timedelta(minutes=5)
         pending = await service.save_pending_deletion(
-            text="Текст #1 #2 #3 #4 #5",
-            tags=["#1", "#2", "#3", "#4", "#5"],
+            text="Текст #1 #2 #3 #4 #5 #6",
+            tags=["#1", "#2", "#3", "#4", "#5", "#6"],
             source_message_id=303,
             invalid_until=deadline,
             **_operator_fields(),  # type: ignore[arg-type]

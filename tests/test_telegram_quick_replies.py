@@ -6,16 +6,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, call
 
-from aiogram.enums import MessageEntityType
+from aiogram.enums import ChatType, MessageEntityType
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.methods import EditMessageText
-from aiogram.types import Message, MessageEntity
+from aiogram.methods import DeleteMessage, EditMessageText
+from aiogram.types import Chat, Message, MessageEntity, User
 from pydantic import SecretStr
 
 from suppsystem.authorization import AuthorizationService
 from suppsystem.config import Settings
 from suppsystem.database import Database
 from suppsystem.quick_replies import (
+    QUICK_RESPONSE_DELETED,
     QUICK_RESPONSE_PENDING_DELETION,
     QUICK_RESPONSE_PUBLICATION_FORMAT_VERSION,
     QUICK_RESPONSE_VALID,
@@ -23,10 +24,12 @@ from suppsystem.quick_replies import (
     render_quick_response,
 )
 from suppsystem.telegram_quick_replies import (
+    QUICK_RESPONSE_DELETE_CALLBACK_PREFIX,
     QUICK_RESPONSE_INSTRUCTION_TEXT,
     QUICK_RESPONSE_WARNING_TEXT,
     QuickResponseTopicRefreshWorker,
     TelegramQuickReplyHandlers,
+    quick_response_delete_keyboard,
 )
 
 
@@ -142,6 +145,7 @@ async def test_valid_quick_response_is_saved_unchanged(
             message_thread_id=777,
             text=render_quick_response(message.text),
             parse_mode=None,
+            reply_markup=quick_response_delete_keyboard(saved.id),
         )
         bot.delete_message.assert_awaited_once_with(chat_id=-100123, message_id=301)
         message.reply.assert_not_awaited()
@@ -197,6 +201,7 @@ async def test_existing_separate_save_reply_is_replaced_by_one_canonical_message
             message_thread_id=777,
             text=render_quick_response("Старый ответ #VPN"),
             parse_mode=None,
+            reply_markup=quick_response_delete_keyboard(saved.id),
         )
         assert bot.delete_message.await_args_list == [
             call(chat_id=-100123, message_id=301),
@@ -251,6 +256,7 @@ async def test_invalid_response_gets_exact_warning_and_edit_makes_it_valid(
             message_thread_id=777,
             text=render_quick_response(message.text),
             parse_mode=None,
+            reply_markup=quick_response_delete_keyboard(corrected.id),
         )
         assert bot.delete_message.await_args_list == [
             call(chat_id=-100123, message_id=301),
@@ -315,6 +321,161 @@ async def test_message_outside_quick_response_topic_is_not_consumed(
             is False
         )
         assert await service.list_valid() == []
+    finally:
+        await harness.shutdown_quick_reply_runtime()
+        await database.dispose()
+
+
+async def test_delete_button_soft_deletes_response_without_confirmation(
+    tmp_path: Path,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/delete-quick-response.db")
+    await database.create_schema_for_tests()
+    harness = QuickReplyHarness()
+    try:
+        service = QuickReplyService(database)
+        saved = await service.save_valid(
+            text="Неправильный ответ #VPN",
+            tags=["#VPN"],
+            operator_telegram_id=7,
+            operator_display_name="Operator",
+            operator_username="operator",
+            source_chat_id=-100123,
+            source_message_id=301,
+        )
+        await service.record_publication(saved.id, 501)
+        assert await service.complete_publication(saved.id, 501) is True
+        bot = _bot()
+        harness = _harness(service, bot)
+        callback = SimpleNamespace(
+            data=f"{QUICK_RESPONSE_DELETE_CALLBACK_PREFIX}:{saved.id}",
+            from_user=User(id=7, is_bot=False, first_name="Operator"),
+            message=Message(
+                message_id=501,
+                date=datetime.now(UTC),
+                chat=Chat(id=-100123, type=ChatType.SUPERGROUP),
+                from_user=User(id=42, is_bot=True, first_name="Bot"),
+                message_thread_id=777,
+                text=render_quick_response(saved.text),
+            ),
+            answer=AsyncMock(),
+        )
+
+        await harness.handle_quick_response_delete_callback(callback)  # type: ignore[arg-type]
+
+        deleted = await service.get_by_source(
+            source_chat_id=-100123,
+            source_message_id=301,
+        )
+        assert deleted is not None
+        assert deleted.state == QUICK_RESPONSE_DELETED
+        assert deleted.deleted_by_telegram_id == 7
+        assert deleted.deleted_at is not None
+        assert deleted.published_message_id is None
+        assert await service.list_valid() == []
+        callback.answer.assert_awaited_once_with(
+            "Быстрый ответ удалён.",
+            show_alert=False,
+        )
+        bot.delete_message.assert_awaited_once_with(chat_id=-100123, message_id=501)
+        bot.send_message.assert_not_awaited()
+    finally:
+        await harness.shutdown_quick_reply_runtime()
+        await database.dispose()
+
+
+async def test_failed_telegram_delete_is_retried_from_tombstone(tmp_path: Path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/retry-delete.db")
+    await database.create_schema_for_tests()
+    harness = QuickReplyHarness()
+    try:
+        service = QuickReplyService(database)
+        saved = await service.save_valid(
+            text="Ответ для удаления #VPN",
+            tags=["#VPN"],
+            operator_telegram_id=7,
+            operator_display_name="Operator",
+            operator_username="operator",
+            source_chat_id=-100123,
+            source_message_id=301,
+        )
+        await service.record_publication(saved.id, 501)
+        assert await service.complete_publication(saved.id, 501) is True
+        rejected_delete = TelegramBadRequest(
+            method=DeleteMessage(chat_id=-100123, message_id=501),
+            message="Bad Request: message cannot be deleted",
+        )
+        bot = _bot()
+        bot.delete_message = AsyncMock(side_effect=rejected_delete)
+        harness = _harness(service, bot)
+        callback = SimpleNamespace(
+            data=f"{QUICK_RESPONSE_DELETE_CALLBACK_PREFIX}:{saved.id}",
+            from_user=User(id=7, is_bot=False, first_name="Operator"),
+            message=Message(
+                message_id=501,
+                date=datetime.now(UTC),
+                chat=Chat(id=-100123, type=ChatType.SUPERGROUP),
+                from_user=User(id=42, is_bot=True, first_name="Bot"),
+                message_thread_id=777,
+                text=render_quick_response(saved.text),
+            ),
+            answer=AsyncMock(),
+        )
+
+        await harness.handle_quick_response_delete_callback(callback)  # type: ignore[arg-type]
+
+        tombstone = await service.get(saved.id)
+        assert tombstone is not None
+        assert tombstone.state == QUICK_RESPONSE_DELETED
+        assert tombstone.published_message_id == 501
+
+        bot.delete_message = AsyncMock()
+        await harness._cleanup_deleted_publications()
+
+        cleaned = await service.get(saved.id)
+        assert cleaned is not None
+        assert cleaned.published_message_id is None
+        bot.delete_message.assert_awaited_once_with(chat_id=-100123, message_id=501)
+    finally:
+        await harness.shutdown_quick_reply_runtime()
+        await database.dispose()
+
+
+async def test_unauthorized_operator_cannot_delete_quick_response(tmp_path: Path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/unauthorized-delete.db")
+    await database.create_schema_for_tests()
+    harness = QuickReplyHarness()
+    try:
+        service = QuickReplyService(database)
+        saved = await service.save_valid(
+            text="Ответ #VPN",
+            tags=["#VPN"],
+            operator_telegram_id=7,
+            operator_display_name="Operator",
+            operator_username="operator",
+            source_chat_id=-100123,
+            source_message_id=301,
+        )
+        await service.record_publication(saved.id, 501)
+        bot = _bot()
+        harness = _harness(service, bot)
+        callback = SimpleNamespace(
+            data=f"{QUICK_RESPONSE_DELETE_CALLBACK_PREFIX}:{saved.id}",
+            from_user=User(id=8, is_bot=False, first_name="Other"),
+            message=None,
+            answer=AsyncMock(),
+        )
+
+        await harness.handle_quick_response_delete_callback(callback)  # type: ignore[arg-type]
+
+        active = await service.get_by_source(
+            source_chat_id=-100123,
+            source_message_id=301,
+        )
+        assert active is not None
+        assert active.state == QUICK_RESPONSE_VALID
+        callback.answer.assert_awaited_once_with("Недостаточно прав.", show_alert=True)
+        bot.delete_message.assert_not_awaited()
     finally:
         await harness.shutdown_quick_reply_runtime()
         await database.dispose()
@@ -399,6 +560,9 @@ async def test_deleted_topic_is_recreated_and_valid_responses_are_restored(
         assert bot.send_message.await_args_list[1].kwargs["text"] == render_quick_response(
             "Сохранённый ответ #VPN"
         )
+        assert bot.send_message.await_args_list[1].kwargs[
+            "reply_markup"
+        ] == quick_response_delete_keyboard(saved.id)
         restored = await service.get_by_source(
             source_chat_id=-100123,
             source_message_id=401,
@@ -453,6 +617,60 @@ async def test_topic_recovered_before_adapter_start_restores_responses(
             render_quick_response("Ответ переживёт рестарт #VPN")
         )
         assert await service.instruction_topic_id(-100123) == 888
+    finally:
+        await harness.shutdown_quick_reply_runtime()
+        await database.dispose()
+
+
+async def test_manually_deleted_active_response_is_restored_after_restart(
+    tmp_path: Path,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/restore-deleted-message.db")
+    await database.create_schema_for_tests()
+    harness = QuickReplyHarness()
+    try:
+        service = QuickReplyService(database)
+        saved = await service.save_valid(
+            text="Надёжный ответ #VPN",
+            tags=["#VPN"],
+            operator_telegram_id=7,
+            operator_display_name="Operator",
+            operator_username="operator",
+            source_chat_id=-100123,
+            source_message_id=301,
+        )
+        await service.record_publication(saved.id, 501)
+        assert await service.complete_publication(saved.id, 501) is True
+        missing_message = TelegramBadRequest(
+            method=EditMessageText(
+                chat_id=-100123,
+                message_id=501,
+                text=render_quick_response(saved.text),
+            ),
+            message="Bad Request: message to edit not found",
+        )
+        bot = _bot()
+        bot.edit_message_text = AsyncMock(side_effect=missing_message)
+        bot.send_message = AsyncMock(
+            side_effect=[
+                SimpleNamespace(message_id=600),
+                SimpleNamespace(message_id=502),
+            ]
+        )
+        harness = _harness(service, bot)
+
+        await harness.ensure_quick_response_topic()
+
+        restored = await service.get_by_source(
+            source_chat_id=-100123,
+            source_message_id=301,
+        )
+        assert restored is not None
+        assert restored.state == QUICK_RESPONSE_VALID
+        assert restored.published_message_id == 502
+        assert bot.send_message.await_args_list[1].kwargs[
+            "reply_markup"
+        ] == quick_response_delete_keyboard(saved.id)
     finally:
         await harness.shutdown_quick_reply_runtime()
         await database.dispose()

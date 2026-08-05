@@ -439,6 +439,8 @@ class QuickResponse(Base):
     state: Mapped[str] = mapped_column(String(24), default="valid", nullable=False)
     invalid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     warning_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    deleted_by_telegram_id: Mapped[int | None] = mapped_column(BigInteger)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

@@ -3,12 +3,16 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from suppsystem.database import Database
 from suppsystem.quick_replies import (
+    QUICK_RESPONSE_DELETED,
     QUICK_RESPONSE_PENDING_DELETION,
     QUICK_RESPONSE_PUBLICATION_FORMAT_VERSION,
     QUICK_RESPONSE_VALID,
     QuickReplyService,
+    QuickResponseDeletedError,
 )
 from suppsystem.web_models import SystemSetting
 
@@ -137,6 +141,69 @@ async def test_pending_response_is_deleted_only_for_matching_deadline(
             )
             is None
         )
+    finally:
+        await database.dispose()
+
+
+async def test_valid_response_is_soft_deleted_and_cannot_be_reactivated(
+    tmp_path: Path,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/soft-deleted-response.db")
+    await database.create_schema_for_tests()
+    try:
+        service = QuickReplyService(database)
+        saved = await service.save_valid(
+            text="Неправильный ответ #VPN",
+            tags=["#VPN"],
+            source_message_id=304,
+            **_operator_fields(),  # type: ignore[arg-type]
+        )
+        await service.record_publication(saved.id, 904)
+        assert await service.complete_publication(saved.id, 904) is True
+
+        assert (
+            await service.soft_delete_valid(
+                saved.id,
+                published_message_id=999,
+                operator_telegram_id=8,
+            )
+            is None
+        )
+        deleted = await service.soft_delete_valid(
+            saved.id,
+            published_message_id=904,
+            operator_telegram_id=8,
+        )
+
+        assert deleted is not None
+        assert deleted.state == QUICK_RESPONSE_DELETED
+        assert deleted.deleted_by_telegram_id == 8
+        assert deleted.deleted_at is not None
+        assert await service.list_valid() == []
+        assert [item.id for item in await service.list_deleted_with_publication()] == [saved.id]
+        with pytest.raises(QuickResponseDeletedError):
+            await service.save_valid(
+                text="Повтор события #VPN",
+                tags=["#VPN"],
+                source_message_id=304,
+                **_operator_fields(),  # type: ignore[arg-type]
+            )
+
+        assert (
+            await service.clear_deleted_publication(
+                saved.id,
+                published_message_id=904,
+            )
+            is True
+        )
+        assert await service.list_deleted_with_publication() == []
+        tombstone = await service.get_by_source(
+            source_chat_id=-100123,
+            source_message_id=304,
+        )
+        assert tombstone is not None
+        assert tombstone.state == QUICK_RESPONSE_DELETED
+        assert tombstone.published_message_id is None
     finally:
         await database.dispose()
 

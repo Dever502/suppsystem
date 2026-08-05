@@ -1,5 +1,3 @@
-"""Stable aiogram adapter facade."""
-
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatType
 from aiogram.filters import CommandStart
@@ -33,6 +31,7 @@ from suppsystem.telegram_panel_handler import (
     GIFT_DAYS_ERROR_TEXT as GIFT_DAYS_ERROR_TEXT,
 )
 from suppsystem.telegram_panel_handler import TelegramPanelCommandHandler
+from suppsystem.telegram_quick_replies import QUICK_RESPONSE_DELETE_CALLBACK_PREFIX
 from suppsystem.telegram_statistics import STATISTICS_CALLBACK_PREFIX
 
 
@@ -85,6 +84,10 @@ class TelegramSupportAdapter(TelegramOperatorHandlers):
         self.router.edited_message.register(
             self.handle_edited_group_message,
             F.chat.id == self.settings.support_group_id,
+        )
+        self.router.callback_query.register(
+            self.handle_quick_response_delete_callback,
+            F.data.startswith(f"{QUICK_RESPONSE_DELETE_CALLBACK_PREFIX}:"),
         )
         self.router.callback_query.register(
             self.handle_statistics_callback,

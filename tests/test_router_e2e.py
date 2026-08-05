@@ -129,7 +129,7 @@ async def test_router_registers_and_routes_private_and_authorized_group_boundari
 
     assert len(adapter.router.message.handlers) == 3
     assert len(adapter.router.edited_message.handlers) == 1
-    assert len(adapter.router.callback_query.handlers) == 2
+    assert len(adapter.router.callback_query.handlers) == 3
     assert len(adapter.router.inline_query.handlers) == 0
 
     await dispatcher.feed_update(

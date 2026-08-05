@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from suppsystem.authorization import AuthorizationService
 from suppsystem.config import Settings
@@ -17,6 +17,7 @@ from suppsystem.quick_replies import (
     QUICK_RESPONSE_PUBLICATION_FORMAT_VERSION,
     QUICK_RESPONSE_VALID,
     QuickReplyService,
+    QuickResponseDeletedError,
     QuickResponseView,
     render_quick_response,
 )
@@ -28,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 QUICK_RESPONSE_DELETE_DELAY_SECONDS = 300
 QUICK_RESPONSE_TOPIC_REFRESH_INTERVAL_SECONDS = 60.0
+QUICK_RESPONSE_DELETE_CALLBACK_PREFIX = "quick_response_delete"
+QUICK_RESPONSE_DELETE_TEXT = "🗑 Удалить"
 QUICK_RESPONSE_WARNING_TEXT = (
     "⚠️ Неправильное количество тегов. Укажите не более 4 тегов, "
     "иначе сообщение будет удалено через 5 минут."
@@ -37,7 +40,8 @@ QUICK_RESPONSE_INSTRUCTION_TEXT = (
     "Отправьте готовый ответ обычным текстовым сообщением. "
     "Можно добавить до 4 произвольных хештегов. После сохранения бот заменит исходник "
     "оформленной копией.\n\n"
-    "Для поиска используйте лупу Telegram и текст или хештег."
+    "Для поиска используйте лупу Telegram и текст или хештег. "
+    "Для окончательного удаления используйте кнопку под ответом."
 )
 
 
@@ -54,6 +58,19 @@ def _message_missing(error: TelegramBadRequest) -> bool:
     return "message to edit not found" in text or "message_id_invalid" in text
 
 
+def quick_response_delete_keyboard(response_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=QUICK_RESPONSE_DELETE_TEXT,
+                    callback_data=f"{QUICK_RESPONSE_DELETE_CALLBACK_PREFIX}:{response_id}",
+                )
+            ]
+        ]
+    )
+
+
 class TelegramQuickReplyHandlers:
     bot: Bot
     authorization: AuthorizationService
@@ -64,12 +81,16 @@ class TelegramQuickReplyHandlers:
     recover_quick_replies_topic: Callable[[int], Awaitable[int]] | None
     _quick_response_tasks: dict[int, asyncio.Task[None]]
     _quick_response_locks: TicketLockPool
+    _quick_response_record_locks: TicketLockPool
     _quick_response_topic_lock: asyncio.Lock
+    _quick_response_catalog_verified: bool
 
     def initialize_quick_reply_runtime(self) -> None:
         self._quick_response_tasks = {}
         self._quick_response_locks = TicketLockPool()
+        self._quick_response_record_locks = TicketLockPool()
         self._quick_response_topic_lock = asyncio.Lock()
+        self._quick_response_catalog_verified = False
 
     @staticmethod
     def _hashtags(message: Message) -> list[str]:
@@ -113,7 +134,13 @@ class TelegramQuickReplyHandlers:
             return False
         return True
 
-    async def _edit_bot_message(self, message_id: int, text: str) -> bool:
+    async def _edit_bot_message(
+        self,
+        message_id: int,
+        text: str,
+        *,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> bool:
         try:
             await self.limiter.wait()
             await self.bot.edit_message_text(
@@ -121,6 +148,7 @@ class TelegramQuickReplyHandlers:
                 message_id=message_id,
                 text=text,
                 parse_mode=None,
+                reply_markup=reply_markup,
             )
         except TelegramBadRequest as error:
             if _message_not_modified(error):
@@ -165,7 +193,11 @@ class TelegramQuickReplyHandlers:
                 or response.publication_format_version < QUICK_RESPONSE_PUBLICATION_FORMAT_VERSION
             )
         ):
-            if not await self._edit_bot_message(published_message_id, rendered_text):
+            if not await self._edit_bot_message(
+                published_message_id,
+                rendered_text,
+                reply_markup=quick_response_delete_keyboard(response.id),
+            ):
                 published_message_id = None
         elif published_message_id == response.source_message_id:
             published_message_id = None
@@ -177,6 +209,7 @@ class TelegramQuickReplyHandlers:
                 message_thread_id=self.quick_replies_topic_id,
                 text=rendered_text,
                 parse_mode=None,
+                reply_markup=quick_response_delete_keyboard(response.id),
             )
             published_message_id = published.message_id
             await self.quick_reply_service.record_publication(
@@ -321,7 +354,10 @@ class TelegramQuickReplyHandlers:
             source_message_id=message.message_id,
         )
         self._cancel_expiration(response.id)
-        await self._publish_valid_response(response, refresh_existing=True)
+        async with self._quick_response_record_locks.hold(response.id):
+            current = await self.quick_reply_service.get(response.id)
+            if current is not None and current.state == QUICK_RESPONSE_VALID:
+                await self._publish_valid_response(current, refresh_existing=True)
 
     async def _reject_response(
         self,
@@ -384,11 +420,69 @@ class TelegramQuickReplyHandlers:
                 source_message_id=message.message_id,
             )
             tags = self._hashtags(message)
-            if len(tags) <= QUICK_RESPONSE_MAX_TAGS:
-                await self._accept_response(message, tags)
-            else:
-                await self._reject_response(message, tags, previous)
+            try:
+                if len(tags) <= QUICK_RESPONSE_MAX_TAGS:
+                    await self._accept_response(message, tags)
+                else:
+                    await self._reject_response(message, tags, previous)
+            except QuickResponseDeletedError:
+                logger.info(
+                    "Ignored replay of deleted quick response source",
+                    extra={
+                        "event": "deleted_quick_response_source_replayed",
+                        "message_id": message.message_id,
+                    },
+                )
         return True
+
+    async def handle_quick_response_delete_callback(self, callback: CallbackQuery) -> None:
+        actor = callback.from_user
+        if not self.authorization.is_admin(actor.id):
+            await callback.answer("Недостаточно прав.", show_alert=True)
+            return
+        try:
+            prefix, response_id_raw = (callback.data or "").split(":", maxsplit=1)
+            response_id = int(response_id_raw)
+            if prefix != QUICK_RESPONSE_DELETE_CALLBACK_PREFIX or response_id <= 0:
+                raise ValueError
+        except ValueError:
+            await callback.answer("Некорректный быстрый ответ.", show_alert=False)
+            return
+
+        message = callback.message
+        if (
+            not isinstance(message, Message)
+            or message.chat.id != self.settings.support_group_id
+            or message.message_thread_id != self.quick_replies_topic_id
+            or self.quick_reply_service is None
+        ):
+            await callback.answer("Быстрый ответ не найден.", show_alert=False)
+            return
+
+        async with self._quick_response_record_locks.hold(response_id):
+            deleted = await self.quick_reply_service.soft_delete_valid(
+                response_id,
+                published_message_id=message.message_id,
+                operator_telegram_id=actor.id,
+            )
+            if deleted is None:
+                await callback.answer("Быстрый ответ не найден.", show_alert=False)
+                return
+            await callback.answer("Быстрый ответ удалён.", show_alert=False)
+            if await self._delete_message(message.message_id):
+                await self.quick_reply_service.clear_deleted_publication(
+                    response_id,
+                    published_message_id=message.message_id,
+                )
+            logger.info(
+                "Deleted quick response",
+                extra={
+                    "event": "quick_response_deleted",
+                    "response_id": response_id,
+                    "message_id": message.message_id,
+                    "operator_telegram_id": actor.id,
+                },
+            )
 
     async def _pin_instruction(self, message_id: int) -> None:
         try:
@@ -430,18 +524,45 @@ class TelegramQuickReplyHandlers:
         await self._pin_instruction(message.message_id)
         return message.message_id
 
-    async def _restore_valid_responses(self, *, all_responses: bool) -> None:
+    async def _restore_valid_responses(
+        self,
+        *,
+        all_responses: bool,
+        verify_existing: bool = False,
+    ) -> None:
         assert self.quick_reply_service is not None
         assert self.quick_replies_topic_id is not None
-        for response in await self.quick_reply_service.list_valid():
-            if (
-                not all_responses
-                and response.published_message_id is not None
-                and response.publication_format_version >= QUICK_RESPONSE_PUBLICATION_FORMAT_VERSION
-                and response.warning_message_id is None
-            ):
+        for candidate in await self.quick_reply_service.list_valid():
+            async with self._quick_response_record_locks.hold(candidate.id):
+                response = await self.quick_reply_service.get(candidate.id)
+                if response is None or response.state != QUICK_RESPONSE_VALID:
+                    continue
+                if (
+                    not all_responses
+                    and not verify_existing
+                    and response.published_message_id is not None
+                    and response.publication_format_version
+                    >= QUICK_RESPONSE_PUBLICATION_FORMAT_VERSION
+                    and response.warning_message_id is None
+                ):
+                    continue
+                await self._publish_valid_response(
+                    response,
+                    force_new=all_responses,
+                    refresh_existing=verify_existing,
+                )
+
+    async def _cleanup_deleted_publications(self, *, topic_replaced: bool = False) -> None:
+        assert self.quick_reply_service is not None
+        for response in await self.quick_reply_service.list_deleted_with_publication():
+            message_id = response.published_message_id
+            if message_id is None:
                 continue
-            await self._publish_valid_response(response, force_new=all_responses)
+            if topic_replaced or await self._delete_message(message_id):
+                await self.quick_reply_service.clear_deleted_publication(
+                    response.id,
+                    published_message_id=message_id,
+                )
 
     async def _cleanup_legacy_messages(self, instruction_message_id: int) -> None:
         assert self.quick_reply_service is not None
@@ -473,8 +594,10 @@ class TelegramQuickReplyHandlers:
         assert self.quick_reply_service is not None
         await self.quick_reply_service.discard_all_pending()
         instruction_message_id = await self._send_instruction()
+        await self._cleanup_deleted_publications(topic_replaced=True)
         await self._restore_valid_responses(all_responses=True)
         await self._cleanup_legacy_messages(instruction_message_id)
+        self._quick_response_catalog_verified = True
         logger.warning(
             "Recreated quick response topic and restored saved responses",
             extra={
@@ -534,7 +657,12 @@ class TelegramQuickReplyHandlers:
                 await self._pin_instruction(instruction_id)
 
             await self._cleanup_legacy_messages(instruction_id)
-            await self._restore_valid_responses(all_responses=topic_was_replaced)
+            await self._cleanup_deleted_publications(topic_replaced=topic_was_replaced)
+            await self._restore_valid_responses(
+                all_responses=topic_was_replaced,
+                verify_existing=not self._quick_response_catalog_verified,
+            )
+            self._quick_response_catalog_verified = True
 
     async def restore_pending_quick_response_expirations(self) -> None:
         if self.quick_reply_service is None:

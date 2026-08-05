@@ -16,7 +16,12 @@ QUICK_RESPONSE_TEXT_MAX_LENGTH = 4096 - len(QUICK_RESPONSE_RENDER_SUFFIX)
 QUICK_RESPONSE_MAX_TAGS = 4
 QUICK_RESPONSE_VALID = "valid"
 QUICK_RESPONSE_PENDING_DELETION = "pending_deletion"
-QUICK_RESPONSE_PUBLICATION_FORMAT_VERSION = 1
+QUICK_RESPONSE_DELETED = "deleted"
+QUICK_RESPONSE_PUBLICATION_FORMAT_VERSION = 2
+
+
+class QuickResponseDeletedError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -34,6 +39,8 @@ class QuickResponseView:
     state: str
     invalid_until: datetime | None
     warning_message_id: int | None
+    deleted_by_telegram_id: int | None
+    deleted_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
@@ -69,6 +76,8 @@ def _view(response: QuickResponse) -> QuickResponseView:
         state=response.state,
         invalid_until=_as_utc(response.invalid_until),
         warning_message_id=response.warning_message_id,
+        deleted_by_telegram_id=response.deleted_by_telegram_id,
+        deleted_at=_as_utc(response.deleted_at),
         created_at=response.created_at,
         updated_at=response.updated_at,
     )
@@ -91,6 +100,11 @@ class QuickReplyService:
                     QuickResponse.source_message_id == source_message_id,
                 )
             )
+        return _view(response) if response is not None else None
+
+    async def get(self, response_id: int) -> QuickResponseView | None:
+        async with self.database.session() as session:
+            response = await session.get(QuickResponse, response_id)
         return _view(response) if response is not None else None
 
     @retry_sqlite_locks
@@ -184,6 +198,8 @@ class QuickReplyService:
                     )
                     session.add(response)
                 else:
+                    if response.state == QUICK_RESPONSE_DELETED:
+                        raise QuickResponseDeletedError("quick response was deleted")
                     response.text = text
                     response.tags = list(tags)
                     response.created_by_telegram_id = operator_telegram_id
@@ -251,6 +267,63 @@ class QuickReplyService:
                 ).all()
             )
         return [_view(response) for response in responses]
+
+    async def list_deleted_with_publication(self) -> list[QuickResponseView]:
+        async with self.database.session() as session:
+            responses = list(
+                (
+                    await session.scalars(
+                        select(QuickResponse)
+                        .where(
+                            QuickResponse.state == QUICK_RESPONSE_DELETED,
+                            QuickResponse.published_message_id.is_not(None),
+                        )
+                        .order_by(QuickResponse.id)
+                    )
+                ).all()
+            )
+        return [_view(response) for response in responses]
+
+    @retry_sqlite_locks
+    async def soft_delete_valid(
+        self,
+        response_id: int,
+        *,
+        published_message_id: int,
+        operator_telegram_id: int,
+    ) -> QuickResponseView | None:
+        async with self.database.session() as session:
+            response = await session.get(QuickResponse, response_id)
+            if response is None or response.published_message_id != published_message_id:
+                return None
+            if response.state == QUICK_RESPONSE_DELETED:
+                return _view(response)
+            if response.state != QUICK_RESPONSE_VALID:
+                return None
+            response.state = QUICK_RESPONSE_DELETED
+            response.deleted_by_telegram_id = operator_telegram_id
+            response.deleted_at = datetime.now(UTC)
+            await session.commit()
+            return _view(response)
+
+    @retry_sqlite_locks
+    async def clear_deleted_publication(
+        self,
+        response_id: int,
+        *,
+        published_message_id: int,
+    ) -> bool:
+        async with self.database.session() as session:
+            response = await session.get(QuickResponse, response_id)
+            if (
+                response is None
+                or response.state != QUICK_RESPONSE_DELETED
+                or response.published_message_id != published_message_id
+            ):
+                return False
+            response.published_message_id = None
+            await session.commit()
+            return True
 
     @retry_sqlite_locks
     async def delete_if_still_pending(

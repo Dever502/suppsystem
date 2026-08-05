@@ -264,13 +264,19 @@ DEPLOY_DIR=/opt/suppsystem sh scripts/production-compose.sh logs -f --tail=200 s
 DEPLOY_DIR=/opt/suppsystem sh scripts/production-compose.sh restart suppsystem
 ```
 
-GitHub Actions параллельно выполняет статические проверки, тесты с coverage и PostgreSQL matrix;
-непостгресовые тесты распределяются между четырьмя изолированными pytest workers. Зависимости,
-слои BuildKit и vulnerability DB Trivy кэшируются, а устаревшие прогоны одной ветки отменяются.
-Trivy и Syft параллельно анализируют один immutable image archive. Push в `main` или release tag
-публикует GHCR image только после всех проверок, формирует полный Trivy report, проверяет отсутствие
-HIGH/CRITICAL уязвимостей, создаёт CycloneDX SBOM, checksums и release evidence. Workflow не имеет
-доступа к production host; deploy остаётся ручной операцией.
+GitHub Actions параллельно выполняет статические проверки, два изолированных шарда непостгресовых
+тестов и PostgreSQL matrix. Каждый тестовый шард использует четыре pytest worker, затем отдельный
+gate объединяет coverage обоих шардов и один раз проверяет общий порог. Обычные PostgreSQL-тесты
+также распараллелены по изолированным БД, а меняющие роли кластера тесты намеренно остаются
+последовательными. Зависимости, слои BuildKit и vulnerability DB Trivy кэшируются, а устаревшие
+прогоны одной ветки отменяются.
+
+На push кандидатный image собирается параллельно с тестами без прав записи в registry. Smoke test,
+Trivy и Syft параллельно проверяют один immutable image archive; runtime stage не содержит build-
+инструменты и исходное дерево проекта. Только после успешных quality, coverage, PostgreSQL и security
+gates отдельный job сверяет SHA-256 архива, manifest и revision label, загружает этот же image в GHCR,
+создаёт CycloneDX SBOM, checksums, attestation и release evidence. Workflow не имеет доступа к
+production host; deploy остаётся ручной операцией.
 
 ## Health и логи
 

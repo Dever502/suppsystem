@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Literal
 
@@ -16,7 +16,6 @@ from suppsystem import web_api_routes
 from suppsystem.api import create_app
 from suppsystem.config import Settings
 from suppsystem.database import Database
-from suppsystem.migrations import upgrade_database
 from suppsystem.models import (
     DeliveryOutbox,
     Direction,
@@ -39,13 +38,13 @@ VALID_PNG = base64.b64decode(
 
 async def _context(
     tmp_path: Path,
+    migrated_sqlite_database_url: Callable[[Path], str],
     *,
     user_messages_per_minute: int = 30,
     user_messages_per_hour: int = 200,
     web_identity_mode: Literal["external_id", "email"] = "external_id",
 ) -> tuple[httpx.AsyncClient, Database, TicketService]:
-    database_url = f"sqlite+aiosqlite:///{tmp_path}/web-api.db"
-    await upgrade_database(database_url)
+    database_url = migrated_sqlite_database_url(tmp_path / "web-api.db")
     database = Database(database_url)
     service = TicketService(database)
     settings = Settings(
@@ -67,9 +66,10 @@ async def _context(
 
 async def test_web_message_flow_is_channel_aware_and_idempotent(
     tmp_path: Path,
+    migrated_sqlite_database_url: Callable[[Path], str],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    client, database, service = await _context(tmp_path)
+    client, database, service = await _context(tmp_path, migrated_sqlite_database_url)
     try:
         caplog.set_level(logging.INFO, logger="suppsystem.web_support_service")
         headers = {"X-API-Token": WEB_TOKEN, "X-Idempotency-Key": "web-message-0001"}
@@ -149,9 +149,11 @@ async def test_web_message_flow_is_channel_aware_and_idempotent(
 
 async def test_web_message_replay_is_original_snapshot_and_does_not_consume_quota(
     tmp_path: Path,
+    migrated_sqlite_database_url: Callable[[Path], str],
 ) -> None:
     client, database, _service = await _context(
         tmp_path,
+        migrated_sqlite_database_url,
         user_messages_per_minute=2,
         user_messages_per_hour=2,
     )
@@ -202,8 +204,11 @@ async def test_web_message_replay_is_original_snapshot_and_does_not_consume_quot
         await database.dispose()
 
 
-async def test_web_polling_never_exposes_internal_operator_notes(tmp_path: Path) -> None:
-    client, database, service = await _context(tmp_path)
+async def test_web_polling_never_exposes_internal_operator_notes(
+    tmp_path: Path,
+    migrated_sqlite_database_url: Callable[[Path], str],
+) -> None:
+    client, database, service = await _context(tmp_path, migrated_sqlite_database_url)
     try:
         created = await client.post(
             "/api/v1/web/messages",
@@ -249,9 +254,12 @@ async def test_web_polling_never_exposes_internal_operator_notes(tmp_path: Path)
 @pytest.mark.parametrize("identity_mode", ["external_id", "email"])
 async def test_web_api_boundary_identity_and_idempotency_values_fit_storage(
     tmp_path: Path,
+    migrated_sqlite_database_url: Callable[[Path], str],
     identity_mode: Literal["external_id", "email"],
 ) -> None:
-    client, database, _service = await _context(tmp_path, web_identity_mode=identity_mode)
+    client, database, _service = await _context(
+        tmp_path, migrated_sqlite_database_url, web_identity_mode=identity_mode
+    )
     long_email = "a" * (320 - len("@example.com")) + "@example.com"
     identity = "x" * 255 if identity_mode == "external_id" else long_email
     payload = {
@@ -308,6 +316,7 @@ async def test_web_api_boundary_identity_and_idempotency_values_fit_storage(
 )
 async def test_web_message_rate_limit_is_per_canonical_identity(
     tmp_path: Path,
+    migrated_sqlite_database_url: Callable[[Path], str],
     identity_mode: Literal["external_id", "email"],
     first_identity: dict[str, str],
     same_identity: dict[str, str],
@@ -315,6 +324,7 @@ async def test_web_message_rate_limit_is_per_canonical_identity(
 ) -> None:
     client, database, _service = await _context(
         tmp_path,
+        migrated_sqlite_database_url,
         user_messages_per_minute=1,
         user_messages_per_hour=2,
         web_identity_mode=identity_mode,
@@ -357,8 +367,9 @@ async def test_web_message_rate_limit_is_per_canonical_identity(
 
 async def test_web_block_is_silent_idempotent_and_suppresses_delivery(
     tmp_path: Path,
+    migrated_sqlite_database_url: Callable[[Path], str],
 ) -> None:
-    client, database, service = await _context(tmp_path)
+    client, database, service = await _context(tmp_path, migrated_sqlite_database_url)
     try:
         payload = {
             "external_user_id": "blocked-web-user",
@@ -514,8 +525,11 @@ async def test_web_block_is_silent_idempotent_and_suppresses_delivery(
         await database.dispose()
 
 
-async def test_block_suppresses_close_notification_and_rating(tmp_path: Path) -> None:
-    client, database, service = await _context(tmp_path)
+async def test_block_suppresses_close_notification_and_rating(
+    tmp_path: Path,
+    migrated_sqlite_database_url: Callable[[Path], str],
+) -> None:
+    client, database, service = await _context(tmp_path, migrated_sqlite_database_url)
     try:
         created = await client.post(
             "/api/v1/web/messages",
@@ -574,8 +588,11 @@ async def test_block_suppresses_close_notification_and_rating(tmp_path: Path) ->
         await database.dispose()
 
 
-async def test_web_close_rating_and_reopen_cycles(tmp_path: Path) -> None:
-    client, database, service = await _context(tmp_path)
+async def test_web_close_rating_and_reopen_cycles(
+    tmp_path: Path,
+    migrated_sqlite_database_url: Callable[[Path], str],
+) -> None:
+    client, database, service = await _context(tmp_path, migrated_sqlite_database_url)
     try:
         created = await client.post(
             "/api/v1/web/messages",
@@ -654,8 +671,11 @@ async def test_web_close_rating_and_reopen_cycles(tmp_path: Path) -> None:
         await database.dispose()
 
 
-async def test_web_token_cannot_access_operator_api(tmp_path: Path) -> None:
-    client, database, _service = await _context(tmp_path)
+async def test_web_token_cannot_access_operator_api(
+    tmp_path: Path,
+    migrated_sqlite_database_url: Callable[[Path], str],
+) -> None:
+    client, database, _service = await _context(tmp_path, migrated_sqlite_database_url)
     try:
         operator = await client.get("/api/v1/tickets", headers={"X-API-Token": WEB_TOKEN})
         operator_health = await client.get("/health", headers={"X-API-Token": OPERATOR_TOKEN})
@@ -687,9 +707,11 @@ async def test_web_token_cannot_access_operator_api(tmp_path: Path) -> None:
         await database.dispose()
 
 
-async def test_web_only_openapi_hides_disabled_operator_contract(tmp_path: Path) -> None:
-    database_url = f"sqlite+aiosqlite:///{tmp_path}/web-only.db"
-    await upgrade_database(database_url)
+async def test_web_only_openapi_hides_disabled_operator_contract(
+    tmp_path: Path,
+    migrated_sqlite_database_url: Callable[[Path], str],
+) -> None:
+    database_url = migrated_sqlite_database_url(tmp_path / "web-only.db")
     database = Database(database_url)
     service = TicketService(database)
     settings = Settings(
@@ -712,8 +734,11 @@ async def test_web_only_openapi_hides_disabled_operator_contract(tmp_path: Path)
         await database.dispose()
 
 
-async def test_concurrent_web_idempotency_has_one_durable_result(tmp_path: Path) -> None:
-    client, database, _service = await _context(tmp_path)
+async def test_concurrent_web_idempotency_has_one_durable_result(
+    tmp_path: Path,
+    migrated_sqlite_database_url: Callable[[Path], str],
+) -> None:
+    client, database, _service = await _context(tmp_path, migrated_sqlite_database_url)
     try:
         headers = {"X-API-Token": WEB_TOKEN, "X-Idempotency-Key": "web-concurrent-key"}
         payload = {
@@ -750,8 +775,11 @@ async def test_concurrent_web_idempotency_has_one_durable_result(tmp_path: Path)
         await database.dispose()
 
 
-async def test_web_photo_is_validated_persisted_and_downloadable(tmp_path: Path) -> None:
-    client, database, _service = await _context(tmp_path)
+async def test_web_photo_is_validated_persisted_and_downloadable(
+    tmp_path: Path,
+    migrated_sqlite_database_url: Callable[[Path], str],
+) -> None:
+    client, database, _service = await _context(tmp_path, migrated_sqlite_database_url)
     try:
         created = await client.post(
             "/api/v1/web/messages",
@@ -825,9 +853,10 @@ async def test_web_photo_is_validated_persisted_and_downloadable(tmp_path: Path)
 
 async def test_transient_media_link_check_keeps_committed_file(
     tmp_path: Path,
+    migrated_sqlite_database_url: Callable[[Path], str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, database, service = await _context(tmp_path)
+    client, database, service = await _context(tmp_path, migrated_sqlite_database_url)
     original_get_media = service.get_media
 
     async def unavailable_get_media(media_id: str) -> object:
@@ -856,9 +885,11 @@ async def test_transient_media_link_check_keeps_committed_file(
 
 
 async def test_web_request_size_is_limited_without_content_length(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    migrated_sqlite_database_url: Callable[[Path], str],
 ) -> None:
-    client, database, _service = await _context(tmp_path)
+    client, database, _service = await _context(tmp_path, migrated_sqlite_database_url)
     monkeypatch.setattr(web_api_routes, "MAX_WEB_MESSAGE_REQUEST_BYTES", 128)
 
     async def oversized_body() -> AsyncIterator[bytes]:
@@ -883,9 +914,12 @@ async def test_web_request_size_is_limited_without_content_length(
 
 
 @pytest.mark.parametrize("mode", ["external_id", "email"])
-async def test_web_identity_mode_is_persisted(tmp_path: Path, mode: str) -> None:
-    database_url = f"sqlite+aiosqlite:///{tmp_path}/{mode}.db"
-    await upgrade_database(database_url)
+async def test_web_identity_mode_is_persisted(
+    tmp_path: Path,
+    mode: str,
+    migrated_sqlite_database_url: Callable[[Path], str],
+) -> None:
+    database_url = migrated_sqlite_database_url(tmp_path / f"{mode}.db")
     database = Database(database_url)
     service = TicketService(database)
     try:
@@ -916,9 +950,11 @@ async def test_web_identity_mode_is_persisted(tmp_path: Path, mode: str) -> None
 
 
 async def test_successful_web_polling_is_not_written_to_audit_log(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    migrated_sqlite_database_url: Callable[[Path], str],
 ) -> None:
-    client, database, _service = await _context(tmp_path)
+    client, database, _service = await _context(tmp_path, migrated_sqlite_database_url)
     try:
         created = await client.post(
             "/api/v1/web/messages",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +15,6 @@ from pydantic import SecretStr
 from suppsystem.authorization import AuthorizationService
 from suppsystem.config import Settings
 from suppsystem.database import Database
-from suppsystem.migrations import upgrade_database
 from suppsystem.models import Direction, Ticket, TicketChannel, TicketMessage, TicketStatus, User
 from suppsystem.statistics import StatisticsService, period_start
 from suppsystem.telegram_limits import TelegramRateLimiter
@@ -27,16 +27,18 @@ from suppsystem.telegram_statistics import (
 from suppsystem.web_models import TicketLifecycleEvent
 
 
-async def _database(tmp_path: Path) -> Database:
-    url = f"sqlite+aiosqlite:///{tmp_path}/statistics.db"
-    await upgrade_database(url)
-    return Database(url)
+def _database(
+    tmp_path: Path,
+    migrated_sqlite_database_url: Callable[[Path], str],
+) -> Database:
+    return Database(migrated_sqlite_database_url(tmp_path / "statistics.db"))
 
 
 async def test_statistics_are_channel_aware_and_exclude_ratings_from_inbound(
     tmp_path: Path,
+    migrated_sqlite_database_url: Callable[[Path], str],
 ) -> None:
-    database = await _database(tmp_path)
+    database = _database(tmp_path, migrated_sqlite_database_url)
     now = datetime.now(UTC)
     try:
         async with database.session() as session:
@@ -172,8 +174,11 @@ class DashboardHarness(TelegramStatisticsDashboard):
     pass
 
 
-async def test_dashboard_persists_one_message_and_reuses_it(tmp_path: Path) -> None:
-    database = await _database(tmp_path)
+async def test_dashboard_persists_one_message_and_reuses_it(
+    tmp_path: Path,
+    migrated_sqlite_database_url: Callable[[Path], str],
+) -> None:
+    database = _database(tmp_path, migrated_sqlite_database_url)
     bot = SimpleNamespace(
         send_message=AsyncMock(return_value=SimpleNamespace(message_id=501)),
         edit_message_text=AsyncMock(),

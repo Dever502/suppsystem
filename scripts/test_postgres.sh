@@ -82,9 +82,13 @@ fi
 export ALLOW_POSTGRES_TEST_DATABASE_CREATION=yes
 unset DATABASE_URL
 
-uv run --frozen pytest -m postgres \
+workers=${POSTGRES_PYTEST_WORKERS:-4}
+
+uv run --frozen pytest -n "$workers" --dist load -m postgres \
     tests/test_postgres_migrations.py \
     tests/test_postgres_contracts.py \
     tests/test_retention.py \
-    tests/test_postgres_roles.py \
     "$@"
+
+# Role provisioning changes cluster-wide principals and must remain serial.
+uv run --frozen pytest -m postgres tests/test_postgres_roles.py "$@"

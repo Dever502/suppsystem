@@ -157,6 +157,34 @@ async def test_valid_quick_response_is_saved_unchanged(
         await database.dispose()
 
 
+async def test_numeric_hashtags_are_valid_without_telegram_entities(
+    tmp_path: Path,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path}/numeric-hashtags.db")
+    await database.create_schema_for_tests()
+    harness = QuickReplyHarness()
+    try:
+        service = QuickReplyService(database)
+        bot = _bot()
+        harness = _harness(service, bot)
+        message = _message(text="Ответ #1 #2 #3 #4 #Билайн")
+        message.entities = []
+
+        assert await harness.handle_quick_reply_topic_message(message) is True
+
+        saved = await service.get_by_source(
+            source_chat_id=-100123,
+            source_message_id=301,
+        )
+        assert saved is not None
+        assert saved.state == QUICK_RESPONSE_VALID
+        assert saved.tags == ("#1", "#2", "#3", "#4", "#Билайн")
+        message.reply.assert_not_awaited()
+    finally:
+        await harness.shutdown_quick_reply_runtime()
+        await database.dispose()
+
+
 async def test_existing_separate_save_reply_is_replaced_by_one_canonical_message(
     tmp_path: Path,
 ) -> None:

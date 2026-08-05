@@ -111,16 +111,6 @@ class TelegramQuickReplyHandlers:
         self._quick_response_topic_lock = asyncio.Lock()
         self._quick_response_catalog_verified = False
 
-    @staticmethod
-    def _hashtags(message: Message) -> list[str]:
-        text = message.text or ""
-        tags: list[str] = []
-        for entity in message.entities or []:
-            entity_type = getattr(entity.type, "value", entity.type)
-            if entity_type == "hashtag":
-                tags.append(entity.extract_from(text))
-        return tags
-
     async def _delete_message(self, message_id: int) -> bool:
         try:
             await self.limiter.wait()
@@ -438,13 +428,12 @@ class TelegramQuickReplyHandlers:
                 source_chat_id=message.chat.id,
                 source_message_id=message.message_id,
             )
-            tags = self._hashtags(message)
-            hashtags_valid = _raw_hashtags(message.text) == tags
+            tags = _raw_hashtags(message.text)
             try:
-                if hashtags_valid and len(tags) <= QUICK_RESPONSE_MAX_TAGS:
+                if tags is not None and len(tags) <= QUICK_RESPONSE_MAX_TAGS:
                     await self._accept_response(message, tags)
                 else:
-                    await self._reject_response(message, tags, previous)
+                    await self._reject_response(message, tags or [], previous)
             except QuickResponseDeletedError:
                 logger.info(
                     "Ignored replay of deleted quick response source",

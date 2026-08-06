@@ -8,25 +8,25 @@ from sqlalchemy import make_url, text
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from suppsystem.database import Database
-from suppsystem.migrations import upgrade_database
-from suppsystem.postgres_provision import (
+from resolvate.database import Database
+from resolvate.migrations import upgrade_database
+from resolvate.postgres_provision import (
     PostgresProvisioningSettings,
     provision_postgres_roles,
 )
-from suppsystem.services import TicketService
+from resolvate.services import TicketService
 
 
 def provisioning_settings(**overrides: object) -> PostgresProvisioningSettings:
     values: dict[str, object] = {
         "host": "postgres",
         "port": 5432,
-        "database": "suppsystem",
+        "database": "resolvate",
         "admin_user": "postgres",
         "admin_password": "admin-password-123",
-        "migration_role": "suppsystem_migrator",
+        "migration_role": "resolvate_migrator",
         "migration_password": "migration-password-123",
-        "runtime_role": "suppsystem_runtime",
+        "runtime_role": "resolvate_runtime",
         "runtime_password": "runtime-password-123",
     }
     values.update(overrides)

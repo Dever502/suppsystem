@@ -10,13 +10,13 @@ from aiogram.methods import CopyMessage, EditForumTopic
 from pydantic import SecretStr
 from sqlalchemy import select
 
-from suppsystem.config import Settings
-from suppsystem.database import Database
-from suppsystem.delivery import DeliveryWorker
-from suppsystem.models import DeliveryOutbox, DeliveryStatus, Direction, TicketStatus
-from suppsystem.services import TicketService
-from suppsystem.telegram_adapter import TelegramSupportAdapter, TicketLockPool
-from suppsystem.telegram_formatting import topic_name
+from resolvate.config import Settings
+from resolvate.database import Database
+from resolvate.delivery import DeliveryWorker
+from resolvate.models import DeliveryOutbox, DeliveryStatus, Direction, TicketStatus
+from resolvate.services import TicketService
+from resolvate.telegram_adapter import TelegramSupportAdapter, TicketLockPool
+from resolvate.telegram_formatting import topic_name
 
 
 class FakeLimiter:
@@ -126,7 +126,7 @@ async def test_topic_not_modified_completes_reconciliation_without_error(
             settings=recovery_settings(tmp_path),
         )
 
-        with caplog.at_level(logging.INFO, logger="suppsystem.telegram_topic_manager"):
+        with caplog.at_level(logging.INFO, logger="resolvate.telegram_topic_manager"):
             assert await adapter.reconcile_ticket_topic(ticket.id) is True
 
         events = [getattr(record, "event", None) for record in caplog.records]
@@ -171,7 +171,7 @@ async def test_restart_recovers_unclaimed_waiting_delivery_after_partial_success
         )
 
         assert await restarted_service.list_waiting_topic_recovery_ticket_ids() == [ticket.id]
-        with caplog.at_level(logging.INFO, logger="suppsystem.telegram_topic_manager"):
+        with caplog.at_level(logging.INFO, logger="resolvate.telegram_topic_manager"):
             assert await adapter.recover_waiting_topics_after_restart() == 1
         assert await adapter.recover_waiting_topics_after_restart() == 0
 

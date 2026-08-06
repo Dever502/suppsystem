@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from postgres_support import disposable_postgres_database
 
-from suppsystem.migrations import upgrade_database
+from resolvate.migrations import upgrade_database
 
 SQLiteDatabaseURLFactory = Callable[[Path], str]
 

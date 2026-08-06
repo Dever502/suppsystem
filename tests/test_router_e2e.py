@@ -12,9 +12,9 @@ from aiogram.methods import SendMessage, TelegramMethod
 from aiogram.types import Chat, Message, MessageEntity, Update, User
 from pydantic import SecretStr
 
-from suppsystem.config import Settings
-from suppsystem.telegram_adapter import WELCOME_TEXT, TelegramSupportAdapter
-from suppsystem.telegram_limits import TelegramRateLimiter
+from resolvate.config import Settings
+from resolvate.telegram_adapter import WELCOME_TEXT, TelegramSupportAdapter
+from resolvate.telegram_limits import TelegramRateLimiter
 
 
 class RecordingSession(BaseSession):

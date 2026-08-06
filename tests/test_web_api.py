@@ -12,11 +12,11 @@ import pytest
 from pydantic import SecretStr
 from sqlalchemy import func, select
 
-from suppsystem import web_api_routes
-from suppsystem.api import create_app
-from suppsystem.config import Settings
-from suppsystem.database import Database
-from suppsystem.models import (
+from resolvate import web_api_routes
+from resolvate.api import create_app
+from resolvate.config import Settings
+from resolvate.database import Database
+from resolvate.models import (
     DeliveryOutbox,
     Direction,
     OperatorAction,
@@ -26,8 +26,8 @@ from suppsystem.models import (
     TicketStatus,
     UserIdentity,
 )
-from suppsystem.services import TicketService
-from suppsystem.statistics import StatisticsService
+from resolvate.services import TicketService
+from resolvate.statistics import StatisticsService
 
 WEB_TOKEN = "web-token-with-at-least-thirty-two-characters"
 OPERATOR_TOKEN = "operator-token-with-at-least-thirty-two-chars"
@@ -71,7 +71,7 @@ async def test_web_message_flow_is_channel_aware_and_idempotent(
 ) -> None:
     client, database, service = await _context(tmp_path, migrated_sqlite_database_url)
     try:
-        caplog.set_level(logging.INFO, logger="suppsystem.web_support_service")
+        caplog.set_level(logging.INFO, logger="resolvate.web_support_service")
         headers = {"X-API-Token": WEB_TOKEN, "X-Idempotency-Key": "web-message-0001"}
         payload = {
             "external_user_id": "customer-42",
@@ -923,7 +923,7 @@ async def test_web_identity_mode_is_persisted(
     database = Database(database_url)
     service = TicketService(database)
     try:
-        from suppsystem.api_idempotency import api_idempotency_command
+        from resolvate.api_idempotency import api_idempotency_command
 
         await service.accept_message(
             identity_mode=mode,
@@ -970,7 +970,7 @@ async def test_successful_web_polling_is_not_written_to_audit_log(
         )
         ticket_id = created.json()["conversation_id"]
         caplog.clear()
-        caplog.set_level(logging.INFO, logger="suppsystem.audit")
+        caplog.set_level(logging.INFO, logger="resolvate.audit")
 
         conversation = await client.get(
             f"/api/v1/web/conversations/{ticket_id}",

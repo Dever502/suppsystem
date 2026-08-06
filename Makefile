@@ -7,7 +7,7 @@ lock:
 	uv lock
 
 run:
-	uv run --frozen suppsystem
+	uv run --frozen resolvate
 
 migrate:
 	uv run --frozen alembic upgrade head

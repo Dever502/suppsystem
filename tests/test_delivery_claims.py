@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from suppsystem.database import Database
-from suppsystem.models import DeliveryOutbox, DeliveryStatus, Direction, utcnow
-from suppsystem.services import DeliveryJob, TicketService
+from resolvate.database import Database
+from resolvate.models import DeliveryOutbox, DeliveryStatus, Direction, utcnow
+from resolvate.services import DeliveryJob, TicketService
 
 
 @pytest.fixture

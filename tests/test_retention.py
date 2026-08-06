@@ -6,10 +6,10 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
-from suppsystem.database import Database
-from suppsystem.durable_work import DurableWorkRepository
-from suppsystem.migrations import upgrade_database
-from suppsystem.models import (
+from resolvate.database import Database
+from resolvate.durable_work import DurableWorkRepository
+from resolvate.migrations import upgrade_database
+from resolvate.models import (
     DeliveryOutbox,
     DeliveryStatus,
     Direction,
@@ -21,7 +21,7 @@ from suppsystem.models import (
     WorkStatus,
     utcnow,
 )
-from suppsystem.services import TicketService
+from resolvate.services import TicketService
 
 
 @pytest.fixture

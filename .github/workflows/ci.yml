@@ -19,7 +19,7 @@ concurrency:
 env:
   PYTHON_VERSION: "3.12"
   UV_VERSION: "0.11.27"
-  IMAGE_NAME: ghcr.io/dever502/suppsystem
+  IMAGE_NAME: ghcr.io/dever502/resolvate
 
 jobs:
   quality:
@@ -148,18 +148,18 @@ jobs:
       postgres:
         image: postgres:16.14-alpine3.22@sha256:786dab398303b8ce7cb76b407bb21ef2e4dfbbbd4c6abcf3d29b3130467ffdbc
         env:
-          POSTGRES_DB: suppsystem_test
-          POSTGRES_USER: suppsystem_test
-          POSTGRES_PASSWORD: suppsystem-test-only-password
+          POSTGRES_DB: resolvate_test
+          POSTGRES_USER: resolvate_test
+          POSTGRES_PASSWORD: resolvate-test-only-password
         options: >-
-          --health-cmd "pg_isready -U suppsystem_test -d suppsystem_test"
+          --health-cmd "pg_isready -U resolvate_test -d resolvate_test"
           --health-interval 1s
           --health-timeout 5s
           --health-retries 60
         ports:
           - 5432:5432
     env:
-      TEST_POSTGRES_DATABASE_URL: postgresql+asyncpg://suppsystem_test:suppsystem-test-only-password@127.0.0.1:5432/suppsystem_test
+      TEST_POSTGRES_DATABASE_URL: postgresql+asyncpg://resolvate_test:resolvate-test-only-password@127.0.0.1:5432/resolvate_test
       ALLOW_POSTGRES_TEST_DATABASE_CREATION: "yes"
       POSTGRES_PYTEST_WORKERS: "4"
     steps:
@@ -218,20 +218,20 @@ jobs:
             VCS_REF=${{ github.sha }}
           context: .
           labels: |
-            org.opencontainers.image.source=https://github.com/Dever502/suppsystem
+            org.opencontainers.image.source=https://github.com/Dever502/resolvate
           load: true
           provenance: false
           push: false
           tags: ${{ steps.metadata.outputs.image_tag }}
-          cache-from: type=gha,scope=suppsystem-image
-          cache-to: type=gha,mode=max,scope=suppsystem-image
+          cache-from: type=gha,scope=resolvate-image
+          cache-to: type=gha,mode=max,scope=resolvate-image
       - name: Export candidate for socketless scanners
         env:
           IMAGE_TAG: ${{ steps.metadata.outputs.image_tag }}
         run: |
           set -euo pipefail
-          docker image save --output suppsystem-image.tar "$IMAGE_TAG"
-          chmod 0644 suppsystem-image.tar
+          docker image save --output resolvate-image.tar "$IMAGE_TAG"
+          chmod 0644 resolvate-image.tar
       - name: Prepare Trivy database cache key
         id: trivy_cache_key
         shell: bash
@@ -261,17 +261,17 @@ jobs:
           docker run --rm \
             --network none \
             --security-opt no-new-privileges \
-            --env MIGRATION_DATABASE_URL=sqlite+aiosqlite:////tmp/suppsystem-smoke.db \
+            --env MIGRATION_DATABASE_URL=sqlite+aiosqlite:////tmp/resolvate-smoke.db \
             --entrypoint sh \
             "$IMAGE_TAG" \
             -c 'set -eu
               cd /app
-              test "$(python -c "import suppsystem; print(suppsystem.__version__)")" = "3.5.0"
+              test "$(python -c "import resolvate; print(resolvate.__version__)")" = "3.5.0"
               test -f /app/alembic.ini
               test -f /app/migrations/env.py
               python -c "from hashlib import sha256; from pathlib import Path; assert sha256(Path(\"/app/LICENSE\").read_bytes()).hexdigest() == \"d81f7122bd70d76feebbd3634701488586b0bcc21b8bd90e1e1edf0acc4e8be7\""
-              python -m suppsystem.migrations
-              python -c "import sqlite3; from alembic.config import Config; from alembic.script import ScriptDirectory; current = sqlite3.connect(\"/tmp/suppsystem-smoke.db\").execute(\"SELECT version_num FROM alembic_version\").fetchone()[0]; assert [current] == ScriptDirectory.from_config(Config(\"/app/alembic.ini\")).get_heads()"' &
+              python -m resolvate.migrations
+              python -c "import sqlite3; from alembic.config import Config; from alembic.script import ScriptDirectory; current = sqlite3.connect(\"/tmp/resolvate-smoke.db\").execute(\"SELECT version_num FROM alembic_version\").fetchone()[0]; assert [current] == ScriptDirectory.from_config(Config(\"/app/alembic.ini\")).get_heads()"' &
           smoke_pid=$!
 
           docker run --rm \
@@ -282,7 +282,7 @@ jobs:
             --volume "$PWD/.trivy-cache:/cache" \
             --workdir /work \
             aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e \
-            --cache-dir /cache image --input suppsystem-image.tar --format json > trivy.json &
+            --cache-dir /cache image --input resolvate-image.tar --format json > trivy.json &
           trivy_pid=$!
 
           docker run --rm \
@@ -292,7 +292,7 @@ jobs:
             --volume "$PWD:/work:ro" \
             --workdir /work \
             anchore/syft:v1.44.0-debug@sha256:6dd8fb28e1b799e7cadaff6be2ec6d555757c4eeec0c0e48162f20b042ffa1ff \
-            "docker-archive:/work/suppsystem-image.tar" -o cyclonedx-json > sbom.cdx.json &
+            "docker-archive:/work/resolvate-image.tar" -o cyclonedx-json > sbom.cdx.json &
           syft_pid=$!
 
           wait "$smoke_pid" || smoke_status=$?
@@ -312,8 +312,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sha256sum suppsystem-image.tar trivy.json sbom.cdx.json > candidate-checksums.txt
-          image_sha256=$(awk '$2 == "suppsystem-image.tar" {print $1}' candidate-checksums.txt)
+          sha256sum resolvate-image.tar trivy.json sbom.cdx.json > candidate-checksums.txt
+          image_sha256=$(awk '$2 == "resolvate-image.tar" {print $1}' candidate-checksums.txt)
           manifest_sha256=$(sha256sum candidate-checksums.txt | awk '{print $1}')
           [[ "$image_sha256" =~ ^[0-9a-f]{64}$ ]]
           [[ "$manifest_sha256" =~ ^[0-9a-f]{64}$ ]]
@@ -327,7 +327,7 @@ jobs:
         with:
           name: verified-candidate-${{ github.sha }}
           path: |
-            suppsystem-image.tar
+            resolvate-image.tar
             candidate-checksums.txt
             trivy.json
             sbom.cdx.json
@@ -378,17 +378,17 @@ jobs:
           [[ "$EXPECTED_IMAGE_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [[ "$EXPECTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
           test "$(find candidate -mindepth 1 -maxdepth 1 | wc -l)" -eq 4
-          test -f candidate/suppsystem-image.tar
+          test -f candidate/resolvate-image.tar
           test -f candidate/candidate-checksums.txt
           test -f candidate/trivy.json
           test -f candidate/sbom.cdx.json
           cd candidate
           test "$(sha256sum candidate-checksums.txt | awk '{print $1}')" = \
             "$EXPECTED_MANIFEST_SHA256"
-          test "$(awk '$2 == "suppsystem-image.tar" {print $1}' candidate-checksums.txt)" = \
+          test "$(awk '$2 == "resolvate-image.tar" {print $1}' candidate-checksums.txt)" = \
             "$EXPECTED_IMAGE_SHA256"
           sha256sum --check --strict candidate-checksums.txt
-          docker load --input suppsystem-image.tar
+          docker load --input resolvate-image.tar
           revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE_TAG")
           test "$revision" = "$GITHUB_SHA"
       - name: Log in to GHCR

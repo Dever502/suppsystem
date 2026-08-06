@@ -1,0 +1,65 @@
+groups:
+  - name: resolvate
+    rules:
+      - alert: ResolvateFailedDeliveryJobs
+        expr: resolvate_failed_jobs{queue="delivery"} > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Resolvate has failed Telegram delivery jobs
+          description: "{{ $value }} delivery jobs are failed. Check Resolvate logs and the outbox runbook."
+
+      - alert: ResolvateFailedNotificationJobs
+        expr: resolvate_failed_jobs{queue="notification"} > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Resolvate has failed notification webhook jobs
+          description: "{{ $value }} notification jobs are failed. Check webhook receiver health and retry policy."
+
+      - alert: ResolvateOldDeliveryQueue
+        expr: resolvate_queue_oldest_age_seconds{queue="delivery"} > 300
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Resolvate delivery queue is old
+          description: "Oldest delivery job is older than 5 minutes. Check Telegram API errors and delivery worker progress."
+
+      - alert: ResolvateOldNotificationQueue
+        expr: resolvate_queue_oldest_age_seconds{queue="notification"} > 300
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Resolvate notification queue is old
+          description: "Oldest notification job is older than 5 minutes. Check receiver availability and Retry-After responses."
+
+      - alert: ResolvateWorkerHeartbeatStale
+        expr: resolvate_heartbeat_age_seconds > 60
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Resolvate worker heartbeat is stale
+          description: "{{ $labels.component }} heartbeat is stale. Check /ready, container health and worker logs."
+
+      - alert: ResolvatePanelUnknownOutcome
+        expr: resolvate_panel_unknown > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Remnawave action outcome requires manual reconciliation
+          description: "{{ $value }} Remnawave actions have unknown outcome. Do not repeat mutations before manual reconciliation."
+
+      - alert: ResolvateExternalRequestFailures
+        expr: increase(resolvate_events_total{outcome=~"failed|retry|unknown|unexpected_response|http_5xx|request_error"}[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Resolvate external integration failures detected
+          description: "External integration failures or retries increased in the last 15 minutes. Check component and outcome labels."

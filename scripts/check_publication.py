@@ -38,7 +38,7 @@ PRIVATE_INFRASTRUCTURE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("developer home path", re.compile(r"/(?:home|Users)/[A-Za-z0-9._-]+/")),
     (
         "legacy deployment path",
-        re.compile(r"/opt/" r"suppsystemtest(?:/|\b)"),
+        re.compile(r"/opt/" r"resolvatetest(?:/|\b)"),
     ),
 )
 

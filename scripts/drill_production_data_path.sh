@@ -17,10 +17,10 @@ usage() {
 }
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-deploy_dir=${DEPLOY_DIR:-/opt/suppsystem-drill}
-env_file=${SUPPSYSTEM_ENV_FILE:-${deploy_dir}/.env}
+deploy_dir=${DEPLOY_DIR:-/opt/resolvate-drill}
+env_file=${RESOLVATE_ENV_FILE:-${deploy_dir}/.env}
 state_file=${DEPLOYMENT_STATE_FILE:-${deploy_dir}/deployment.env}
-marker=${deploy_dir}/.suppsystem-drill-environment
+marker=${deploy_dir}/.resolvate-drill-environment
 baseline_image=$1
 candidate_image=$2
 report=$3
@@ -43,14 +43,14 @@ record() {
 
 compose() {
     DEPLOY_DIR=$deploy_dir \
-    SUPPSYSTEM_ENV_FILE=$env_file \
+    RESOLVATE_ENV_FILE=$env_file \
     DEPLOYMENT_STATE_FILE=$state_file \
         sh "$root/scripts/production-compose.sh" "$@"
 }
 
 deploy() {
     DEPLOY_DIR=$deploy_dir \
-    SUPPSYSTEM_ENV_FILE=$env_file \
+    RESOLVATE_ENV_FILE=$env_file \
     DEPLOYMENT_STATE_FILE=$state_file \
         sh "$root/scripts/deploy.sh" "$@"
 }
@@ -58,7 +58,7 @@ deploy() {
 data_operation() {
     PRODUCTION_DEPLOYMENT=yes \
     DEPLOY_DIR=$deploy_dir \
-    SUPPSYSTEM_ENV_FILE=$env_file \
+    RESOLVATE_ENV_FILE=$env_file \
     DEPLOYMENT_STATE_FILE=$state_file \
         "$@"
 }
@@ -81,10 +81,10 @@ else
 fi
 
 record "stop baseline and capture control data"
-compose stop suppsystem
+compose stop resolvate
 before=$(fingerprint)
 data_operation sh "$root/scripts/backup.sh" postgres "$backup"
-compose up --detach --wait suppsystem
+compose up --detach --wait resolvate
 
 record "deploy candidate and wait for container health"
 deploy deploy "$candidate_image"
@@ -96,10 +96,10 @@ record "inject restore failure after application stop"
 set +e
 CONFIRM_RESTORE=yes \
 CONFIRM_RESTORE_FAILURE_INJECTION=yes \
-SUPPSYSTEM_RESTORE_FAILURE_INJECTION=after_stop \
+RESOLVATE_RESTORE_FAILURE_INJECTION=after_stop \
 PRODUCTION_DEPLOYMENT=yes \
 DEPLOY_DIR=$deploy_dir \
-SUPPSYSTEM_ENV_FILE=$env_file \
+RESOLVATE_ENV_FILE=$env_file \
 DEPLOYMENT_STATE_FILE=$state_file \
     sh "$root/scripts/restore.sh" postgres "$backup" >> "$report" 2>&1
 failure_status=$?
@@ -108,9 +108,9 @@ set -e
     echo "Restore failure injection returned unexpected status $failure_status" >&2
     exit 1
 }
-running=$(compose ps --status running --services suppsystem)
+running=$(compose ps --status running --services resolvate)
 [ -z "$running" ] || {
-    echo "suppsystem unexpectedly restarted after failed restore" >&2
+    echo "Resolvate unexpectedly restarted after failed restore" >&2
     exit 1
 }
 
@@ -118,12 +118,12 @@ record "restore valid backup and wait for health"
 CONFIRM_RESTORE=yes \
 PRODUCTION_DEPLOYMENT=yes \
 DEPLOY_DIR=$deploy_dir \
-SUPPSYSTEM_ENV_FILE=$env_file \
+RESOLVATE_ENV_FILE=$env_file \
 DEPLOYMENT_STATE_FILE=$state_file \
     sh "$root/scripts/restore.sh" postgres "$backup"
 
 record "stop application and verify restored control data"
-compose stop suppsystem
+compose stop resolvate
 after=$(fingerprint)
 if [ "$before" != "$after" ]; then
     echo "Restored control fingerprint differs from backup fingerprint" >&2
@@ -131,6 +131,6 @@ if [ "$before" != "$after" ]; then
     echo "after=$after" >&2
     exit 1
 fi
-compose up --detach --wait suppsystem
+compose up --detach --wait resolvate
 
 record "production data path drill passed"

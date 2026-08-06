@@ -4,19 +4,19 @@ from copy import deepcopy
 
 import pytest
 
-from suppsystem.production import is_immutable_image_reference, validate_production_compose
+from resolvate.production import is_immutable_image_reference, validate_production_compose
 
 
 def production_config() -> dict[str, object]:
-    image = "registry.example/suppsystem@sha256:" + "a" * 64
+    image = "registry.example/resolvate@sha256:" + "a" * 64
     return {
         "services": {
-            "suppsystem": {
+            "resolvate": {
                 "image": image,
                 "environment": {
                     "DATABASE_URL": (
-                        "postgresql+asyncpg://suppsystem_runtime:runtime-password-123"
-                        "@postgres:5432/suppsystem"
+                        "postgresql+asyncpg://resolvate_runtime:runtime-password-123"
+                        "@postgres:5432/resolvate"
                     ),
                     "MIGRATION_DATABASE_URL": (""),
                     "MIGRATIONS_AT_STARTUP": "false",
@@ -29,15 +29,15 @@ def production_config() -> dict[str, object]:
             },
             "postgres": {
                 "environment": {
-                    "POSTGRES_DB": "suppsystem",
+                    "POSTGRES_DB": "resolvate",
                     "POSTGRES_USER": "postgres",
-                    "POSTGRES_MIGRATION_USER": "suppsystem_migrator",
-                    "POSTGRES_RUNTIME_USER": "suppsystem_runtime",
+                    "POSTGRES_MIGRATION_USER": "resolvate_migrator",
+                    "POSTGRES_RUNTIME_USER": "resolvate_runtime",
                 },
                 "volumes": [
                     {
                         "type": "volume",
-                        "source": "suppsystem_postgres_data",
+                        "source": "resolvate_postgres_data",
                         "target": "/var/lib/postgresql/data",
                     }
                 ],
@@ -45,18 +45,18 @@ def production_config() -> dict[str, object]:
             "postgres-provision": {
                 "image": image,
                 "environment": {
-                    "POSTGRES_DB": "suppsystem",
+                    "POSTGRES_DB": "resolvate",
                     "POSTGRES_ADMIN_USER": "postgres",
-                    "POSTGRES_MIGRATION_USER": "suppsystem_migrator",
-                    "POSTGRES_RUNTIME_USER": "suppsystem_runtime",
+                    "POSTGRES_MIGRATION_USER": "resolvate_migrator",
+                    "POSTGRES_RUNTIME_USER": "resolvate_runtime",
                 },
             },
             "postgres-migrate": {
                 "image": image,
                 "environment": {
                     "MIGRATION_DATABASE_URL": (
-                        "postgresql+asyncpg://suppsystem_migrator:migration-password-123"
-                        "@postgres:5432/suppsystem"
+                        "postgresql+asyncpg://resolvate_migrator:migration-password-123"
+                        "@postgres:5432/resolvate"
                     )
                 },
                 "depends_on": {
@@ -70,7 +70,7 @@ def production_config() -> dict[str, object]:
 @pytest.mark.parametrize(
     "image",
     [
-        "registry.example/suppsystem@sha256:" + "a" * 64,
+        "registry.example/resolvate@sha256:" + "a" * 64,
     ],
 )
 def test_immutable_image_references_are_accepted(image: str) -> None:
@@ -80,10 +80,10 @@ def test_immutable_image_references_are_accepted(image: str) -> None:
 @pytest.mark.parametrize(
     "image",
     [
-        "suppsystem:latest",
-        "suppsystem:3.5.0",
-        "registry.example/suppsystem:" + "b" * 40,
-        "suppsystem@sha256:not-a-digest",
+        "resolvate:latest",
+        "resolvate:3.5.0",
+        "registry.example/resolvate:" + "b" * 40,
+        "resolvate@sha256:not-a-digest",
     ],
 )
 def test_mutable_image_references_are_rejected(image: str) -> None:
@@ -102,42 +102,41 @@ def test_production_compose_accepts_safe_postgres_service_set() -> None:
             "missing required services",
         ),
         (
-            lambda config: config["services"]["suppsystem"].update({"image": "suppsystem:latest"}),
+            lambda config: config["services"]["resolvate"].update({"image": "resolvate:latest"}),
             "immutable",
         ),
         (
-            lambda config: config["services"]["suppsystem"].update({"build": "."}),
+            lambda config: config["services"]["resolvate"].update({"build": "."}),
             "published images",
         ),
         (
-            lambda config: config["services"]["suppsystem"]["environment"].update(
+            lambda config: config["services"]["resolvate"]["environment"].update(
                 {"DATABASE_URL": "sqlite+aiosqlite:////app/data/support.db"}
             ),
             r"postgresql\+asyncpg",
         ),
         (
-            lambda config: config["services"]["suppsystem"]["environment"].update(
+            lambda config: config["services"]["resolvate"]["environment"].update(
                 {
                     "DATABASE_URL": (
-                        "postgresql+asyncpg://postgres:runtime-password-123"
-                        "@postgres:5432/suppsystem"
+                        "postgresql+asyncpg://postgres:runtime-password-123@postgres:5432/resolvate"
                     )
                 }
             ),
             "unexpected PostgreSQL role",
         ),
         (
-            lambda config: config["services"]["suppsystem"]["depends_on"].pop("postgres-provision"),
+            lambda config: config["services"]["resolvate"]["depends_on"].pop("postgres-provision"),
             "postgres-provision",
         ),
         (
-            lambda config: config["services"]["suppsystem"]["environment"].update(
+            lambda config: config["services"]["resolvate"]["environment"].update(
                 {"POSTGRES_ADMIN_PASSWORD": "bootstrap-secret"}
             ),
             "bootstrap password",
         ),
         (
-            lambda config: config["services"]["suppsystem"]["environment"].update(
+            lambda config: config["services"]["resolvate"]["environment"].update(
                 {"MIGRATION_DATABASE_URL": "postgresql+asyncpg://migrator:secret@postgres/db"}
             ),
             "migration credential",

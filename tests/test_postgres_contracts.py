@@ -10,14 +10,14 @@ from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 from sqlalchemy import event, func, select
 
-from suppsystem.api import create_app
-from suppsystem.api_idempotency import api_idempotency_command
-from suppsystem.config import Settings
-from suppsystem.database import Database
-from suppsystem.durable_work import DurableWorkRepository
-from suppsystem.media_storage import StoredMedia
-from suppsystem.migrations import upgrade_database
-from suppsystem.models import (
+from resolvate.api import create_app
+from resolvate.api_idempotency import api_idempotency_command
+from resolvate.config import Settings
+from resolvate.database import Database
+from resolvate.durable_work import DurableWorkRepository
+from resolvate.media_storage import StoredMedia
+from resolvate.migrations import upgrade_database
+from resolvate.models import (
     DeliveryOutbox,
     DeliveryStatus,
     Direction,
@@ -30,9 +30,9 @@ from suppsystem.models import (
     WorkStatus,
     utcnow,
 )
-from suppsystem.service_types import DeliveryJob, TicketView, TopicProvisioningConflictError
-from suppsystem.services import TicketService
-from suppsystem.web_models import MediaAsset
+from resolvate.service_types import DeliveryJob, TicketView, TopicProvisioningConflictError
+from resolvate.services import TicketService
+from resolvate.web_models import MediaAsset
 
 pytestmark = pytest.mark.postgres
 

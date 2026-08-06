@@ -1493,7 +1493,7 @@ wheels = [
 ]
 
 [[package]]
-name = "suppsystem"
+name = "resolvate"
 version = "3.5.0"
 source = { editable = "." }
 dependencies = [

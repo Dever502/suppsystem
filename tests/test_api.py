@@ -12,11 +12,11 @@ from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 from sqlalchemy import func, select, text
 
-from suppsystem.api import API_TICKET_CLOSED_TEXT, client_key_from_request, create_app
-from suppsystem.config import Settings
-from suppsystem.database import Database
-from suppsystem.metrics import MetricsRegistry
-from suppsystem.models import (
+from resolvate.api import API_TICKET_CLOSED_TEXT, client_key_from_request, create_app
+from resolvate.config import Settings
+from resolvate.database import Database
+from resolvate.metrics import MetricsRegistry
+from resolvate.models import (
     DeliveryOutbox,
     Direction,
     OperatorAction,
@@ -25,9 +25,9 @@ from suppsystem.models import (
     TicketStatus,
     WorkStatus,
 )
-from suppsystem.runtime_defaults import API_AUTH_FAILURE_LIMIT
-from suppsystem.runtime_health import RuntimeHealth
-from suppsystem.services import TicketService, TicketView
+from resolvate.runtime_defaults import API_AUTH_FAILURE_LIMIT
+from resolvate.runtime_health import RuntimeHealth
+from resolvate.services import TicketService, TicketView
 
 API_TOKEN = "0123456789abcdef0123456789abcdef"
 WEB_RATE_TOKEN = "abcdef0123456789abcdef0123456789"
@@ -605,9 +605,9 @@ async def test_metrics_exposes_queue_and_runtime_metrics_without_pii(
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")
-    assert 'suppsystem_queue_depth{queue="delivery"} 1' in response.text
-    assert "suppsystem_queue_oldest_age_seconds" in response.text
-    assert "suppsystem_heartbeat_age_seconds" in response.text
+    assert 'resolvate_queue_depth{queue="delivery"} 1' in response.text
+    assert "resolvate_queue_oldest_age_seconds" in response.text
+    assert "resolvate_heartbeat_age_seconds" in response.text
     assert "must not appear" not in response.text
     assert str(ticket.telegram_user_id) not in response.text
 
@@ -625,10 +625,10 @@ async def test_metrics_use_retained_attempt_gauge_and_record_remnawave_failures(
 
     rendered = await metrics.render(database, health)
 
-    assert "# TYPE suppsystem_retained_job_attempts gauge" in rendered
-    assert "suppsystem_job_attempts_total" not in rendered
-    assert 'suppsystem_events_total{component="remnawave",outcome="http_5xx"} 1' in rendered
-    assert 'suppsystem_events_total{component="remnawave",outcome="request_error"} 1' in rendered
+    assert "# TYPE resolvate_retained_job_attempts gauge" in rendered
+    assert "resolvate_job_attempts_total" not in rendered
+    assert 'resolvate_events_total{component="remnawave",outcome="http_5xx"} 1' in rendered
+    assert 'resolvate_events_total{component="remnawave",outcome="request_error"} 1' in rendered
 
 
 async def test_ready_reports_runtime_components(
@@ -910,7 +910,7 @@ def test_api_trusted_proxy_walks_forwarded_chain_from_nearest_hop() -> None:
 
 def test_nginx_example_overwrites_untrusted_forwarded_chain() -> None:
     config = (
-        Path(__file__).resolve().parents[1] / "deploy" / "nginx" / "suppsystem-api.conf.example"
+        Path(__file__).resolve().parents[1] / "deploy" / "nginx" / "resolvate-api.conf.example"
     ).read_text(encoding="utf-8")
 
     assert "proxy_set_header X-Forwarded-For $remote_addr;" in config
@@ -982,7 +982,7 @@ async def test_metrics_cache_database_aggregates(
     health.ready("database")
 
     before = await metrics.render(database, health)
-    assert 'suppsystem_queue_depth{queue="delivery"} 0' in before
+    assert 'resolvate_queue_depth{queue="delivery"} 0' in before
     await ticket_service.enqueue_text(
         ticket_id=ticket.id,
         direction=Direction.OPERATOR_TO_USER,
@@ -991,7 +991,7 @@ async def test_metrics_cache_database_aggregates(
         idempotency_key="metrics-cache-delivery",
     )
     cached = await metrics.render(database, health)
-    assert 'suppsystem_queue_depth{queue="delivery"} 0' in cached
+    assert 'resolvate_queue_depth{queue="delivery"} 0' in cached
     clock.value = 31.0
     refreshed = await metrics.render(database, health)
-    assert 'suppsystem_queue_depth{queue="delivery"} 1' in refreshed
+    assert 'resolvate_queue_depth{queue="delivery"} 1' in refreshed

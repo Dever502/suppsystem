@@ -4,8 +4,8 @@ import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from suppsystem.media_cleanup import cleanup_media_files
-from suppsystem.media_storage import LocalMediaStorage
+from resolvate.media_cleanup import cleanup_media_files
+from resolvate.media_storage import LocalMediaStorage
 
 
 def test_media_cleanup_is_dry_run_by_default_and_preserves_references(tmp_path: Path) -> None:

@@ -7,7 +7,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
-from suppsystem.remnawave import (
+from resolvate.remnawave import (
     RemnawaveAmbiguousIdentityError,
     RemnawaveAuthError,
     RemnawaveClient,

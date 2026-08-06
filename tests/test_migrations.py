@@ -10,15 +10,15 @@ from alembic.config import Config
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-import suppsystem.migrations as migrations_module
-from suppsystem.database import Database
-from suppsystem.migrations import (
+import resolvate.migrations as migrations_module
+from resolvate.database import Database
+from resolvate.migrations import (
     build_alembic_config,
     resolve_migration_database_url,
     upgrade_database,
 )
-from suppsystem.models import Direction
-from suppsystem.services import TicketService
+from resolvate.models import Direction
+from resolvate.services import TicketService
 
 EXPECTED_QUERY_INDEXES = {
     "ix_tickets_status_updated",
@@ -84,11 +84,11 @@ async def test_migration_service_requires_a_dedicated_target(
 async def test_migration_service_uses_only_migration_database_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    target = "postgresql+asyncpg://migrator:migration-password-123@postgres/suppsystem"
+    target = "postgresql+asyncpg://migrator:migration-password-123@postgres/resolvate"
     monkeypatch.setenv("MIGRATION_DATABASE_URL", target)
     monkeypatch.setenv(
         "DATABASE_URL",
-        "postgresql+asyncpg://runtime:runtime-password-123@postgres/suppsystem",
+        "postgresql+asyncpg://runtime:runtime-password-123@postgres/resolvate",
     )
     observed: list[str] = []
 

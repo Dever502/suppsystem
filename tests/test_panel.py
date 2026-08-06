@@ -10,9 +10,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.dml import Update
 
-from suppsystem.database import Database
-from suppsystem.durable_work import MAX_RECONCILIATION_ATTEMPTS, DurableWorkRepository
-from suppsystem.models import (
+from resolvate.database import Database
+from resolvate.durable_work import MAX_RECONCILIATION_ATTEMPTS, DurableWorkRepository
+from resolvate.models import (
     DeliveryOutbox,
     NotificationOutbox,
     NotificationStatus,
@@ -27,14 +27,14 @@ from suppsystem.models import (
     WorkStatus,
     utcnow,
 )
-from suppsystem.panel import PanelService
-from suppsystem.panel_notifications import (
+from resolvate.panel import PanelService
+from resolvate.panel_notifications import (
     gift_notification_text,
     revoke_link_notification_text,
 )
-from suppsystem.panel_types import subscription_url_fingerprint
-from suppsystem.reconciliation import ReconciliationWorker
-from suppsystem.remnawave import (
+from resolvate.panel_types import subscription_url_fingerprint
+from resolvate.reconciliation import ReconciliationWorker
+from resolvate.remnawave import (
     RemnawaveAmbiguousIdentityError,
     RemnawaveBulkActionResult,
     RemnawaveHwidDeviceResetResult,
@@ -44,8 +44,8 @@ from suppsystem.remnawave import (
     RemnawaveUnknownOutcomeError,
     RemnawaveUser,
 )
-from suppsystem.services import TicketView
-from suppsystem.telegram_formatting import (
+from resolvate.services import TicketView
+from resolvate.telegram_formatting import (
     expiration_text,
     format_subscription_lookup,
     panel_status_text,
@@ -357,8 +357,8 @@ def test_telegram_adapter_explains_ambiguous_identity() -> None:
 
 
 def test_telegram_adapter_formats_subscription_lookup() -> None:
-    from suppsystem.panel import PanelSubscriptionLookup, subscription_info
-    from suppsystem.telegram_adapter import TOPIC_COMMANDS
+    from resolvate.panel import PanelSubscriptionLookup, subscription_info
+    from resolvate.telegram_adapter import TOPIC_COMMANDS
 
     lookup = PanelSubscriptionLookup(
         status="found",
@@ -389,7 +389,7 @@ def test_telegram_adapter_formats_subscription_lookup() -> None:
 
 
 def test_subscription_lookup_uses_compact_telegram_search_label() -> None:
-    from suppsystem.panel import PanelSubscriptionLookup
+    from resolvate.panel import PanelSubscriptionLookup
 
     text = format_subscription_lookup(
         PanelSubscriptionLookup(
@@ -406,7 +406,7 @@ def test_subscription_lookup_uses_compact_telegram_search_label() -> None:
 
 
 def test_subscription_lookup_separates_email_label_from_value() -> None:
-    from suppsystem.panel import PanelSubscriptionLookup
+    from resolvate.panel import PanelSubscriptionLookup
 
     text = format_subscription_lookup(
         PanelSubscriptionLookup(

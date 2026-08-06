@@ -5,7 +5,7 @@ root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 cd "$root"
 
 compose_file=compose.production.postgres.yaml
-compose_project="suppsystem-pgtest-${CI_JOB_ID:-$$}"
+compose_project="resolvate-pgtest-${CI_JOB_ID:-$$}"
 started_postgres=false
 postgres_container=""
 
@@ -38,31 +38,31 @@ if [ -z "${TEST_POSTGRES_DATABASE_URL:-}" ]; then
     }
     POSTGRES_TEST_PORT=${POSTGRES_TEST_PORT:-55432}
     POSTGRES_PORT=$POSTGRES_TEST_PORT
-    POSTGRES_DB=suppsystem_test
+    POSTGRES_DB=resolvate_test
     POSTGRES_VOLUME_NAME="${compose_project}_postgres_data"
-    POSTGRES_ADMIN_PASSWORD=suppsystem-test-only-password
-    POSTGRES_MIGRATION_PASSWORD=suppsystem-test-only-password
-    POSTGRES_RUNTIME_PASSWORD=suppsystem-test-only-password
-    APP_IMAGE=suppsystem-test-unused
-    SUPPSYSTEM_ENV_FILE=.env.example
+    POSTGRES_ADMIN_PASSWORD=resolvate-test-only-password
+    POSTGRES_MIGRATION_PASSWORD=resolvate-test-only-password
+    POSTGRES_RUNTIME_PASSWORD=resolvate-test-only-password
+    APP_IMAGE=resolvate-test-unused
+    RESOLVATE_ENV_FILE=.env.example
     export POSTGRES_PORT POSTGRES_DB POSTGRES_VOLUME_NAME
     export POSTGRES_ADMIN_PASSWORD POSTGRES_MIGRATION_PASSWORD
-    export POSTGRES_RUNTIME_PASSWORD APP_IMAGE SUPPSYSTEM_ENV_FILE
+    export POSTGRES_RUNTIME_PASSWORD APP_IMAGE RESOLVATE_ENV_FILE
     export POSTGRES_TEST_PORT
     started_postgres=true
     postgres_container="${compose_project}-postgres-test"
     docker compose --project-name "$compose_project" --file "$compose_file" \
         run --detach --service-ports --name "$postgres_container" \
-        --env POSTGRES_DB=suppsystem_test \
-        --env POSTGRES_USER=suppsystem_test \
-        --env POSTGRES_PASSWORD=suppsystem-test-only-password \
+        --env POSTGRES_DB=resolvate_test \
+        --env POSTGRES_USER=resolvate_test \
+        --env POSTGRES_PASSWORD=resolvate-test-only-password \
         postgres >/dev/null
 
     postgres_ready=false
     attempt=0
     while [ "$attempt" -lt 60 ]; do
         if docker exec "$postgres_container" \
-            pg_isready --username suppsystem_test --dbname suppsystem_test >/dev/null 2>&1; then
+            pg_isready --username resolvate_test --dbname resolvate_test >/dev/null 2>&1; then
             postgres_ready=true
             break
         fi
@@ -75,7 +75,7 @@ if [ -z "${TEST_POSTGRES_DATABASE_URL:-}" ]; then
         exit 1
     fi
 
-    TEST_POSTGRES_DATABASE_URL="postgresql+asyncpg://suppsystem_test:suppsystem-test-only-password@127.0.0.1:${POSTGRES_TEST_PORT}/suppsystem_test"
+    TEST_POSTGRES_DATABASE_URL="postgresql+asyncpg://resolvate_test:resolvate-test-only-password@127.0.0.1:${POSTGRES_TEST_PORT}/resolvate_test"
     export TEST_POSTGRES_DATABASE_URL
 fi
 

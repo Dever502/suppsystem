@@ -33,14 +33,14 @@ if [ -n "$media_input" ]; then
         echo "Media backup does not exist or is empty: $media_input" >&2
         exit 1
     }
-    compose run --rm -T --no-deps suppsystem \
-        python -m suppsystem.media_archive validate < "$media_input"
+    compose run --rm -T --no-deps resolvate \
+        python -m resolvate.media_archive validate < "$media_input"
 fi
 
 case "$backend" in
     sqlite)
-        compose run --rm -T --no-deps suppsystem \
-            python -m suppsystem.operations sqlite-validate < "$input"
+        compose run --rm -T --no-deps resolvate \
+            python -m resolvate.operations sqlite-validate < "$input"
         ;;
     postgres)
         compose exec -T postgres pg_restore --list < "$input" >/dev/null
@@ -55,7 +55,7 @@ restore_exit() {
     status=$?
     trap - EXIT HUP INT TERM
     if [ "$application_stopped" = true ] && [ "$status" -ne 0 ]; then
-        echo "Restore failed; suppsystem remains stopped for manual verification" >&2
+        echo "Restore failed; Resolvate remains stopped for manual verification" >&2
     fi
     exit "$status"
 }
@@ -64,10 +64,10 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-compose stop suppsystem
+compose stop resolvate
 application_stopped=true
 
-if [ "${SUPPSYSTEM_RESTORE_FAILURE_INJECTION:-}" = "after_stop" ]; then
+if [ "${RESOLVATE_RESTORE_FAILURE_INJECTION:-}" = "after_stop" ]; then
     [ "${CONFIRM_RESTORE_FAILURE_INJECTION:-}" = "yes" ] || {
         echo "Restore failure injection requires CONFIRM_RESTORE_FAILURE_INJECTION=yes" >&2
         exit 2
@@ -78,8 +78,8 @@ fi
 
 case "$backend" in
     sqlite)
-        compose run --rm -T --no-deps suppsystem \
-            python -m suppsystem.operations sqlite-restore < "$input"
+        compose run --rm -T --no-deps resolvate \
+            python -m resolvate.operations sqlite-restore < "$input"
         ;;
     postgres)
         compose exec -T postgres sh -eu -c \
@@ -89,16 +89,16 @@ case "$backend" in
 esac
 
 if [ -n "$media_input" ]; then
-    compose run --rm -T --no-deps suppsystem \
-        python -m suppsystem.media_archive restore < "$media_input"
+    compose run --rm -T --no-deps resolvate \
+        python -m resolvate.media_archive restore < "$media_input"
 fi
 
 if [ "$backend" = "postgres" ]; then
     # The restored archive may be older than the running image. Remove the successful
-    # one-shot container so Compose must execute migrations again before suppsystem.
+    # one-shot container so Compose must execute migrations again before Resolvate.
     compose rm --force --stop postgres-migrate
 fi
-compose up --detach --wait suppsystem
+compose up --detach --wait resolvate
 application_stopped=false
 trap - EXIT HUP INT TERM
 echo "Restore completed; application is healthy"

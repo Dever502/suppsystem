@@ -9,22 +9,22 @@ import pytest
 from aiogram.types import Message
 from pydantic import SecretStr
 
-from suppsystem.__main__ import (
+from resolvate.__main__ import (
     validate_api_settings,
     validate_operator_access,
     validate_support_group,
 )
-from suppsystem.authorization import AuthorizationService
-from suppsystem.config import Settings
-from suppsystem.media_storage import StoredMedia
-from suppsystem.models import TicketChannel, TicketStatus
-from suppsystem.panel import PanelActionResult
-from suppsystem.service_types import (
+from resolvate.authorization import AuthorizationService
+from resolvate.config import Settings
+from resolvate.media_storage import StoredMedia
+from resolvate.models import TicketChannel, TicketStatus
+from resolvate.panel import PanelActionResult
+from resolvate.service_types import (
     InternalNoteView,
     TicketNotFoundError,
     TopicProvisioningConflictError,
 )
-from suppsystem.telegram_adapter import (
+from resolvate.telegram_adapter import (
     GIFT_DAYS_ERROR_TEXT,
     SUPPORT_PENDING_TEXT,
     TICKET_CLOSED_TEXT,
@@ -32,26 +32,26 @@ from suppsystem.telegram_adapter import (
     TelegramSupportAdapter,
     TicketLockPool,
 )
-from suppsystem.telegram_constants import (
+from resolvate.telegram_constants import (
     TICKET_REOPENED_BY_CUSTOMER_TEXT,
     TICKET_REOPENED_BY_OPERATOR_TEXT,
 )
-from suppsystem.telegram_errors import is_missing_topic_error, is_topic_not_modified_error
-from suppsystem.telegram_formatting import (
+from resolvate.telegram_errors import is_missing_topic_error, is_topic_not_modified_error
+from resolvate.telegram_formatting import (
     date_text,
     internal_notes_text,
     operator_ticket_info,
     panel_action_reply,
     topic_name,
 )
-from suppsystem.telegram_message_utils import (
+from resolvate.telegram_message_utils import (
     media_metadata,
     message_command,
     rated_ticket_closed_text,
     rating_keyboard,
     rating_report,
 )
-from suppsystem.telegram_panel_handler import TelegramPanelCommandHandler
+from resolvate.telegram_panel_handler import TelegramPanelCommandHandler
 
 
 class FakeBot:
@@ -323,7 +323,7 @@ def test_rating_messages_use_card_format() -> None:
         "Перейти к тикету</a>"
     )
     keyboard = rating_keyboard("ticket-1", 3)
-    assert keyboard.inline_keyboard[0][3].callback_data == "suppsystem_rating:ticket-1:3:4"
+    assert keyboard.inline_keyboard[0][3].callback_data == "resolvate_rating:ticket-1:3:4"
 
 
 async def test_rating_callback_replaces_prompt_with_selected_score() -> None:
@@ -349,7 +349,7 @@ async def test_rating_callback_replaces_prompt_with_selected_score() -> None:
     callback_message.edit_text = AsyncMock()
     callback_message.edit_reply_markup = AsyncMock()
     callback = SimpleNamespace(
-        data="suppsystem_rating:ticket-1:3:4",
+        data="resolvate_rating:ticket-1:3:4",
         from_user=SimpleNamespace(id=123456789),
         message=callback_message,
         answer=AsyncMock(),
@@ -994,7 +994,7 @@ async def test_stop_builds_rating_keyboard_from_committed_close_cycle() -> None:
     builder = close_calls[0]["notification_reply_markup_builder"]
     assert callable(builder)
     keyboard = builder(73)
-    assert keyboard["inline_keyboard"][0][4]["callback_data"] == "suppsystem_rating:ticket-1:73:5"
+    assert keyboard["inline_keyboard"][0][4]["callback_data"] == "resolvate_rating:ticket-1:73:5"
     assert message.replies == ["✅ <b>Тикет закрыт</b>\n\nПользователь получит уведомление."]
 
 
@@ -1198,7 +1198,7 @@ async def test_admin_can_resolve_inconclusive_panel_action() -> None:
 
 
 def test_migration_url_conversion_supports_async_postgres() -> None:
-    from suppsystem.migrations import synchronous_database_url
+    from resolvate.migrations import synchronous_database_url
 
     assert (
         synchronous_database_url("postgresql+asyncpg://user:pass@postgres:5432/support")

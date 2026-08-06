@@ -2,8 +2,8 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-deploy_dir=${DEPLOY_DIR:-/opt/suppsystem}
-env_file=${SUPPSYSTEM_ENV_FILE:-${deploy_dir}/.env}
+deploy_dir=${DEPLOY_DIR:-/opt/resolvate}
+env_file=${RESOLVATE_ENV_FILE:-${deploy_dir}/.env}
 state_file=${DEPLOYMENT_STATE_FILE:-${deploy_dir}/deployment.env}
 
 [ -s "$env_file" ] || {

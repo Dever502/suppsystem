@@ -21,7 +21,7 @@ case "$mode" in
 esac
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-env_file=${SUPPSYSTEM_ENV_FILE:-${root}/.env}
+env_file=${RESOLVATE_ENV_FILE:-${root}/.env}
 [ -s "$env_file" ] || {
     echo "Configuration file is missing or empty: $env_file" >&2
     echo "Create it with: cp .env.example .env" >&2
@@ -39,7 +39,7 @@ docker compose version >/dev/null 2>&1 || {
     exit 1
 }
 
-default_image=ghcr.io/dever502/suppsystem:v3.5.0
+default_image=ghcr.io/dever502/resolvate:v3.5.0
 requested_image=${2:-${APP_IMAGE:-$default_image}}
 docker pull "$requested_image"
 resolved_image=$(docker image inspect --format '{{index .RepoDigests 0}}' "$requested_image")
@@ -52,8 +52,8 @@ case "$resolved_image" in
 esac
 
 APP_IMAGE=$resolved_image
-SUPPSYSTEM_ENV_FILE=$env_file
-export APP_IMAGE SUPPSYSTEM_ENV_FILE
+RESOLVATE_ENV_FILE=$env_file
+export APP_IMAGE RESOLVATE_ENV_FILE
 
 compose() {
     docker compose \
@@ -76,9 +76,9 @@ trap 'exit 143' TERM
 
 if [ "$mode" = postgres ]; then
     umask 077
-    rendered=$(mktemp "${TMPDIR:-/tmp}/suppsystem-compose.XXXXXX.json")
+    rendered=$(mktemp "${TMPDIR:-/tmp}/resolvate-compose.XXXXXX.json")
     compose config --format json > "$rendered"
-    docker run --rm -i "$APP_IMAGE" python -m suppsystem.production < "$rendered"
+    docker run --rm -i "$APP_IMAGE" python -m resolvate.production < "$rendered"
 else
     compose config --quiet
 fi
@@ -86,4 +86,4 @@ fi
 compose pull
 compose up --detach --wait
 compose ps
-echo "suppsystem started with $mode using immutable image $APP_IMAGE"
+echo "Resolvate started with $mode using immutable image $APP_IMAGE"

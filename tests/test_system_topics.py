@@ -6,15 +6,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from suppsystem.database import Database
-from suppsystem.telegram_system_topics import (
+from resolvate.database import Database
+from resolvate.telegram_system_topics import (
     QUICK_REPLIES_TOPIC,
     QUICK_REPLIES_TOPIC_NAME,
     RATINGS_TOPIC,
     RATINGS_TOPIC_NAME,
     TelegramSystemTopicService,
 )
-from suppsystem.web_models import SystemSetting
+from resolvate.web_models import SystemSetting
 
 
 class FakeLimiter:

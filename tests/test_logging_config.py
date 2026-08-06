@@ -8,7 +8,7 @@ from pathlib import Path
 
 from sqlalchemy.exc import StatementError
 
-from suppsystem.logging_config import LOG_EXTRA_FIELDS, JsonFormatter, redact_text
+from resolvate.logging_config import LOG_EXTRA_FIELDS, JsonFormatter, redact_text
 
 
 def formatted(record: logging.LogRecord) -> dict[str, object]:
@@ -91,7 +91,7 @@ def test_sqlalchemy_hidden_parameters_do_not_reach_exception_log() -> None:
 
 def test_all_emitted_structured_fields_are_in_vetted_allowlist() -> None:
     emitted_fields: set[str] = set()
-    source_root = Path(__file__).parents[1] / "src" / "suppsystem"
+    source_root = Path(__file__).parents[1] / "src" / "resolvate"
     for source in source_root.glob("*.py"):
         tree = ast.parse(source.read_text(encoding="utf-8"))
         for node in ast.walk(tree):

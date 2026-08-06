@@ -7,9 +7,9 @@ import pytest
 from sqlalchemy import event, select
 from sqlalchemy.exc import IntegrityError
 
-from suppsystem.database import Database
-from suppsystem.durable_work import DurableWorkRepository
-from suppsystem.models import (
+from resolvate.database import Database
+from resolvate.durable_work import DurableWorkRepository
+from resolvate.models import (
     DeliveryOutbox,
     DeliveryStatus,
     Direction,
@@ -21,9 +21,9 @@ from suppsystem.models import (
     WorkStatus,
     utcnow,
 )
-from suppsystem.outbox_repository import OutboxRepository
-from suppsystem.service_types import TicketNotFoundError, TicketView, TopicProvisioningConflictError
-from suppsystem.services import TicketService
+from resolvate.outbox_repository import OutboxRepository
+from resolvate.service_types import TicketNotFoundError, TicketView, TopicProvisioningConflictError
+from resolvate.services import TicketService
 
 
 @pytest.fixture
@@ -693,13 +693,13 @@ async def test_operator_close_notification_can_include_rating_keyboard(
         notification_target_chat_id=1011,
         notification_idempotency_key="telegram:-100:12:/stop:user-notification",
         notification_reply_markup={
-            "inline_keyboard": [[{"text": "⭐ 1", "callback_data": "suppsystem_rating:ticket:1"}]]
+            "inline_keyboard": [[{"text": "⭐ 1", "callback_data": "resolvate_rating:ticket:1"}]]
         },
     )
     jobs = await ticket_service.outbox.claim_due_deliveries()
 
     assert jobs[0].payload["reply_markup"] == {
-        "inline_keyboard": [[{"text": "⭐ 1", "callback_data": "suppsystem_rating:ticket:1"}]]
+        "inline_keyboard": [[{"text": "⭐ 1", "callback_data": "resolvate_rating:ticket:1"}]]
     }
 
 
@@ -729,7 +729,7 @@ async def test_close_notification_builder_uses_committed_close_cycle(
                 [
                     {
                         "text": "⭐ 5",
-                        "callback_data": f"suppsystem_rating:{ticket.id}:{close_cycle}:5",
+                        "callback_data": f"resolvate_rating:{ticket.id}:{close_cycle}:5",
                     }
                 ]
             ]
@@ -749,7 +749,7 @@ async def test_close_notification_builder_uses_committed_close_cycle(
     assert built_cycles == [2]
     assert jobs[0].payload["reply_markup"] == {
         "inline_keyboard": [
-            [{"text": "⭐ 5", "callback_data": f"suppsystem_rating:{ticket.id}:2:5"}]
+            [{"text": "⭐ 5", "callback_data": f"resolvate_rating:{ticket.id}:2:5"}]
         ]
     }
 

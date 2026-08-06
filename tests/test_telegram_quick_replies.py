@@ -13,10 +13,10 @@ from aiogram.methods import DeleteMessage, EditMessageText
 from aiogram.types import Chat, Message, MessageEntity, User
 from pydantic import SecretStr
 
-from suppsystem.authorization import AuthorizationService
-from suppsystem.config import Settings
-from suppsystem.database import Database
-from suppsystem.quick_replies import (
+from resolvate.authorization import AuthorizationService
+from resolvate.config import Settings
+from resolvate.database import Database
+from resolvate.quick_replies import (
     QUICK_RESPONSE_DELETED,
     QUICK_RESPONSE_PENDING_DELETION,
     QUICK_RESPONSE_PUBLICATION_FORMAT_VERSION,
@@ -24,7 +24,7 @@ from suppsystem.quick_replies import (
     QuickReplyService,
     render_quick_response,
 )
-from suppsystem.telegram_quick_replies import (
+from resolvate.telegram_quick_replies import (
     QUICK_RESPONSE_DELETE_CALLBACK_PREFIX,
     QUICK_RESPONSE_INSTRUCTION_TEXT,
     QUICK_RESPONSE_WARNING_TEXT,
@@ -343,7 +343,7 @@ async def test_invalid_response_and_warning_are_deleted_after_deadline(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "suppsystem.telegram_quick_replies.QUICK_RESPONSE_DELETE_DELAY_SECONDS",
+        "resolvate.telegram_quick_replies.QUICK_RESPONSE_DELETE_DELAY_SECONDS",
         0,
     )
     database = Database(f"sqlite+aiosqlite:///{tmp_path}/expired-quick-response.db")

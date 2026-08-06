@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-SOURCE_ROOT = Path("src/suppsystem")
+SOURCE_ROOT = Path("src/resolvate")
 
 
 def imported_modules(module: str) -> set[str]:
@@ -21,7 +21,7 @@ def test_service_contracts_do_not_depend_on_persistence_or_transports() -> None:
     imports = imported_modules("service_types")
 
     assert not any(
-        name.startswith(("sqlalchemy", "aiogram", "fastapi", "suppsystem.database"))
+        name.startswith(("sqlalchemy", "aiogram", "fastapi", "resolvate.database"))
         for name in imports
     )
 
@@ -29,7 +29,7 @@ def test_service_contracts_do_not_depend_on_persistence_or_transports() -> None:
 def test_telegram_formatting_is_independent_from_aiogram_and_adapter() -> None:
     imports = imported_modules("telegram_formatting")
 
-    assert not any(name.startswith(("aiogram", "suppsystem.telegram_adapter")) for name in imports)
+    assert not any(name.startswith(("aiogram", "resolvate.telegram_adapter")) for name in imports)
 
 
 def test_application_services_do_not_import_transport_layers() -> None:
@@ -49,7 +49,7 @@ def test_application_services_do_not_import_transport_layers() -> None:
     ):
         imports = imported_modules(module)
         assert not any(
-            name.startswith(("aiogram", "fastapi", "suppsystem.telegram_adapter"))
+            name.startswith(("aiogram", "fastapi", "resolvate.telegram_adapter"))
             for name in imports
         ), module
 

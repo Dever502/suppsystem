@@ -4,10 +4,10 @@ import asyncio
 import os
 from pathlib import Path
 
-from suppsystem.healthcheck import heartbeats_healthy
-from suppsystem.heartbeat import Heartbeat
-from suppsystem.notification_webhook import NotificationWebhookWorker
-from suppsystem.runtime_health import ComponentStatus, RuntimeHealth
+from resolvate.healthcheck import heartbeats_healthy
+from resolvate.heartbeat import Heartbeat
+from resolvate.notification_webhook import NotificationWebhookWorker
+from resolvate.runtime_health import ComponentStatus, RuntimeHealth
 
 
 def touch_at(path: Path, timestamp: float) -> None:

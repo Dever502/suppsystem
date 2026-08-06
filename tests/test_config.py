@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from suppsystem.config import Settings
+from resolvate.config import Settings
 
 STRONG_SECRET = "0123456789abcdef0123456789abcdef"
 
@@ -45,8 +45,8 @@ def test_migration_database_url_defaults_to_runtime_database_url(tmp_path: Path)
 
 
 def test_migration_database_url_can_use_a_separate_role(tmp_path: Path) -> None:
-    runtime_url = "postgresql+asyncpg://runtime:runtime-password-123@db/suppsystem"
-    migration_url = "postgresql+asyncpg://migrator:migration-password-123@db/suppsystem"
+    runtime_url = "postgresql+asyncpg://runtime:runtime-password-123@db/resolvate"
+    migration_url = "postgresql+asyncpg://migrator:migration-password-123@db/resolvate"
 
     configured = settings(
         data_dir=tmp_path,
@@ -88,7 +88,7 @@ def test_admin_ids_accept_comma_separated_values() -> None:
 
 
 def test_configuration_error_formatter_is_operator_readable() -> None:
-    from suppsystem.__main__ import format_configuration_error
+    from resolvate.__main__ import format_configuration_error
 
     with pytest.raises(ValidationError) as captured:
         settings(user_messages_per_minute=0)
@@ -97,7 +97,7 @@ def test_configuration_error_formatter_is_operator_readable() -> None:
 
     assert message.startswith("Configuration error:\n")
     assert "USER_MESSAGES_PER_MINUTE" in message
-    assert "/opt/suppsystem/.env" in message
+    assert "/opt/resolvate/.env" in message
     assert "Traceback" not in message
     assert "pydantic_core" not in message
     assert "errors.pydantic.dev" not in message
@@ -274,23 +274,23 @@ def test_trusted_proxy_ips_accept_cidr_and_reject_malformed_values() -> None:
 
 def test_postgres_database_url_rejects_placeholder_password() -> None:
     with pytest.raises(ValidationError, match="DATABASE_URL"):
-        settings(database_url="postgresql+asyncpg://suppsystem:suppsystem@postgres:5432/suppsystem")
+        settings(database_url="postgresql+asyncpg://resolvate:resolvate@postgres:5432/resolvate")
 
 
 def test_postgres_migration_database_url_rejects_placeholder_password() -> None:
     with pytest.raises(ValidationError, match="MIGRATION_DATABASE_URL"):
         settings(
             migration_database_url=(
-                "postgresql+asyncpg://suppsystem_migrator:suppsystem@postgres:5432/suppsystem"
+                "postgresql+asyncpg://resolvate_migrator:resolvate@postgres:5432/resolvate"
             )
         )
 
 
 def test_postgres_database_url_accepts_non_placeholder_password() -> None:
     configured = settings(
-        database_url="postgresql+asyncpg://suppsystem:0123456789abcdef@postgres:5432/suppsystem"
+        database_url="postgresql+asyncpg://resolvate:0123456789abcdef@postgres:5432/resolvate"
     )
 
     assert configured.database_url == (
-        "postgresql+asyncpg://suppsystem:0123456789abcdef@postgres:5432/suppsystem"
+        "postgresql+asyncpg://resolvate:0123456789abcdef@postgres:5432/resolvate"
     )

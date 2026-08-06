@@ -16,7 +16,7 @@ def _report(vulnerabilities: list[dict[str, str]] | None) -> dict[str, Any]:
     return {
         "Results": [
             {
-                "Target": "suppsystem",
+                "Target": "resolvate",
                 "Vulnerabilities": vulnerabilities,
             }
         ]
@@ -64,8 +64,8 @@ def test_trivy_gate_blocks_high_and_critical_findings() -> None:
     )
 
     assert blocking_vulnerabilities(report) == [
-        ("suppsystem", "CVE-HIGH", "HIGH", "high-package", "1.0"),
-        ("suppsystem", "CVE-CRITICAL", "CRITICAL", "critical-package", "2.0"),
+        ("resolvate", "CVE-HIGH", "HIGH", "high-package", "1.0"),
+        ("resolvate", "CVE-CRITICAL", "CRITICAL", "critical-package", "2.0"),
     ]
 
 

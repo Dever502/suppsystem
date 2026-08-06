@@ -6,10 +6,10 @@ from typing import Any
 from alembic import context
 from sqlalchemy import engine_from_config, event, pool
 
-import suppsystem.web_models  # noqa: F401
-from suppsystem.database import configure_sqlite_connection
-from suppsystem.migrations import resolve_migration_database_url
-from suppsystem.models import Base
+import resolvate.web_models  # noqa: F401
+from resolvate.database import configure_sqlite_connection
+from resolvate.migrations import resolve_migration_database_url
+from resolvate.models import Base
 
 config = context.config
 

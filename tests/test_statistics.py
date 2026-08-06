@@ -12,19 +12,19 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import EditMessageText
 from pydantic import SecretStr
 
-from suppsystem.authorization import AuthorizationService
-from suppsystem.config import Settings
-from suppsystem.database import Database
-from suppsystem.models import Direction, Ticket, TicketChannel, TicketMessage, TicketStatus, User
-from suppsystem.statistics import StatisticsService, period_start
-from suppsystem.telegram_limits import TelegramRateLimiter
-from suppsystem.telegram_statistics import (
+from resolvate.authorization import AuthorizationService
+from resolvate.config import Settings
+from resolvate.database import Database
+from resolvate.models import Direction, Ticket, TicketChannel, TicketMessage, TicketStatus, User
+from resolvate.statistics import StatisticsService, period_start
+from resolvate.telegram_limits import TelegramRateLimiter
+from resolvate.telegram_statistics import (
     StatisticsDashboardRefreshWorker,
     TelegramStatisticsDashboard,
     statistics_keyboard,
     statistics_text,
 )
-from suppsystem.web_models import TicketLifecycleEvent
+from resolvate.web_models import TicketLifecycleEvent
 
 
 def _database(
@@ -227,7 +227,7 @@ async def test_dashboard_persists_one_message_and_reuses_it(
 
         unauthorized = SimpleNamespace(
             from_user=SimpleNamespace(id=7),
-            data="suppsystem_stats:today",
+            data="resolvate_stats:today",
             answer=AsyncMock(),
         )
         await dashboard.handle_statistics_callback(unauthorized)

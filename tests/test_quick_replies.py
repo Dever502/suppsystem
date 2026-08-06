@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from suppsystem.database import Database
-from suppsystem.quick_replies import (
+from resolvate.database import Database
+from resolvate.quick_replies import (
     QUICK_RESPONSE_DELETED,
     QUICK_RESPONSE_PENDING_DELETION,
     QUICK_RESPONSE_PUBLICATION_FORMAT_VERSION,
@@ -14,7 +14,7 @@ from suppsystem.quick_replies import (
     QuickReplyService,
     QuickResponseDeletedError,
 )
-from suppsystem.web_models import SystemSetting
+from resolvate.web_models import SystemSetting
 
 
 def _operator_fields() -> dict[str, object]:

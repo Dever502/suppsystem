@@ -4,9 +4,9 @@ import os
 import subprocess
 from pathlib import Path
 
-BASELINE_IMAGE = "registry.example/suppsystem@sha256:" + "a" * 64
-CANDIDATE_IMAGE = "registry.example/suppsystem:" + "b" * 40
-CANDIDATE_DIGEST = "registry.example/suppsystem@sha256:" + "b" * 64
+BASELINE_IMAGE = "registry.example/resolvate@sha256:" + "a" * 64
+CANDIDATE_IMAGE = "registry.example/resolvate:" + "b" * 40
+CANDIDATE_DIGEST = "registry.example/resolvate@sha256:" + "b" * 64
 
 
 def deploy_environment(
@@ -127,7 +127,7 @@ def test_deploy_refuses_reference_without_registry_digest(tmp_path: Path) -> Non
     project_root = Path(__file__).resolve().parents[1]
     environment, deploy_dir = deploy_environment(
         tmp_path,
-        resolved_image="registry.example/suppsystem:mutable",
+        resolved_image="registry.example/resolvate:mutable",
     )
 
     result = run_deploy(project_root, environment)

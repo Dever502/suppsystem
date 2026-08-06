@@ -12,18 +12,18 @@ from aiogram.types import Update
 from fastapi import FastAPI
 from pydantic import SecretStr
 
-from suppsystem.api_server import ApiServer
-from suppsystem.config import Settings
-from suppsystem.runtime_health import ComponentStatus, RuntimeHealth
-from suppsystem.runtime_supervision import (
+from resolvate.api_server import ApiServer
+from resolvate.config import Settings
+from resolvate.runtime_health import ComponentStatus, RuntimeHealth
+from resolvate.runtime_supervision import (
     shutdown_runtime,
     stop_polling_task,
     supervise_ingress,
 )
-from suppsystem.telegram_ingress import DurableTelegramIngressMiddleware, TelegramIngressWorker
-from suppsystem.telegram_lifecycle import create_polling_task
-from suppsystem.telegram_limits import TelegramRateLimiter
-from suppsystem.user_message_limits import UserMessageRateLimiter
+from resolvate.telegram_ingress import DurableTelegramIngressMiddleware, TelegramIngressWorker
+from resolvate.telegram_lifecycle import create_polling_task
+from resolvate.telegram_limits import TelegramRateLimiter
+from resolvate.user_message_limits import UserMessageRateLimiter
 
 
 def _settings() -> Settings:

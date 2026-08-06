@@ -1,6 +1,6 @@
-# suppsystem
+# Resolvate
 
-suppsystem — система технической поддержки с Telegram и server-to-server Web API. Обращения из
+Resolvate — система технической поддержки с Telegram и server-to-server Web API. Обращения из
 бота и с сайта попадают в отдельные темы закрытой Forum-группы, где работают операторы. Сообщения,
 фотографии, состояние тикетов и история действий сохраняются и переживают перезапуск.
 
@@ -27,7 +27,7 @@ suppsystem — система технической поддержки с Teleg
 
 ```text
 Telegram-клиент ── Telegram bot ──┐
-                                  ├── suppsystem + БД ── Forum-темы операторов
+                                  ├── Resolvate + БД ── Forum-темы операторов
 Backend сайта ───── Web API ──────┘
                                   │
                            Operator API (опционально)
@@ -43,8 +43,8 @@ Backend сайта ───── Web API ──────┘
 1. Клонируйте репозиторий и подготовьте конфигурацию:
 
    ```bash
-   git clone https://github.com/Dever502/suppsystem.git
-   cd suppsystem
+   git clone https://github.com/Dever502/resolvate.git
+   cd resolvate
    cp .env.example .env
    ```
 
@@ -81,8 +81,8 @@ Backend сайта ───── Web API ──────┘
 Скрипт — только прозрачная обёртка. Прямой запуск Compose остаётся доступен:
 
 ```bash
-export APP_IMAGE='ghcr.io/dever502/suppsystem@sha256:<digest>'
-export SUPPSYSTEM_ENV_FILE="$PWD/.env"
+export APP_IMAGE='ghcr.io/dever502/resolvate@sha256:<digest>'
+export RESOLVATE_ENV_FILE="$PWD/.env"
 docker compose --env-file .env -f compose.production.sqlite.yaml up --detach --wait
 ```
 
@@ -92,7 +92,7 @@ docker compose --env-file .env -f compose.production.sqlite.yaml up --detach --w
 version tag в immutable digest. Для явной установки и rollback также можно передать digest:
 
 ```bash
-./scripts/start.sh postgres 'ghcr.io/dever502/suppsystem@sha256:<digest>'
+./scripts/start.sh postgres 'ghcr.io/dever502/resolvate@sha256:<digest>'
 ```
 
 PyPI-пакет и wheel для релиза не публикуются.

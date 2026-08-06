@@ -40,7 +40,7 @@ cleanup() {
         rm -f "$media_temporary"
     fi
     if [ "$application_stopped" = true ]; then
-        compose up --detach --wait suppsystem || status=$?
+        compose up --detach --wait resolvate || status=$?
     fi
     exit "$status"
 }
@@ -50,17 +50,17 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 if [ -n "$media_output" ]; then
-    compose stop suppsystem
+    compose stop resolvate
     application_stopped=true
 fi
 
 case "$backend" in
     sqlite)
         if [ -n "$media_output" ]; then
-            compose run --rm -T --no-deps suppsystem \
-                python -m suppsystem.operations sqlite-backup > "$temporary"
+            compose run --rm -T --no-deps resolvate \
+                python -m resolvate.operations sqlite-backup > "$temporary"
         else
-            compose exec -T suppsystem python -m suppsystem.operations sqlite-backup > "$temporary"
+            compose exec -T resolvate python -m resolvate.operations sqlite-backup > "$temporary"
         fi
         ;;
     postgres)
@@ -75,10 +75,10 @@ case "$backend" in
 esac
 
 if [ -n "$media_output" ]; then
-    compose run --rm -T --no-deps suppsystem \
-        python -m suppsystem.media_archive export > "$media_temporary"
-    compose run --rm -T --no-deps suppsystem \
-        python -m suppsystem.media_archive validate < "$media_temporary"
+    compose run --rm -T --no-deps resolvate \
+        python -m resolvate.media_archive export > "$media_temporary"
+    compose run --rm -T --no-deps resolvate \
+        python -m resolvate.media_archive validate < "$media_temporary"
 fi
 
 [ -s "$temporary" ] || {
@@ -88,7 +88,7 @@ fi
 mv "$temporary" "$output"
 if [ -n "$media_output" ]; then
     mv "$media_temporary" "$media_output"
-    compose up --detach --wait suppsystem
+    compose up --detach --wait resolvate
     application_stopped=false
 fi
 trap - EXIT HUP INT TERM

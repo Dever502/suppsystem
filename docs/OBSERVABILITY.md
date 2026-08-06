@@ -23,23 +23,23 @@ bearer-токены и секреты в строке запроса маски�
 
 | Панель | PromQL |
 | --- | --- |
-| Размер очереди доставки | `suppsystem_queue_depth{queue="delivery"}` |
-| Размер очереди уведомлений | `suppsystem_queue_depth{queue="notification"}` |
-| Возраст старейшей доставки | `suppsystem_queue_oldest_age_seconds{queue="delivery"}` |
-| Возраст старейшего уведомления | `suppsystem_queue_oldest_age_seconds{queue="notification"}` |
-| Неудавшиеся задания | `suppsystem_failed_jobs` |
-| Попытки в сохранённых заданиях | `suppsystem_retained_job_attempts` |
-| Давность heartbeat воркеров | `suppsystem_heartbeat_age_seconds` |
-| Неопределённые результаты Remnawave | `suppsystem_panel_unknown` |
-| Внешние ошибки по компонентам | `increase(suppsystem_events_total{outcome=~"failed|retry|unknown|unexpected_response|http_5xx|request_error"}[15m])` |
-| Средняя задержка внешних запросов | `rate(suppsystem_external_request_duration_seconds_sum[5m]) / rate(suppsystem_external_request_duration_seconds_count[5m])` |
+| Размер очереди доставки | `resolvate_queue_depth{queue="delivery"}` |
+| Размер очереди уведомлений | `resolvate_queue_depth{queue="notification"}` |
+| Возраст старейшей доставки | `resolvate_queue_oldest_age_seconds{queue="delivery"}` |
+| Возраст старейшего уведомления | `resolvate_queue_oldest_age_seconds{queue="notification"}` |
+| Неудавшиеся задания | `resolvate_failed_jobs` |
+| Попытки в сохранённых заданиях | `resolvate_retained_job_attempts` |
+| Давность heartbeat воркеров | `resolvate_heartbeat_age_seconds` |
+| Неопределённые результаты Remnawave | `resolvate_panel_unknown` |
+| Внешние ошибки по компонентам | `increase(resolvate_events_total{outcome=~"failed|retry|unknown|unexpected_response|http_5xx|request_error"}[15m])` |
+| Средняя задержка внешних запросов | `rate(resolvate_external_request_duration_seconds_sum[5m]) / rate(resolvate_external_request_duration_seconds_count[5m])` |
 
 Большой возраст при малом размере очереди обычно означает зависшее задание; большой размер при
 малом возрасте — всплеск трафика или замедление внешнего сервиса.
 
 ## Правила оповещений
 
-Базовый файл правил Prometheus находится в `deploy/prometheus/suppsystem-alerts.yml`.
+Базовый файл правил Prometheus находится в `deploy/prometheus/resolvate-alerts.yml`.
 
 Настройте пороговые значения под свою нагрузку. Неудавшиеся задания и неопределённые результаты
 Remnawave обычно требуют немедленного вмешательства.

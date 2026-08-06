@@ -7,13 +7,13 @@ from pathlib import Path
 import httpx
 from pydantic import SecretStr
 
-from suppsystem.api import create_app
-from suppsystem.api_server import ApiServer
-from suppsystem.config import Settings
-from suppsystem.database import Database
-from suppsystem.runtime_health import RuntimeHealth
-from suppsystem.services import TicketService
-from suppsystem.version import PROJECT_VERSION
+from resolvate.api import create_app
+from resolvate.api_server import ApiServer
+from resolvate.config import Settings
+from resolvate.database import Database
+from resolvate.runtime_health import RuntimeHealth
+from resolvate.services import TicketService
+from resolvate.version import PROJECT_VERSION
 
 API_TOKEN = "abcdef0123456789abcdef0123456789"
 

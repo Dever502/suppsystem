@@ -35,17 +35,17 @@ DATA_DIR=./data
 ./scripts/start.sh sqlite
 ```
 
-SQLite и heartbeat хранятся в volume `suppsystem_data`. Удаление контейнера данные не удаляет;
+SQLite и heartbeat хранятся в volume `resolvate_data`. Удаление контейнера данные не удаляет;
 удаление volume — удаляет.
 
 ### PostgreSQL
 
 Добавьте три разных URL-safe пароля длиной не менее 16 символов:
 
-Имена ролей фиксированы: `postgres`, `suppsystem_migrator` и `suppsystem_runtime`.
+Имена ролей фиксированы: `postgres`, `resolvate_migrator` и `resolvate_runtime`.
 
 ```dotenv
-POSTGRES_DB=suppsystem
+POSTGRES_DB=resolvate
 POSTGRES_ADMIN_PASSWORD=replace-with-random-password-1
 POSTGRES_MIGRATION_PASSWORD=replace-with-random-password-2
 POSTGRES_RUNTIME_PASSWORD=replace-with-random-password-3
@@ -101,7 +101,7 @@ proxy. Каждая мутация требует
 `409 Conflict`. API-квота считается отдельно для Operator token; строгая защита от перебора
 token остаётся по IP.
 
-Пример reverse proxy: [`deploy/nginx/suppsystem-api.conf.example`](../deploy/nginx/suppsystem-api.conf.example).
+Пример reverse proxy: [`deploy/nginx/resolvate-api.conf.example`](../deploy/nginx/resolvate-api.conf.example).
 
 ### Web Support API
 
@@ -244,13 +244,13 @@ Telegram. Такая запись не восстанавливается. Ру�
 но сохраняет и запускает только фактически полученный RepoDigest.
 
 ```bash
-DEPLOY_DIR=/opt/suppsystem \
-  sh scripts/deploy.sh deploy registry.example/suppsystem:v3.5.0
-DEPLOY_DIR=/opt/suppsystem sh scripts/production-compose.sh ps
+DEPLOY_DIR=/opt/resolvate \
+  sh scripts/deploy.sh deploy registry.example/resolvate:v3.5.0
+DEPLOY_DIR=/opt/resolvate sh scripts/production-compose.sh ps
 ```
 
 ```bash
-DEPLOY_DIR=/opt/suppsystem sh scripts/deploy.sh rollback
+DEPLOY_DIR=/opt/resolvate sh scripts/deploy.sh rollback
 ```
 
 Rollback разрешён только на ранее успешно запущенный image. Скрипт не выполняет downgrade схемы:
@@ -259,9 +259,9 @@ Rollback разрешён только на ранее успешно запущ
 Повседневные команды:
 
 ```bash
-DEPLOY_DIR=/opt/suppsystem sh scripts/production-compose.sh ps
-DEPLOY_DIR=/opt/suppsystem sh scripts/production-compose.sh logs -f --tail=200 suppsystem
-DEPLOY_DIR=/opt/suppsystem sh scripts/production-compose.sh restart suppsystem
+DEPLOY_DIR=/opt/resolvate sh scripts/production-compose.sh ps
+DEPLOY_DIR=/opt/resolvate sh scripts/production-compose.sh logs -f --tail=200 resolvate
+DEPLOY_DIR=/opt/resolvate sh scripts/production-compose.sh restart resolvate
 ```
 
 GitHub Actions параллельно выполняет статические проверки, два изолированных шарда непостгресовых
@@ -299,7 +299,7 @@ HTTP endpoints доступны при включённом Operator API или 
 
 ### SQLite
 
-Перед запуском экспортируйте `APP_IMAGE` и `SUPPSYSTEM_ENV_FILE` так же, как для Compose.
+Перед запуском экспортируйте `APP_IMAGE` и `RESOLVATE_ENV_FILE` так же, как для Compose.
 
 ```bash
 COMPOSE_FILE=compose.production.sqlite.yaml \
@@ -314,9 +314,9 @@ CONFIRM_RESTORE=yes COMPOSE_FILE=compose.production.sqlite.yaml \
 ### PostgreSQL
 
 ```bash
-PRODUCTION_DEPLOYMENT=yes DEPLOY_DIR=/opt/suppsystem \
+PRODUCTION_DEPLOYMENT=yes DEPLOY_DIR=/opt/resolvate \
   sh scripts/backup.sh postgres /srv/backups/support.dump /srv/backups/support-media.tar.gz
-CONFIRM_RESTORE=yes PRODUCTION_DEPLOYMENT=yes DEPLOY_DIR=/opt/suppsystem \
+CONFIRM_RESTORE=yes PRODUCTION_DEPLOYMENT=yes DEPLOY_DIR=/opt/resolvate \
   sh scripts/restore.sh postgres /srv/backups/support.dump /srv/backups/support-media.tar.gz
 ```
 
@@ -329,8 +329,8 @@ Archive проверяется до остановки. Restore работает
 Проверка orphan/temp Web-файлов безопасна по умолчанию; удаление требует явного флага:
 
 ```bash
-docker compose exec suppsystem python -m suppsystem.media_cleanup
-docker compose exec suppsystem python -m suppsystem.media_cleanup --apply
+docker compose exec resolvate python -m resolvate.media_cleanup
+docker compose exec resolvate python -m resolvate.media_cleanup --apply
 ```
 
 `scripts/drill_production_data_path.sh` проверяет deploy, rollback, backup и restore только на

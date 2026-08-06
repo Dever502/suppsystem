@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from suppsystem.media_archive import import_media
+from resolvate.media_archive import import_media
 
 
 class BinaryInput:

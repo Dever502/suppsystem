@@ -10,13 +10,13 @@ import pytest
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from suppsystem.config import Settings
-from suppsystem.database import Database
-from suppsystem.models import NotificationOutbox, NotificationStatus
-from suppsystem.notification_webhook import NotificationWebhookWorker, parse_retry_after
-from suppsystem.outbox_repository import OutboxRepository
-from suppsystem.runtime_defaults import NOTIFICATION_WEBHOOK_MAX_ATTEMPTS
-from suppsystem.services import NotificationJob, TicketService
+from resolvate.config import Settings
+from resolvate.database import Database
+from resolvate.models import NotificationOutbox, NotificationStatus
+from resolvate.notification_webhook import NotificationWebhookWorker, parse_retry_after
+from resolvate.outbox_repository import OutboxRepository
+from resolvate.runtime_defaults import NOTIFICATION_WEBHOOK_MAX_ATTEMPTS
+from resolvate.services import NotificationJob, TicketService
 
 
 class FakeTicketService:

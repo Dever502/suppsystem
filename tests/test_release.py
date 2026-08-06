@@ -95,13 +95,13 @@ def test_ci_build_scan_sbom_and_evidence_share_one_immutable_image() -> None:
     assert "docker/build-push-action@" in build["uses"]
     assert build["with"]["load"] is True
     assert build["with"]["push"] is False
-    assert build["with"]["cache-from"] == "type=gha,scope=suppsystem-image"
-    assert build["with"]["cache-to"] == "type=gha,mode=max,scope=suppsystem-image"
+    assert build["with"]["cache-from"] == "type=gha,scope=resolvate-image"
+    assert build["with"]["cache-to"] == "type=gha,mode=max,scope=resolvate-image"
     candidate_upload = next(
         step
         for step in candidate_steps
         if "actions/upload-artifact@" in step.get("uses", "")
-        and "suppsystem-image.tar" in step.get("with", {}).get("path", "")
+        and "resolvate-image.tar" in step.get("with", {}).get("path", "")
     )
     assert candidate_step_names.index(
         "Enforce HIGH and CRITICAL vulnerability gate"
@@ -150,17 +150,17 @@ def test_ci_build_scan_sbom_and_evidence_share_one_immutable_image() -> None:
     assert "GITHUB_SHA" in rendered_publish
     assert '[[ "$CANDIDATE_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]' in rendered_publish
     assert "docker/build-push-action@" not in rendered_publish
-    assert "ghcr.io/dever502/suppsystem" in text
+    assert "ghcr.io/dever502/resolvate" in text
     assert "IMAGE_REFERENCE=%s" in text
-    assert "suppsystem-image.tar" in text
-    assert "chmod 0644 suppsystem-image.tar" in text
+    assert "resolvate-image.tar" in text
+    assert "chmod 0644 resolvate-image.tar" in text
     assert "--ignore-unfixed" not in text
     assert "aquasec/trivy:0.70.0@sha256:" in text
     assert text.count("aquasec/trivy:0.70.0@sha256:") == 1
     assert "scripts/check_trivy_report.py trivy.json" in text
     assert 'frozenset({"HIGH", "CRITICAL"})' in trivy_gate
     assert "anchore/syft:v1.44.0-debug@sha256:" in text
-    assert "docker-archive:/work/suppsystem-image.tar" in text
+    assert "docker-archive:/work/resolvate-image.tar" in text
     assert "SYFT_REGISTRY_AUTH_PASSWORD" not in text
     cache = next(step for step in candidate_steps if "actions/cache@" in step.get("uses", ""))
     assert cache["with"]["path"] == ".trivy-cache/db"
@@ -178,14 +178,14 @@ def test_ci_build_scan_sbom_and_evidence_share_one_immutable_image() -> None:
     assert '--volume "$PWD/.trivy-cache:/cache"' in reports["run"]
     assert "--cache-dir /cache" in reports["run"]
     subprocess.run(["bash", "-n", "-c", reports["run"]], check=True)
-    assert "suppsystem.migrations" in rendered_candidate
+    assert "resolvate.migrations" in rendered_candidate
     license_digest = sha256((ROOT / "LICENSE").read_bytes()).hexdigest()
     assert "/app/LICENSE" in text and license_digest in text
     candidate_paths = set(candidate_upload["with"]["path"].splitlines())
     assert candidate_paths == {
         "candidate-checksums.txt",
         "sbom.cdx.json",
-        "suppsystem-image.tar",
+        "resolvate-image.tar",
         "trivy.json",
     }
     evidence_upload = next(
@@ -238,11 +238,11 @@ def test_public_start_script_is_transparent_and_pins_the_pulled_image() -> None:
     text = path.read_text(encoding="utf-8")
 
     assert path.stat().st_mode & 0o100
-    assert "ghcr.io/dever502/suppsystem:v3.5.0" in text
+    assert "ghcr.io/dever502/resolvate:v3.5.0" in text
     assert "docker pull" in text
     assert "RepoDigests" in text
     assert "config --format json" in text
-    assert "python -m suppsystem.production" in text
+    assert "python -m resolvate.production" in text
     assert "up --detach --wait" in text
     for unsafe in ("sudo ", "curl ", "source ", "eval "):
         assert unsafe not in text
@@ -282,11 +282,11 @@ def test_public_documentation_is_curated() -> None:
 
 def test_alerts_cover_recorded_remnawave_failure_outcomes() -> None:
     alerts = yaml.safe_load(
-        (ROOT / "deploy/prometheus/suppsystem-alerts.yml").read_text(encoding="utf-8")
+        (ROOT / "deploy/prometheus/resolvate-alerts.yml").read_text(encoding="utf-8")
     )
     rules = alerts["groups"][0]["rules"]
     external_failures = next(
-        rule for rule in rules if rule["alert"] == "suppsystemExternalRequestFailures"
+        rule for rule in rules if rule["alert"] == "ResolvateExternalRequestFailures"
     )
 
     assert "http_5xx" in external_failures["expr"]
@@ -306,7 +306,7 @@ def test_verification_enforces_coverage_threshold() -> None:
     assert '-n "$workers"' in unit_tests
     assert "--dist load" in unit_tests
     assert '-m "not postgres"' in unit_tests
-    assert "--cov=suppsystem" in unit_tests
+    assert "--cov=resolvate" in unit_tests
     assert "--cov-fail-under=" in unit_tests
     assert "PYTEST_SHARD_COUNT" in unit_tests
     assert "PYTEST_SHARD_INDEX" in unit_tests
